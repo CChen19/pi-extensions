@@ -92,14 +92,15 @@ test("skill answers from references or source and edits configuration safely", (
     "keep an untouched baseline file containing the exact bytes initially inspected",
     "saves the baseline permanently",
     "pi-starship-202609130742.toml",
-    "retained backups are never overwritten or removed",
+    "this check does not lock out another process before rename",
+    "retained backups are never deliberately removed",
     "use the explicit `--expect-missing` state",
     "stages the proposed bytes in the destination directory",
     "immediately re-reads the active path",
     "rejects publication when the active bytes differ",
-    "writes and flushes the durable backup without replacement",
-    "with private file permissions",
-    "removes an owned partial backup after a write failure",
+    "writes and flushes the backup to a private temporary file",
+    "atomically renames the completed backup into place",
+    "removes its owned temporary backup after a recoverable write or publication failure",
     "keep the durable timestamped backup",
     "do not claim cross-process synchronization",
     "When the pi-starship extension and `/starship status` command are available",
@@ -400,7 +401,7 @@ test("atomic apply backs up the exact inspected bytes of a malformed document", 
   }
 });
 
-test("backup creation removes a partial file and preserves an existing minute backup", async () => {
+test("backup creation stages partial writes and preserves an existing minute backup", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-partial-backup-"));
   const destinationPath = path.join(directory, "pi-starship.toml");
   const backupPath = path.join(directory, "pi-starship", "pi-starship-202609130742.toml");
@@ -416,6 +417,8 @@ test("backup creation removes a partial file and preserves an existing minute ba
           flags: Parameters<typeof open>[1],
           mode: Parameters<typeof open>[2],
         ) => {
+          assert.notEqual(filePath, backupPath);
+          assert.match(path.basename(String(filePath)), /^\.pi-starship-.*\.tmp$/u);
           const handle = await open(filePath, flags, mode);
           return {
             writeFile: async () => {
@@ -430,10 +433,12 @@ test("backup creation removes a partial file and preserves an existing minute ba
       /simulated backup write failure/u,
     );
     assert.equal(existsSync(backupPath), false);
+    assert.deepEqual(readdirSync(path.dirname(backupPath)), []);
 
     assert.equal(await backupExpectedDocument(destinationPath, expected, { now }), backupPath);
     await assert.rejects(backupExpectedDocument(destinationPath, Buffer.from("newer"), { now }), /already exists/u);
     assert.deepEqual(readFileSync(backupPath), expected);
+    assert.deepEqual(readdirSync(path.dirname(backupPath)), [path.basename(backupPath)]);
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }

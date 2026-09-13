@@ -83,7 +83,7 @@ Before replacing that document, the apply script saves the baseline permanently 
 
 For the default settings path, this backup directory is `<getAgentDir()>/pi-starship/`.
 
-If that minute's backup name already exists, publication stops without changing the active document; retained backups are never overwritten or removed by this workflow.
+If that minute's backup name exists when checked, publication stops without changing the active document; this check does not lock out another process before rename, and retained backups are never deliberately removed by this workflow.
 
 When the active document is missing, use the explicit `--expect-missing` state instead of creating a baseline or backup.
 
@@ -102,9 +102,9 @@ The apply script stages the proposed bytes in the destination directory, validat
 
 It rejects publication when the active bytes differ from the baseline or when a supposedly missing document has appeared.
 
-For an existing document, it then writes and flushes the durable backup without replacement and with private file permissions before renaming the staged file over the unchanged active path.
+For an existing document, it writes and flushes the backup to a private temporary file, confirms that the minute's final backup name is absent, and atomically renames the completed backup into place before renaming the staged configuration over the unchanged active path.
 
-It removes an owned partial backup after a write failure; if cleanup also fails, it reports both failures and still preserves the active document.
+It removes its owned temporary backup after a recoverable write or publication failure; if cleanup also fails, it reports both failures and still preserves the active document.
 
 This comparison does not lock out other processes after the re-read, so do not claim cross-process synchronization.
 

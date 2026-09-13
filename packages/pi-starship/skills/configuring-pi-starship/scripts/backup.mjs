@@ -1,4 +1,5 @@
-import { mkdir, open, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { formatDisplayValue } from "./script-support.mjs";
 
@@ -8,25 +9,29 @@ const PRIVATE_FILE_MODE = 0o600;
 export async function backupExpectedDocument(destinationPath, expected, options = {}) {
   const backupDirectory = join(dirname(destinationPath), "pi-starship");
   const backupPath = join(backupDirectory, `pi-starship-${localTimestamp(options.now ?? new Date())}.toml`);
+  const temporaryPath = join(backupDirectory, `.pi-starship-${randomUUID()}.tmp`);
+  const inspectPath = options.inspectPath ?? lstat;
   const makeDirectory = options.makeDirectory ?? mkdir;
   const openFile = options.openFile ?? open;
   const removeFile = options.removeFile ?? rm;
+  const renameFile = options.renameFile ?? rename;
 
   await makeDirectory(backupDirectory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
 
   let handle;
+  let ownsTemporaryPath = false;
   try {
-    handle = await openFile(backupPath, "wx", PRIVATE_FILE_MODE);
+    handle = await openFile(temporaryPath, "wx", PRIVATE_FILE_MODE);
+    ownsTemporaryPath = true;
     await handle.writeFile(expected);
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await assertBackupMissing(backupPath, inspectPath);
+    await renameFile(temporaryPath, backupPath);
+    ownsTemporaryPath = false;
     return backupPath;
   } catch (error) {
-    if (error && typeof error === "object" && error.code === "EEXIST") {
-      throw new Error(`Backup already exists at ${formatDisplayValue(backupPath)}; the active file was preserved.`);
-    }
-
     const cleanupErrors = [];
     if (handle) {
       try {
@@ -35,19 +40,31 @@ export async function backupExpectedDocument(destinationPath, expected, options 
         cleanupErrors.push(closeError);
       }
     }
-    try {
-      await removeFile(backupPath, { force: true });
-    } catch (removeError) {
-      cleanupErrors.push(removeError);
+    if (ownsTemporaryPath) {
+      try {
+        await removeFile(temporaryPath, { force: true });
+      } catch (removeError) {
+        cleanupErrors.push(removeError);
+      }
     }
     if (cleanupErrors.length > 0) {
       throw new AggregateError(
         [error, ...cleanupErrors],
-        "Backup creation failed and its partial file could not be removed; the active file was preserved.",
+        "Backup creation failed and its private temporary file could not be removed; the active file was preserved.",
       );
     }
     throw error;
   }
+}
+
+async function assertBackupMissing(backupPath, inspectPath) {
+  try {
+    await inspectPath(backupPath);
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error(`Backup already exists at ${formatDisplayValue(backupPath)}; the active file was preserved.`);
 }
 
 function localTimestamp(date) {

@@ -31,8 +31,8 @@ Cancellation, disposal, invalid drafts, write failures, and runtime application 
 
 The bundled `configuring-pi-starship` skill uses a separate external-edit workflow.
 Before its apply script replaces an existing document, it preserves the inspected document under `<getAgentDir()>/pi-starship/pi-starship-YYYYMMDDHHmm.toml`; these backups use local time and remain after a successful apply.
-Backups are created with private file permissions and flushed before publication continues; a recoverable write failure removes its owned partial backup and preserves the active document.
-A missing document creates no backup, and an existing backup with the same minute name blocks publication rather than being overwritten.
+Backups are written and flushed under a private temporary name, then atomically renamed to their final private file before publication continues; a recoverable failure removes the owned temporary file and preserves the active document.
+A missing document creates no backup, and a backup with the same minute name blocks publication when observed before rename; this check does not provide cross-process locking.
 The interactive `/starship` editor, preset, and restore flows do not invoke this script and keep their separately documented backup behavior.
 
 The shallow main menu also exposes **Presets**, **Explain footer**, **Modules**, **Configuration**, **Help**, and **Restore built-in…**.
