@@ -26,6 +26,7 @@ const referencesDirectory = path.join(skillDirectory, "references");
 const scriptsDirectory = path.join(skillDirectory, "scripts");
 const applyPath = path.join(scriptsDirectory, "apply.mjs");
 const backupScriptUrl = pathToFileURL(path.join(scriptsDirectory, "backup.mjs")).href;
+const scriptSupportUrl = pathToFileURL(path.join(scriptsDirectory, "script-support.mjs")).href;
 const configPathResolver = path.join(scriptsDirectory, "config-path.mjs");
 const validatorPath = path.join(scriptsDirectory, "validate.mjs");
 
@@ -100,7 +101,7 @@ test("skill answers from references or source and edits configuration safely", (
     "rejects publication when the active bytes differ",
     "writes and flushes the backup to a private temporary file",
     "atomically renames the completed backup into place",
-    "flushes the backup directory",
+    "flushes the backup directory and its parent directory",
     "reports the primary failure and every cleanup failure",
     "reports the retained backup path",
     "removes its owned temporary backup after a recoverable write or publication failure",
@@ -442,18 +443,18 @@ test("backup creation stages partial writes and preserves an existing minute bac
     assert.equal(existsSync(backupPath), false);
     assert.deepEqual(readdirSync(path.dirname(backupPath)), []);
 
-    let synchronizedDirectory: string | undefined;
+    const synchronizedDirectories: string[] = [];
     assert.equal(
       await backupExpectedDocument(destinationPath, expected, {
         now,
         syncDirectory: async (directoryPath: string) => {
-          synchronizedDirectory = directoryPath;
+          synchronizedDirectories.push(directoryPath);
           assert.deepEqual(readFileSync(backupPath), expected);
         },
       }),
       backupPath,
     );
-    assert.equal(synchronizedDirectory, path.dirname(backupPath));
+    assert.deepEqual(synchronizedDirectories, [path.dirname(backupPath), directory]);
     await assert.rejects(backupExpectedDocument(destinationPath, Buffer.from("newer"), { now }), /already exists/u);
     assert.deepEqual(readFileSync(backupPath), expected);
     assert.deepEqual(readdirSync(path.dirname(backupPath)), [path.basename(backupPath)]);
@@ -469,30 +470,34 @@ test("backup creation reports directory durability and cleanup failures", async 
   try {
     const { backupExpectedDocument } = await import(backupScriptUrl);
     const retainedPath = path.join(directory, "pi-starship", "pi-starship-202609130743.toml");
+    const synchronizedDirectories: string[] = [];
     await assert.rejects(
       backupExpectedDocument(destinationPath, expected, {
         now: new Date(2026, 8, 13, 7, 43),
-        syncDirectory: async () => {
-          throw new Error("simulated directory sync failure");
+        syncDirectory: async (directoryPath: string) => {
+          synchronizedDirectories.push(directoryPath);
+          if (directoryPath === directory) throw new Error("simulated parent directory sync failure");
         },
       }),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /Backup was retained/u);
         assert.match(error.message, /pi-starship-202609130743\.toml/u);
-        assert.match(error.message, /simulated directory sync failure/u);
+        assert.match(error.message, /simulated parent directory sync failure/u);
         return true;
       },
     );
+    assert.deepEqual(synchronizedDirectories, [path.dirname(retainedPath), directory]);
     assert.deepEqual(readFileSync(retainedPath), expected);
 
     let removalAttempted = false;
+    let diagnosticError: Error | undefined;
     await assert.rejects(
       backupExpectedDocument(destinationPath, expected, {
         now: new Date(2026, 8, 13, 7, 44),
         openFile: async () => ({
           writeFile: async () => {
-            throw new Error("simulated primary failure");
+            throw new Error(`simulated primary failure ${"x".repeat(5000)}`);
           },
           sync: async () => {},
           close: async () => {
@@ -506,6 +511,7 @@ test("backup creation reports directory durability and cleanup failures", async 
       }),
       (error: unknown) => {
         assert.ok(error instanceof Error);
+        diagnosticError = error;
         assert.match(error.message, /Backup creation failed: simulated primary failure/u);
         assert.match(error.message, /closing the temporary backup: simulated close failure/u);
         assert.match(error.message, /removing the temporary backup: simulated removal failure/u);
@@ -513,6 +519,13 @@ test("backup creation reports directory durability and cleanup failures", async 
       },
     );
     assert.equal(removalAttempted, true);
+    assert.ok(diagnosticError);
+    const { formatError } = await import(scriptSupportUrl);
+    const renderedError = formatError(diagnosticError);
+    assert.ok(renderedError.length <= 1000, `unbounded error: ${renderedError.length}`);
+    assert.match(renderedError, /Backup creation failed: simulated primary failure/u);
+    assert.match(renderedError, /closing the temporary backup: simulated close failure/u);
+    assert.match(renderedError, /removing the temporary backup: simulated removal failure/u);
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }
