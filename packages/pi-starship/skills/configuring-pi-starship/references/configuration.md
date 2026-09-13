@@ -29,6 +29,13 @@ Saving requires separate confirmation, then atomically updates the file and acti
 Manual TOML edits load at the next `session_start`, including `/reload` and session replacement.
 Cancellation, disposal, invalid drafts, write failures, and runtime application failures preserve the previous file and footer.
 
+The bundled `configuring-pi-starship` skill uses a separate external-edit workflow.
+Before its apply script replaces an existing document, it preserves the inspected document under `<getAgentDir()>/pi-starship/pi-starship-YYYYMMDDHHmm.toml`; these backups use local time and remain after a successful apply.
+Backups are written and flushed under a private temporary name, atomically renamed to their final private file, and followed by flushes of the backup directory and its parent directory before publication continues; a recoverable failure removes the owned temporary file and preserves the active document.
+If configuration publication fails after that backup is durable, the failure reports its retained path; cleanup failures report both their operation and cause without hiding the primary failure.
+A missing document creates no backup, and a backup with the same minute name blocks publication when observed before rename; this check does not provide cross-process locking.
+The interactive `/starship` editor, preset, and restore flows do not invoke this script and keep their separately documented backup behavior.
+
 The shallow main menu also exposes **Presets**, **Explain footer**, **Modules**, **Configuration**, **Help**, and **Restore built-in…**.
 Explain footer uses the current immutable runtime snapshot to list each currently showing non-empty module once with its rendered value and description; it starts no new collection work.
 Modules opens a bounded searchable inspector for every registered module.

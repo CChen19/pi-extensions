@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { open } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DefaultResourceLoader, loadSkillsFromDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { BUILT_IN_CONFIG, validateConfigDocument } from "../src/config.js";
@@ -15,6 +25,8 @@ const skillDirectory = path.join(skillsDirectory, "configuring-pi-starship");
 const referencesDirectory = path.join(skillDirectory, "references");
 const scriptsDirectory = path.join(skillDirectory, "scripts");
 const applyPath = path.join(scriptsDirectory, "apply.mjs");
+const backupScriptUrl = pathToFileURL(path.join(scriptsDirectory, "backup.mjs")).href;
+const scriptSupportUrl = pathToFileURL(path.join(scriptsDirectory, "script-support.mjs")).href;
 const configPathResolver = path.join(scriptsDirectory, "config-path.mjs");
 const validatorPath = path.join(scriptsDirectory, "validate.mjs");
 
@@ -79,10 +91,21 @@ test("skill answers from references or source and edits configuration safely", (
     "Do not enable network, command-backed, cloud, deployment, host, or user metadata",
     "Create a separate draft without changing the active document",
     "keep an untouched baseline file containing the exact bytes initially inspected",
+    "saves the baseline permanently",
+    "pi-starship-202609130742.toml",
+    "this check does not lock out another process before rename",
+    "retained backups are never deliberately removed",
     "use the explicit `--expect-missing` state",
     "stages the proposed bytes in the destination directory",
     "immediately re-reads the active path",
     "rejects publication when the active bytes differ",
+    "writes and flushes the backup to a private temporary file",
+    "atomically renames the completed backup into place",
+    "flushes the backup directory and its parent directory",
+    "reports the primary failure and every cleanup failure",
+    "reports the retained backup path",
+    "removes its owned temporary backup after a recoverable write or publication failure",
+    "keep the durable timestamped backup",
     "do not claim cross-process synchronization",
     "When the pi-starship extension and `/starship status` command are available",
     "When the extension or command is unavailable",
@@ -90,6 +113,10 @@ test("skill answers from references or source and edits configuration safely", (
   ]) {
     assert.ok(skill.includes(contract), `missing editing contract: ${contract}`);
   }
+
+  const applyScript = readFileSync(applyPath, "utf8");
+  assert.match(applyScript, /let backupPath;/u);
+  assert.match(applyScript, /Retained backup:/u);
 });
 
 test("skill references own the detailed public configuration guidance", () => {
@@ -299,9 +326,20 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
       encoding: "utf8",
     });
     assert.equal(applied.status, 0, applied.stderr);
+    assert.match(applied.stdout, /Backed up the previous TOML/u);
     assert.match(applied.stdout, /Applied valid TOML atomically/u);
     assert.equal(readFileSync(destinationPath, "utf8"), replacement);
-    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship.toml"]);
+    const backupDirectory = path.join(settingsDirectory, "pi-starship");
+    const backupFiles = readdirSync(backupDirectory);
+    assert.equal(backupFiles.length, 1);
+    assert.match(backupFiles[0] ?? "", /^pi-starship-\d{12}\.toml$/u);
+    const backupPath = path.join(backupDirectory, backupFiles[0] ?? "");
+    assert.equal(readFileSync(backupPath, "utf8"), original);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(backupDirectory).mode & 0o777, 0o700);
+      assert.equal(statSync(backupPath).mode & 0o777, 0o600);
+    }
+    assert.deepEqual(readdirSync(settingsDirectory).sort(), ["pi-starship", "pi-starship.toml"]);
 
     writeFileSync(baselinePath, replacement);
     writeFileSync(draftPath, "[model\n");
@@ -311,7 +349,8 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /Draft was not applied/u);
     assert.equal(readFileSync(destinationPath, "utf8"), replacement);
-    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship.toml"]);
+    assert.deepEqual(readdirSync(backupDirectory), backupFiles);
+    assert.deepEqual(readdirSync(settingsDirectory).sort(), ["pi-starship", "pi-starship.toml"]);
 
     const concurrent = 'format = "$brand"\n';
     writeFileSync(draftPath, original);
@@ -322,7 +361,8 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
     assert.equal(changed.status, 1);
     assert.match(changed.stderr, /changed after inspection/u);
     assert.equal(readFileSync(destinationPath, "utf8"), concurrent);
-    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship.toml"]);
+    assert.deepEqual(readdirSync(backupDirectory), backupFiles);
+    assert.deepEqual(readdirSync(settingsDirectory).sort(), ["pi-starship", "pi-starship.toml"]);
 
     writeFileSync(baselinePath, concurrent);
     rmSync(destinationPath);
@@ -331,7 +371,8 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
     });
     assert.equal(removed.status, 1);
     assert.match(removed.stderr, /removed after inspection/u);
-    assert.deepEqual(readdirSync(settingsDirectory), []);
+    assert.deepEqual(readdirSync(backupDirectory), backupFiles);
+    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship"]);
 
     const appearedDirectory = path.join(directory, "appeared-agent");
     const appearedPath = path.join(appearedDirectory, "pi-starship.toml");
@@ -350,7 +391,186 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
       encoding: "utf8",
     });
     assert.equal(created.status, 0, created.stderr);
+    assert.doesNotMatch(created.stdout, /Backed up/u);
     assert.equal(readFileSync(newDestination, "utf8"), original);
+    assert.deepEqual(readdirSync(path.dirname(newDestination)), ["pi-starship.toml"]);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("atomic apply backs up the exact inspected bytes of a malformed document", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-byte-backup-"));
+  const settingsDirectory = path.join(directory, "agent");
+  const destinationPath = path.join(settingsDirectory, "pi-starship.toml");
+  const draftPath = path.join(directory, "draft.toml");
+  const baselinePath = path.join(directory, "baseline.toml");
+  const original = Buffer.from([0xff, 0xfe, 0x00, 0x0a]);
+  try {
+    mkdirSync(settingsDirectory);
+    writeFileSync(destinationPath, original);
+    writeFileSync(baselinePath, original);
+    writeFileSync(draftPath, 'format = "$directory"\n');
+
+    const result = spawnSync(process.execPath, [applyPath, draftPath, destinationPath, baselinePath], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const backupDirectory = path.join(settingsDirectory, "pi-starship");
+    const backupFiles = readdirSync(backupDirectory);
+    assert.equal(backupFiles.length, 1);
+    assert.deepEqual(readFileSync(path.join(backupDirectory, backupFiles[0] ?? "")), original);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("backup creation stages partial writes and preserves an existing minute backup", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-partial-backup-"));
+  const destinationPath = path.join(directory, "pi-starship.toml");
+  const backupPath = path.join(directory, "pi-starship", "pi-starship-202609130742.toml");
+  const expected = Buffer.from("complete backup");
+  const now = new Date(2026, 8, 13, 7, 42);
+  try {
+    const { backupExpectedDocument } = await import(backupScriptUrl);
+    await assert.rejects(
+      backupExpectedDocument(destinationPath, expected, {
+        now,
+        openFile: async (
+          filePath: Parameters<typeof open>[0],
+          flags: Parameters<typeof open>[1],
+          mode: Parameters<typeof open>[2],
+        ) => {
+          assert.notEqual(filePath, backupPath);
+          assert.match(path.basename(String(filePath)), /^\.pi-starship-.*\.tmp$/u);
+          const handle = await open(filePath, flags, mode);
+          return {
+            writeFile: async () => {
+              await handle.writeFile(expected.subarray(0, 4));
+              throw new Error("simulated backup write failure");
+            },
+            sync: () => handle.sync(),
+            close: () => handle.close(),
+          };
+        },
+      }),
+      /simulated backup write failure/u,
+    );
+    assert.equal(existsSync(backupPath), false);
+    assert.deepEqual(readdirSync(path.dirname(backupPath)), []);
+
+    const synchronizedDirectories: string[] = [];
+    assert.equal(
+      await backupExpectedDocument(destinationPath, expected, {
+        now,
+        syncDirectory: async (directoryPath: string) => {
+          synchronizedDirectories.push(directoryPath);
+          assert.deepEqual(readFileSync(backupPath), expected);
+        },
+      }),
+      backupPath,
+    );
+    assert.deepEqual(synchronizedDirectories, [path.dirname(backupPath), directory]);
+    await assert.rejects(backupExpectedDocument(destinationPath, Buffer.from("newer"), { now }), /already exists/u);
+    assert.deepEqual(readFileSync(backupPath), expected);
+    assert.deepEqual(readdirSync(path.dirname(backupPath)), [path.basename(backupPath)]);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("backup creation reports directory durability and cleanup failures", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-backup-diagnostics-"));
+  const destinationPath = path.join(directory, "pi-starship.toml");
+  const expected = Buffer.from("complete backup");
+  try {
+    const { backupExpectedDocument } = await import(backupScriptUrl);
+    const retainedPath = path.join(directory, "pi-starship", "pi-starship-202609130743.toml");
+    const synchronizedDirectories: string[] = [];
+    await assert.rejects(
+      backupExpectedDocument(destinationPath, expected, {
+        now: new Date(2026, 8, 13, 7, 43),
+        syncDirectory: async (directoryPath: string) => {
+          synchronizedDirectories.push(directoryPath);
+          if (directoryPath === directory) throw new Error("simulated parent directory sync failure");
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Backup was retained/u);
+        assert.match(error.message, /pi-starship-202609130743\.toml/u);
+        assert.match(error.message, /simulated parent directory sync failure/u);
+        return true;
+      },
+    );
+    assert.deepEqual(synchronizedDirectories, [path.dirname(retainedPath), directory]);
+    assert.deepEqual(readFileSync(retainedPath), expected);
+
+    let removalAttempted = false;
+    let diagnosticError: Error | undefined;
+    await assert.rejects(
+      backupExpectedDocument(destinationPath, expected, {
+        now: new Date(2026, 8, 13, 7, 44),
+        openFile: async () => ({
+          writeFile: async () => {
+            throw new Error(`simulated primary failure ${"x".repeat(5000)}`);
+          },
+          sync: async () => {},
+          close: async () => {
+            throw new Error("simulated close failure");
+          },
+        }),
+        removeFile: async () => {
+          removalAttempted = true;
+          throw new Error("simulated removal failure");
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        diagnosticError = error;
+        assert.match(error.message, /Backup creation failed: simulated primary failure/u);
+        assert.match(error.message, /closing the temporary backup: simulated close failure/u);
+        assert.match(error.message, /removing the temporary backup: simulated removal failure/u);
+        return true;
+      },
+    );
+    assert.equal(removalAttempted, true);
+    assert.ok(diagnosticError);
+    const { formatError } = await import(scriptSupportUrl);
+    const renderedError = formatError(diagnosticError);
+    assert.ok(renderedError.length <= 1000, `unbounded error: ${renderedError.length}`);
+    assert.match(renderedError, /Backup creation failed: simulated primary failure/u);
+    assert.match(renderedError, /closing the temporary backup: simulated close failure/u);
+    assert.match(renderedError, /removing the temporary backup: simulated removal failure/u);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("atomic apply preserves the active document when its durable backup cannot be written", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-backup-failure-"));
+  const settingsDirectory = path.join(directory, "agent");
+  const destinationPath = path.join(settingsDirectory, "pi-starship.toml");
+  const backupDirectory = path.join(settingsDirectory, "pi-starship");
+  const draftPath = path.join(directory, "draft.toml");
+  const baselinePath = path.join(directory, "baseline.toml");
+  const original = 'format = "$model"\n';
+  try {
+    mkdirSync(settingsDirectory);
+    writeFileSync(destinationPath, original);
+    writeFileSync(backupDirectory, "occupied");
+    writeFileSync(draftPath, 'format = "$directory"\n');
+    writeFileSync(baselinePath, original);
+
+    const result = spawnSync(process.execPath, [applyPath, draftPath, destinationPath, baselinePath], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Draft was not applied/u);
+    assert.equal(readFileSync(destinationPath, "utf8"), original);
+    assert.equal(readFileSync(backupDirectory, "utf8"), "occupied");
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }

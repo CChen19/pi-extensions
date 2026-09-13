@@ -79,7 +79,13 @@ Create a separate draft without changing the active document, then make the smal
 
 When the active document exists, also keep an untouched baseline file containing the exact bytes initially inspected.
 
-When it is missing, use the explicit `--expect-missing` state instead of creating a baseline.
+Before replacing that document, the apply script saves the baseline permanently under `<directory containing pi-starship.toml>/pi-starship/` with a local-time name such as `pi-starship-202609130742.toml`.
+
+For the default settings path, this backup directory is `<getAgentDir()>/pi-starship/`.
+
+If that minute's backup name exists when checked, publication stops without changing the active document; this check does not lock out another process before rename, and retained backups are never deliberately removed by this workflow.
+
+When the active document is missing, use the explicit `--expect-missing` state instead of creating a baseline or backup.
 
 Resolve the bundled scripts relative to this `SKILL.md`, validate the draft, and publish it through the guarded atomic apply script:
 
@@ -94,15 +100,23 @@ node "$skill_dir/scripts/apply.mjs" "$draft_path" "$config_path" "$expected_stat
 
 The apply script stages the proposed bytes in the destination directory, validates that staged file, and immediately re-reads the active path.
 
-It rejects publication when the active bytes differ from the baseline or when a supposedly missing document has appeared, then renames the staged file over the unchanged path.
+It rejects publication when the active bytes differ from the baseline or when a supposedly missing document has appeared.
+
+For an existing document, it writes and flushes the backup to a private temporary file, confirms that the minute's final backup name is absent, atomically renames the completed backup into place, and flushes the backup directory and its parent directory before renaming the staged configuration over the unchanged active path.
+
+It removes its owned temporary backup after a recoverable write or publication failure; if cleanup also fails, it reports the primary failure and every cleanup failure while preserving the active document.
+
+If configuration publication fails after the backup is durable, it reports the retained backup path and preserves the active document.
 
 This comparison does not lock out other processes after the re-read, so do not claim cross-process synchronization.
 
 Fix every TOML syntax error and rerun the validator unless the user explicitly requested an invalid test fixture, which must not replace the active document.
 
-Remove the separate draft and baseline after a successful publication, then re-read the saved document and review the exact change for accidental replacement or unrelated edits.
+Remove the separate draft and temporary baseline after a successful publication, but keep the durable timestamped backup.
 
-Report the edited path, the effective layout or module change, and the validator and atomic-publication results.
+Then re-read the saved document and review the exact change for accidental replacement or unrelated edits.
+
+Report the edited path, durable backup path when one was created, effective layout or module change, and validator and atomic-publication results.
 
 External edits do not update an active footer immediately.
 
