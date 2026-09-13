@@ -94,6 +94,11 @@ test("effective configuration projects every public catalog field in stable orde
   assert.ok(serialized.indexOf("[brand]") < serialized.indexOf("[provider]"));
   assert.ok(serialized.indexOf("[provider]") < serialized.indexOf("[model]"));
   assert.deepEqual(normalizeConfig(parse(serialized)).config, BUILT_IN_CONFIG);
+
+  const unsupported = structuredClone(BUILT_IN_CONFIG);
+  unsupported.modules.directory.styleRules = [{ selectors: {}, style: "red" }];
+  const unsupportedDirectory = projectEffectiveConfig(unsupported).directory as Record<string, unknown>;
+  assert.equal(Object.hasOwn(unsupportedDirectory, "style_rules"), false);
 });
 
 test("effective configuration normalizes custom public values without document-only data", () => {

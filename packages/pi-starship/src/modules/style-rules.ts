@@ -6,7 +6,15 @@ export function resolveStyleRule(
   context: ModuleStyleContext,
 ): string | undefined {
   for (const rule of rules) {
-    const matches = Object.entries(rule.selectors).every(([name, expected]) => selectors[name]?.(context) === expected);
+    let matches = true;
+    for (const name in rule.selectors) {
+      if (!Object.hasOwn(rule.selectors, name)) continue;
+      const selector = Object.hasOwn(selectors, name) ? selectors[name] : undefined;
+      if (!selector || selector(context) !== rule.selectors[name]) {
+        matches = false;
+        break;
+      }
+    }
     if (matches) return rule.style;
   }
   return undefined;
