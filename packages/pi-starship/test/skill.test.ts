@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DefaultResourceLoader, loadSkillsFromDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
-import { BUILT_IN_CONFIG } from "../src/config.js";
+import { BUILT_IN_CONFIG, validateConfigDocument } from "../src/config.js";
 import { MODULE_DEFINITIONS, MODULE_NAMES } from "../src/modules/catalog.js";
 
 const packageDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -101,6 +101,7 @@ test("skill references own the detailed public configuration guidance", () => {
       "### Diagnostic and fallback behavior",
       "## 🧩 Format grammar",
       "## 🎨 Styles and palettes",
+      "### Content-selected styles",
     ],
     "module-catalog.md": ["## Shared module fields", "## Catalog order", "## Module schemas"],
     "modules.md": [
@@ -133,6 +134,15 @@ test("skill references own the detailed public configuration guidance", () => {
   for (const file of Object.keys(expectedCoverage)) {
     assert.ok(readme.includes(`./skills/configuring-pi-starship/references/${file}`));
   }
+  const configuration = readFileSync(path.join(referencesDirectory, "configuration.md"), "utf8");
+  assert.match(configuration, /format = "\$provider\$model\$thinking"/u);
+  assert.match(configuration, /runtime value is unavailable.*does not match/iu);
+  const example = /### 📝 Example[\s\S]*?```toml\n(?<document>[\s\S]*?)\n```/u.exec(configuration)?.groups?.document;
+  assert.ok(example);
+  assert.deepEqual(validateConfigDocument("/reference/pi-starship.toml", example).diagnostics, []);
+  const modules = readFileSync(path.join(referencesDirectory, "modules.md"), "utf8");
+  assert.match(modules, /match `style_rules` against raw provider\/model IDs/iu);
+
   for (const movedHeading of [
     "## 🧩 Format grammar",
     "## 🎨 Styles and palettes",
@@ -184,6 +194,13 @@ test("complete module catalog covers every public module schema", () => {
     }
     if (definition.displayDefaults) {
       assert.ok(section.includes(`Default \`display\`: ${markdownCode(definition.displayDefaults)}`));
+    }
+    const styleRuleSelectors = Object.keys(definition.styleRuleSelectors ?? {});
+    if (styleRuleSelectors.length > 0) {
+      assert.ok(section.includes("Accepted style-rule selectors (`style_rules` default: `[]`)"));
+      for (const selector of styleRuleSelectors) {
+        assert.ok(section.includes(`| \`${selector}\` |`), `${definition.name}.${selector} is missing`);
+      }
     }
 
     for (const [name, schema] of Object.entries(definition.options ?? {})) {

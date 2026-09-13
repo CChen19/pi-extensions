@@ -14,6 +14,8 @@ export interface ModuleInspection {
   preview: string;
   variables: readonly string[];
   styleFields: readonly string[];
+  styleRuleSelectors: readonly string[];
+  styleRuleCount: number;
   displayRules: readonly string[];
   rootReferenced: boolean;
   reachable: boolean;
@@ -98,6 +100,8 @@ function moduleInspection(
     preview,
     variables: [...definition.variables],
     styleFields: ["style", ...Object.keys(module.styles)],
+    styleRuleSelectors: Object.keys(definition.styleRuleSelectors ?? {}),
+    styleRuleCount: module.styleRules.length,
     displayRules: module.display.map(
       (rule) => `${rule.threshold}: ${rule.hidden ? "hidden" : rule.style || "unstyled"}`,
     ),

@@ -1,6 +1,6 @@
 # Configuration and Format Reference
 
-Use this authoritative public reference for configuration location and persistence, presets, complete-document examples, format grammar, styles, palettes, and state-selected styles.
+Use this authoritative public reference for configuration location and persistence, presets, complete-document examples, format grammar, styles, palettes, content-selected styles, and state-selected styles.
 
 ## ⚙️ Settings
 
@@ -33,7 +33,7 @@ The shallow main menu also exposes **Presets**, **Explain footer**, **Modules**,
 Explain footer uses the current immutable runtime snapshot to list each currently showing non-empty module once with its rendered value and description; it starts no new collection work.
 Modules opens a bounded searchable inspector for every registered module.
 Its textual states distinguish **Showing**, **Empty**, **Disabled**, **Not in format**, and **Unavailable** only when the current footer cannot provide an inspection snapshot.
-Module detail shows the current preview when available, description, root reference and reachability, format variables, style fields, display rules, and the known reason for absent output.
+Module detail shows the current preview when available, description, root reference and reachability, format variables, style fields, supported style-rule selectors, configured rule count, display rules, and the known reason for absent output.
 Both views are read-only and do not create or update the settings document.
 
 Configuration contains **Overview**, **Effective configuration**, **Settings document**, and **Reload from disk** on one nested level.
@@ -90,6 +90,7 @@ There is no `/starship preset` textual route and no remote preset download.
 ```toml
 format = """
 $brand\
+$provider\
 $model\
 $thinking\
 $directory\
@@ -106,6 +107,21 @@ style = "bold blue"
 truncation_length = 36
 truncation_symbol = "…"
 truncation_direction = "middle"
+
+[provider]
+style = "bold green"
+
+[[provider.style_rules]]
+provider = "openai"
+style = "bold blue"
+
+[[model.style_rules]]
+provider = "openai"
+style = "bold blue"
+
+[[thinking.style_rules]]
+provider = "openai"
+style = "bold blue"
 
 [directory]
 style = "cyan bold"
@@ -195,6 +211,7 @@ The exact accepted style fields, display arrays, module-specific options, defaul
 `disabled` must be boolean.
 A standard `style` field must be a valid style string.
 `thinking` accepts `style` plus `style_off`, `style_minimal`, `style_low`, `style_medium`, `style_high`, `style_xhigh`, and `style_max`.
+`provider`, `model`, and `thinking` additionally accept the ordered `style_rules` arrays described under [Content-selected styles](#content-selected-styles).
 `git_metrics` accepts `added_style` and `deleted_style` instead of `style`.
 `username` accepts `style_user` and `style_root` instead of `style`.
 `context` and `cost` accept `display` arrays instead of a direct `style` field.
@@ -245,6 +262,8 @@ Detection fallback and replacement behavior differs by module and is specified i
 | Unknown format or style variable | Warn and render that variable empty. |
 | Invalid literal group style | Warn and render that group unstyled. |
 | Invalid module style field | Warn and restore only that style field's module default. |
+| Invalid `style_rules` value | Warn and use an empty rule array for that module. |
+| Invalid style-rule entry | Warn and discard only that entry. |
 | Invalid palette color | Warn and omit only that palette entry. |
 | Invalid module option | Warn and restore only that option's default. |
 | Invalid display entry | Warn and discard only that entry; restore defaults if none remain. |
@@ -303,6 +322,48 @@ An invalid root format falls back to the built-in root format; an invalid module
 
 The background-free defaults are: `brand = "bold white"`, `provider`/`model` = `"bold blue"`, `thinking`/`git_branch`/`turn` = `"bold purple"`, `directory`/`git_worktree` = `"cyan bold"`, `github_pr = "bold blue"`, `git_commit = "green bold"`, `git_state`/`activity`/`time` = `"bold yellow"`, `git_status = "red bold"`, `tokens = "bold cyan"`, `cache = "bold green"`, `extension_status = "dimmed white"`, `direnv = "bold bright-yellow"`, and `fill = "bold black"`.
 Context, cost, Git metrics, and username use the state/multi-style defaults below.
+
+### Content-selected styles
+
+`provider`, `model`, and `thinking` can replace their `$style` value with the first matching entry from an ordered `style_rules` array.
+The built-in root format omits `provider`, so add `$provider` to a custom root format or use `$all` when provider output should be visible:
+
+```toml
+format = "$provider$model$thinking"
+
+[provider]
+style = "bold green"
+
+[[provider.style_rules]]
+provider = "openai"
+style = "bold blue"
+
+[[provider.style_rules]]
+style = "bold white" # catch-all because it declares no selectors
+```
+
+Matching is exact and case-sensitive.
+Every selector declared by a rule must match, rules are checked in document order, and the first complete match wins.
+A rule containing only `style` is a catch-all, so later entries cannot win after it.
+When a declared runtime value is unavailable, that rule does not match.
+If no rule matches, the module keeps its existing selected style: ordinary `style` for `provider` and `model`, and the matching non-empty `style_<level>` or `style` fallback for `thinking`.
+A selected rule changes only `$style`, so a custom module format without `$style` has no visible style change.
+
+The exact selectors are:
+
+| Module | Selector | Compared value |
+| --- | --- | --- |
+| `provider` | `provider` | Raw Pi provider ID. |
+| `model` | `provider` | Raw Pi provider ID. |
+| `model` | `model` | Raw Pi model ID. |
+| `thinking` | `provider` | Raw Pi provider ID. |
+| `thinking` | `level` | Current Pi thinking-level string. |
+
+Provider and model aliases, built-in model shortening, configured truncation, and terminal display sanitization do not change these raw selector values.
+Style-rule styles use the selected palette and the same style grammar as other style fields.
+An unknown field, unsupported selector, non-string selector, missing style, or invalid style warns and discards only that rule; valid sibling rules remain ordered and active.
+An invalid non-array `style_rules` value warns and restores the empty default.
+`style_rules` on any other module is an unknown setting.
 
 ### Thinking level styles
 

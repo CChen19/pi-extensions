@@ -12,6 +12,9 @@ export const providerModule = defineModule({
     style: "bold blue",
     disabled: false,
   },
+  styleRuleSelectors: {
+    provider: ({ runtime }) => runtime.model?.provider,
+  },
   options: {
     [PROVIDER_ALIASES_KEY]: { kind: "string-map", default: {} },
   },

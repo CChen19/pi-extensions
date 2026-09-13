@@ -28,6 +28,9 @@ export function projectEffectiveConfig(config: StarshipConfig): TomlTable {
     if (definition.displayDefaults) {
       table.display = module.display.map((entry) => ({ ...entry }));
     }
+    if (definition.styleRuleSelectors && module.styleRules.length > 0) {
+      table.style_rules = module.styleRules.map((rule) => ({ ...rule.selectors, style: rule.style }));
+    }
     table.disabled = module.disabled;
     for (const key of Object.keys(definition.options ?? {})) {
       table[key] = cloneOptionValue(module.options[key]);

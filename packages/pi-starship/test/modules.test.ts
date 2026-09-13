@@ -164,6 +164,88 @@ test("thinking level styles override the compatible module fallback", () => {
   assert.deepEqual(future?.style, low?.style);
 });
 
+test("content style rules use raw values, first-match order, palettes, and existing fallbacks", () => {
+  const rawModel = "claude-sonnet-4-20250514";
+  const { config, diagnostics } = normalizeConfig({
+    format: "$provider$model$thinking",
+    palette: "mine",
+    palettes: { mine: { accent: "#010203" } },
+    provider: {
+      format: "[$provider]($style)",
+      style: "green",
+      style_rules: [
+        { provider: "anthropic", style: "accent" },
+        { provider: "anthropic", style: "red" },
+      ],
+    },
+    model: {
+      format: "[$model]($style)",
+      style: "green",
+      model_aliases: { [rawModel]: "friendly-model" },
+      truncation_length: 4,
+      style_rules: [
+        { provider: "anthropic", model: rawModel, style: "blue" },
+        { model: "__proto__", style: "yellow" },
+        { provider: "anthropic", style: "red" },
+      ],
+    },
+    thinking: {
+      format: "[$level]($style)",
+      style: "purple",
+      style_high: "yellow",
+      style_rules: [
+        { provider: "anthropic", level: "high", style: "cyan" },
+        { provider: "anthropic", style: "blue" },
+      ],
+    },
+  });
+  assert.deepEqual(diagnostics, []);
+
+  const anthropic = renderStatusline(config, fixture({ model: { provider: "anthropic", id: rawModel } }));
+  assert.deepEqual(anthropic.modules.provider[0]?.style?.foreground, {
+    kind: "rgb",
+    red: 1,
+    green: 2,
+    blue: 3,
+  });
+  assert.deepEqual(anthropic.modules.model[0]?.style?.foreground, { kind: "named", name: "blue" });
+  assert.equal(anthropic.modules.model[0]?.text, "frie…");
+  assert.deepEqual(anthropic.modules.thinking[0]?.style?.foreground, { kind: "named", name: "cyan" });
+
+  const low = renderStatusline(config, fixture({ thinkingLevel: "low" }));
+  assert.deepEqual(low.modules.thinking[0]?.style?.foreground, { kind: "named", name: "blue" });
+
+  const unmatched = renderStatusline(
+    config,
+    fixture({ model: { provider: "Anthropic", id: rawModel }, thinkingLevel: "high" }),
+  );
+  assert.deepEqual(unmatched.modules.provider[0]?.style?.foreground, { kind: "named", name: "green" });
+  assert.deepEqual(unmatched.modules.model[0]?.style?.foreground, { kind: "named", name: "green" });
+  assert.deepEqual(unmatched.modules.thinking[0]?.style?.foreground, { kind: "named", name: "yellow" });
+
+  const prototypeLike = renderStatusline(
+    config,
+    fixture({ model: { provider: "openai", id: "__proto__" }, thinkingLevel: "high" }),
+  );
+  assert.deepEqual(prototypeLike.modules.model[0]?.style?.foreground, { kind: "named", name: "yellow" });
+
+  const noModel = renderStatusline(config, fixture({ model: undefined, thinkingLevel: "high" }));
+  assert.deepEqual(noModel.modules.thinking[0]?.style?.foreground, { kind: "named", name: "yellow" });
+});
+
+test("a selectorless style rule is an ordered catch-all", () => {
+  const config = normalizeConfig({
+    format: "$thinking",
+    thinking: {
+      format: "[$level]($style)",
+      style_rules: [{ provider: "openai", style: "red" }, { style: "white" }, { level: "high", style: "blue" }],
+    },
+  }).config;
+
+  const rendered = renderStatusline(config, fixture({ model: undefined, thinkingLevel: "high" }));
+  assert.deepEqual(rendered.modules.thinking[0]?.style?.foreground, { kind: "named", name: "white" });
+});
+
 test("thinking fallback keeps bundled Powerline preset backgrounds and modifiers", () => {
   for (const id of ["catppuccin-powerline", "gruvbox-rainbow", "pastel-powerline", "tokyo-night"] as const) {
     const preset = STARSHIP_PRESETS.find((candidate) => candidate.id === id);

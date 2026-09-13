@@ -30,6 +30,10 @@ export const thinkingModule = defineModule({
   >,
   fallbackStyle: true,
   styleVariables: ["style"],
+  styleRuleSelectors: {
+    provider: ({ runtime }) => runtime.model?.provider,
+    level: ({ runtime }) => runtime.thinkingLevel,
+  },
   resolveStyleVariables: ({ runtime, styles, style }) => {
     const level = thinkingLevelOf(runtime.thinkingLevel);
     return { style: (level && styles[`style_${level}`]) || style };

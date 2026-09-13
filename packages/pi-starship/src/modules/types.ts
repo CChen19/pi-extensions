@@ -145,6 +145,11 @@ export interface ModuleDisplayConfig {
   hidden: boolean;
 }
 
+export interface ModuleStyleRule {
+  style: string;
+  selectors: Readonly<Record<string, string>>;
+}
+
 export interface ModuleDefaults {
   format: string;
   symbol: string;
@@ -160,6 +165,8 @@ export interface ModuleStyleContext {
   display: readonly ModuleDisplayConfig[];
 }
 
+export type ModuleStyleSelector = (context: ModuleStyleContext) => string | undefined;
+
 export interface ModuleDefinition<Name extends string> {
   name: Name;
   variables: readonly string[];
@@ -168,6 +175,7 @@ export interface ModuleDefinition<Name extends string> {
   fallbackStyle?: boolean;
   displayDefaults?: readonly ModuleDisplayConfig[];
   styleVariables?: readonly string[];
+  styleRuleSelectors?: Readonly<Record<string, ModuleStyleSelector>>;
   resolveStyleVariables?(context: ModuleStyleContext): Readonly<Record<string, string>> | undefined;
   options?: Readonly<Record<string, ModuleOptionSchema>>;
   layout?: "fill";

@@ -3,7 +3,8 @@ import { activePalette, type ModuleConfig, type StarshipConfig } from "../config
 import { type FormatValue, formatVariables, renderFormat } from "../format/formatter.js";
 import { isFillChunk, type LayoutChunk, renderChunksToAnsi, type StyledChunk } from "../format/style.js";
 import { MODULE_DEFINITIONS, MODULE_NAMES, type ModuleName } from "./catalog.js";
-import type { ModuleValueContext, RenderedStatusline, StarshipRuntimeSnapshot } from "./types.js";
+import { resolveStyleRule } from "./style-rules.js";
+import type { ModuleStyleContext, ModuleValueContext, RenderedStatusline, StarshipRuntimeSnapshot } from "./types.js";
 
 export function renderStatusline(
   config: StarshipConfig,
@@ -23,16 +24,21 @@ export function renderStatusline(
     const module = config.modules[name];
     const values = definition.values(valueContext(config, name, runtime));
     if (!values) continue;
-    const styleVariables = definition.resolveStyleVariables
-      ? definition.resolveStyleVariables({
-          runtime,
-          values,
-          style: module.style,
-          styles: module.styles,
-          display: module.display,
-        })
+    const styleContext: ModuleStyleContext = {
+      runtime,
+      values,
+      style: module.style,
+      styles: module.styles,
+      display: module.display,
+    };
+    const baseStyleVariables = definition.resolveStyleVariables
+      ? definition.resolveStyleVariables(styleContext)
       : { style: module.style };
-    if (!styleVariables) continue;
+    if (!baseStyleVariables) continue;
+    const ruleStyle = definition.styleRuleSelectors
+      ? resolveStyleRule(module.styleRules, definition.styleRuleSelectors, styleContext)
+      : undefined;
+    const styleVariables = ruleStyle === undefined ? baseStyleVariables : { ...baseStyleVariables, style: ruleStyle };
     const contentValues = Object.fromEntries(
       definition.variables.flatMap((variable) =>
         variable !== "symbol" && Object.hasOwn(values, variable) ? [[variable, values[variable]]] : [],

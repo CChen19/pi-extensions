@@ -98,13 +98,20 @@ test("unavailable inspection preserves config-derived disabled and reachability 
 });
 
 test("module inspection exposes read-only detail metadata", () => {
-  const inspection = inspectStatuslineModules(configWithFormat("$all"), fixture(), 80);
+  const config = configWithFormat("$all");
+  config.modules.model.styleRules = [{ selectors: { provider: "anthropic" }, style: "blue" }];
+  const inspection = inspectStatuslineModules(config, fixture(), 80);
   const username = inspection.modules.find((module) => module.name === "username");
+  const model = inspection.modules.find((module) => module.name === "model");
   const context = inspection.modules.find((module) => module.name === "context");
 
   assert.deepEqual(username?.styleFields, ["style", "style_user", "style_root"]);
   assert.ok(username?.variables.includes("user"));
   assert.equal(username?.reachable, true);
+  assert.deepEqual(model?.styleRuleSelectors, ["provider", "model"]);
+  assert.equal(model?.styleRuleCount, 1);
+  assert.deepEqual(username?.styleRuleSelectors, []);
+  assert.equal(username?.styleRuleCount, 0);
   assert.ok((context?.displayRules.length ?? 0) > 0);
   assert.equal(inspection.modules.length, MODULE_DEFINITIONS.length);
 });

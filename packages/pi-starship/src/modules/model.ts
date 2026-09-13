@@ -14,6 +14,10 @@ export const modelModule = defineModule({
     style: "bold blue",
     disabled: false,
   },
+  styleRuleSelectors: {
+    provider: ({ runtime }) => runtime.model?.provider,
+    model: ({ runtime }) => runtime.model?.id,
+  },
   options: {
     truncation_length: { kind: "integer", default: 0, minimum: 0, maximum: 1000 },
     truncation_symbol: { kind: "string", default: "…" },

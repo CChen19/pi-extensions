@@ -217,6 +217,8 @@ provider_aliases = { "openai-codex" = "codex", "amazon-bedrock" = "bedrock" }
 
 An empty alias hides only the provider text.
 Provider names and aliases are stripped of terminal controls at render time.
+The `provider`, `model`, and `thinking` modules match `style_rules` against raw provider/model IDs and thinking levels before aliases, built-in model shortening, configured truncation, or display sanitization.
+A selector whose runtime value is unavailable does not match; exact selector fields and precedence are documented in [Configuration and Format](configuration.md#content-selected-styles).
 For example, `middle` can retain both a Hugging Face model family and its variant, while `start` is useful when a llama.cpp server reports an absolute model path.
 pi-starship treats model IDs as opaque strings and does not parse paths, repositories, GGUF suffixes, or quantization names.
 
