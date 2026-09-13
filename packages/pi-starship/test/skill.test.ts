@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { open } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DefaultResourceLoader, loadSkillsFromDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { BUILT_IN_CONFIG } from "../src/config.js";
@@ -15,6 +25,7 @@ const skillDirectory = path.join(skillsDirectory, "configuring-pi-starship");
 const referencesDirectory = path.join(skillDirectory, "references");
 const scriptsDirectory = path.join(skillDirectory, "scripts");
 const applyPath = path.join(scriptsDirectory, "apply.mjs");
+const backupScriptUrl = pathToFileURL(path.join(scriptsDirectory, "backup.mjs")).href;
 const configPathResolver = path.join(scriptsDirectory, "config-path.mjs");
 const validatorPath = path.join(scriptsDirectory, "validate.mjs");
 
@@ -86,7 +97,9 @@ test("skill answers from references or source and edits configuration safely", (
     "stages the proposed bytes in the destination directory",
     "immediately re-reads the active path",
     "rejects publication when the active bytes differ",
-    "writes the durable backup without replacement",
+    "writes and flushes the durable backup without replacement",
+    "with private file permissions",
+    "removes an owned partial backup after a write failure",
     "keep the durable timestamped backup",
     "do not claim cross-process synchronization",
     "When the pi-starship extension and `/starship status` command are available",
@@ -294,7 +307,12 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
     const backupFiles = readdirSync(backupDirectory);
     assert.equal(backupFiles.length, 1);
     assert.match(backupFiles[0] ?? "", /^pi-starship-\d{12}\.toml$/u);
-    assert.equal(readFileSync(path.join(backupDirectory, backupFiles[0] ?? ""), "utf8"), original);
+    const backupPath = path.join(backupDirectory, backupFiles[0] ?? "");
+    assert.equal(readFileSync(backupPath, "utf8"), original);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(backupDirectory).mode & 0o777, 0o700);
+      assert.equal(statSync(backupPath).mode & 0o777, 0o600);
+    }
     assert.deepEqual(readdirSync(settingsDirectory).sort(), ["pi-starship", "pi-starship.toml"]);
 
     writeFileSync(baselinePath, replacement);
@@ -377,6 +395,45 @@ test("atomic apply backs up the exact inspected bytes of a malformed document", 
     const backupFiles = readdirSync(backupDirectory);
     assert.equal(backupFiles.length, 1);
     assert.deepEqual(readFileSync(path.join(backupDirectory, backupFiles[0] ?? "")), original);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("backup creation removes a partial file and preserves an existing minute backup", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-partial-backup-"));
+  const destinationPath = path.join(directory, "pi-starship.toml");
+  const backupPath = path.join(directory, "pi-starship", "pi-starship-202609130742.toml");
+  const expected = Buffer.from("complete backup");
+  const now = new Date(2026, 8, 13, 7, 42);
+  try {
+    const { backupExpectedDocument } = await import(backupScriptUrl);
+    await assert.rejects(
+      backupExpectedDocument(destinationPath, expected, {
+        now,
+        openFile: async (
+          filePath: Parameters<typeof open>[0],
+          flags: Parameters<typeof open>[1],
+          mode: Parameters<typeof open>[2],
+        ) => {
+          const handle = await open(filePath, flags, mode);
+          return {
+            writeFile: async () => {
+              await handle.writeFile(expected.subarray(0, 4));
+              throw new Error("simulated backup write failure");
+            },
+            sync: () => handle.sync(),
+            close: () => handle.close(),
+          };
+        },
+      }),
+      /simulated backup write failure/u,
+    );
+    assert.equal(existsSync(backupPath), false);
+
+    assert.equal(await backupExpectedDocument(destinationPath, expected, { now }), backupPath);
+    await assert.rejects(backupExpectedDocument(destinationPath, Buffer.from("newer"), { now }), /already exists/u);
+    assert.deepEqual(readFileSync(backupPath), expected);
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }

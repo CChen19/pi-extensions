@@ -102,7 +102,9 @@ The apply script stages the proposed bytes in the destination directory, validat
 
 It rejects publication when the active bytes differ from the baseline or when a supposedly missing document has appeared.
 
-For an existing document, it then writes the durable backup without replacement before renaming the staged file over the unchanged active path.
+For an existing document, it then writes and flushes the durable backup without replacement and with private file permissions before renaming the staged file over the unchanged active path.
+
+It removes an owned partial backup after a write failure; if cleanup also fails, it reports both failures and still preserves the active document.
 
 This comparison does not lock out other processes after the re-read, so do not claim cross-process synchronization.
 

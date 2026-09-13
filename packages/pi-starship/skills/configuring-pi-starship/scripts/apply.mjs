@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { parse } from "smol-toml";
+import { backupExpectedDocument } from "./backup.mjs";
 import { formatDisplayValue, formatError } from "./script-support.mjs";
 
 const [draftPath, destinationPath, expectedPath, ...extraArguments] = process.argv.slice(2);
@@ -44,27 +45,6 @@ if (!draftPath || !destinationPath || !expectedPath || extraArguments.length > 0
       }
     }
   }
-}
-
-async function backupExpectedDocument(destinationPath, expected) {
-  const backupDirectory = join(dirname(destinationPath), "pi-starship");
-  const backupPath = join(backupDirectory, `pi-starship-${localTimestamp(new Date())}.toml`);
-  await mkdir(backupDirectory, { recursive: true });
-  try {
-    await writeFile(backupPath, expected, { flag: "wx" });
-  } catch (error) {
-    if (error && typeof error === "object" && error.code === "EEXIST") {
-      throw new Error(`Backup already exists at ${formatDisplayValue(backupPath)}; the active file was preserved.`);
-    }
-    throw error;
-  }
-  return backupPath;
-}
-
-function localTimestamp(date) {
-  return [date.getFullYear(), date.getMonth() + 1, date.getDate(), date.getHours(), date.getMinutes()]
-    .map((value, index) => String(value).padStart(index === 0 ? 4 : 2, "0"))
-    .join("");
 }
 
 async function assertDestinationUnchanged(destinationPath, expectMissing, expected) {
