@@ -19,6 +19,7 @@ if (!draftPath || !destinationPath || !expectedPath || extraArguments.length > 0
   process.exitCode = 2;
 } else {
   let temporaryPath;
+  let backupPath;
   try {
     const draft = await readFile(draftPath, "utf8");
     const expectMissing = expectedPath === "--expect-missing";
@@ -28,13 +29,14 @@ if (!draftPath || !destinationPath || !expectedPath || extraArguments.length > 0
     await writeFile(temporaryPath, draft, { encoding: "utf8", flag: "wx" });
     parse(await readFile(temporaryPath, "utf8"));
     await assertDestinationUnchanged(destinationPath, expectMissing, expected);
-    const backupPath = expected === undefined ? undefined : await backupExpectedDocument(destinationPath, expected);
+    backupPath = expected === undefined ? undefined : await backupExpectedDocument(destinationPath, expected);
     await rename(temporaryPath, destinationPath);
     temporaryPath = undefined;
     if (backupPath) console.log(`Backed up the previous TOML to ${formatDisplayValue(backupPath)}`);
     console.log(`Applied valid TOML atomically to ${formatDisplayValue(destinationPath)}`);
   } catch (error) {
-    console.error(`Draft was not applied to ${formatDisplayValue(destinationPath)}: ${formatError(error)}`);
+    const failure = `Draft was not applied to ${formatDisplayValue(destinationPath)}: ${formatError(error)}`;
+    console.error(backupPath ? `${failure}\nRetained backup: ${formatDisplayValue(backupPath)}` : failure);
     process.exitCode = 1;
   } finally {
     if (temporaryPath) {

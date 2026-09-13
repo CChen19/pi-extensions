@@ -102,9 +102,11 @@ The apply script stages the proposed bytes in the destination directory, validat
 
 It rejects publication when the active bytes differ from the baseline or when a supposedly missing document has appeared.
 
-For an existing document, it writes and flushes the backup to a private temporary file, confirms that the minute's final backup name is absent, and atomically renames the completed backup into place before renaming the staged configuration over the unchanged active path.
+For an existing document, it writes and flushes the backup to a private temporary file, confirms that the minute's final backup name is absent, atomically renames the completed backup into place, and flushes the backup directory before renaming the staged configuration over the unchanged active path.
 
-It removes its owned temporary backup after a recoverable write or publication failure; if cleanup also fails, it reports both failures and still preserves the active document.
+It removes its owned temporary backup after a recoverable write or publication failure; if cleanup also fails, it reports the primary failure and every cleanup failure while preserving the active document.
+
+If configuration publication fails after the backup is durable, it reports the retained backup path and preserves the active document.
 
 This comparison does not lock out other processes after the re-read, so do not claim cross-process synchronization.
 

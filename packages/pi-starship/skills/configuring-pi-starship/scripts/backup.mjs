@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { formatDisplayValue } from "./script-support.mjs";
+import { formatDisplayValue, formatError } from "./script-support.mjs";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -15,11 +15,13 @@ export async function backupExpectedDocument(destinationPath, expected, options 
   const openFile = options.openFile ?? open;
   const removeFile = options.removeFile ?? rm;
   const renameFile = options.renameFile ?? rename;
+  const syncDirectory = options.syncDirectory ?? syncDirectoryEntry;
 
   await makeDirectory(backupDirectory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
 
   let handle;
   let ownsTemporaryPath = false;
+  let backupPublished = false;
   try {
     handle = await openFile(temporaryPath, "wx", PRIVATE_FILE_MODE);
     ownsTemporaryPath = true;
@@ -30,6 +32,8 @@ export async function backupExpectedDocument(destinationPath, expected, options 
     await assertBackupMissing(backupPath, inspectPath);
     await renameFile(temporaryPath, backupPath);
     ownsTemporaryPath = false;
+    backupPublished = true;
+    await syncDirectory(backupDirectory);
     return backupPath;
   } catch (error) {
     const cleanupErrors = [];
@@ -37,24 +41,56 @@ export async function backupExpectedDocument(destinationPath, expected, options 
       try {
         await handle.close();
       } catch (closeError) {
-        cleanupErrors.push(closeError);
+        cleanupErrors.push({ operation: "closing the temporary backup", error: closeError });
       }
     }
     if (ownsTemporaryPath) {
       try {
         await removeFile(temporaryPath, { force: true });
       } catch (removeError) {
-        cleanupErrors.push(removeError);
+        cleanupErrors.push({ operation: "removing the temporary backup", error: removeError });
       }
     }
     if (cleanupErrors.length > 0) {
-      throw new AggregateError(
-        [error, ...cleanupErrors],
-        "Backup creation failed and its private temporary file could not be removed; the active file was preserved.",
+      const diagnostics = cleanupErrors
+        .map(({ operation, error: cleanupError }) => `${operation}: ${formatError(cleanupError)}`)
+        .join("; ");
+      throw new Error(
+        `Backup creation failed: ${formatError(error)}. Cleanup also failed (${diagnostics}). The active file was preserved.`,
+      );
+    }
+    if (backupPublished) {
+      throw new Error(
+        `Backup was retained at ${formatDisplayValue(backupPath)}, but its directory durability check failed: ${formatError(error)}. The active file was preserved.`,
       );
     }
     throw error;
   }
+}
+
+async function syncDirectoryEntry(directoryPath) {
+  if (process.platform === "win32") return;
+
+  const handle = await open(directoryPath, "r");
+  let syncError;
+  try {
+    await handle.sync();
+  } catch (error) {
+    syncError = error;
+  }
+
+  try {
+    await handle.close();
+  } catch (closeError) {
+    if (syncError) {
+      throw new Error(
+        `Directory sync failed: ${formatError(syncError)}. Closing the directory also failed: ${formatError(closeError)}.`,
+      );
+    }
+    throw closeError;
+  }
+
+  if (syncError) throw syncError;
 }
 
 async function assertBackupMissing(backupPath, inspectPath) {

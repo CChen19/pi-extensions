@@ -100,6 +100,9 @@ test("skill answers from references or source and edits configuration safely", (
     "rejects publication when the active bytes differ",
     "writes and flushes the backup to a private temporary file",
     "atomically renames the completed backup into place",
+    "flushes the backup directory",
+    "reports the primary failure and every cleanup failure",
+    "reports the retained backup path",
     "removes its owned temporary backup after a recoverable write or publication failure",
     "keep the durable timestamped backup",
     "do not claim cross-process synchronization",
@@ -109,6 +112,10 @@ test("skill answers from references or source and edits configuration safely", (
   ]) {
     assert.ok(skill.includes(contract), `missing editing contract: ${contract}`);
   }
+
+  const applyScript = readFileSync(applyPath, "utf8");
+  assert.match(applyScript, /let backupPath;/u);
+  assert.match(applyScript, /Retained backup:/u);
 });
 
 test("skill references own the detailed public configuration guidance", () => {
@@ -435,10 +442,77 @@ test("backup creation stages partial writes and preserves an existing minute bac
     assert.equal(existsSync(backupPath), false);
     assert.deepEqual(readdirSync(path.dirname(backupPath)), []);
 
-    assert.equal(await backupExpectedDocument(destinationPath, expected, { now }), backupPath);
+    let synchronizedDirectory: string | undefined;
+    assert.equal(
+      await backupExpectedDocument(destinationPath, expected, {
+        now,
+        syncDirectory: async (directoryPath: string) => {
+          synchronizedDirectory = directoryPath;
+          assert.deepEqual(readFileSync(backupPath), expected);
+        },
+      }),
+      backupPath,
+    );
+    assert.equal(synchronizedDirectory, path.dirname(backupPath));
     await assert.rejects(backupExpectedDocument(destinationPath, Buffer.from("newer"), { now }), /already exists/u);
     assert.deepEqual(readFileSync(backupPath), expected);
     assert.deepEqual(readdirSync(path.dirname(backupPath)), [path.basename(backupPath)]);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("backup creation reports directory durability and cleanup failures", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-backup-diagnostics-"));
+  const destinationPath = path.join(directory, "pi-starship.toml");
+  const expected = Buffer.from("complete backup");
+  try {
+    const { backupExpectedDocument } = await import(backupScriptUrl);
+    const retainedPath = path.join(directory, "pi-starship", "pi-starship-202609130743.toml");
+    await assert.rejects(
+      backupExpectedDocument(destinationPath, expected, {
+        now: new Date(2026, 8, 13, 7, 43),
+        syncDirectory: async () => {
+          throw new Error("simulated directory sync failure");
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Backup was retained/u);
+        assert.match(error.message, /pi-starship-202609130743\.toml/u);
+        assert.match(error.message, /simulated directory sync failure/u);
+        return true;
+      },
+    );
+    assert.deepEqual(readFileSync(retainedPath), expected);
+
+    let removalAttempted = false;
+    await assert.rejects(
+      backupExpectedDocument(destinationPath, expected, {
+        now: new Date(2026, 8, 13, 7, 44),
+        openFile: async () => ({
+          writeFile: async () => {
+            throw new Error("simulated primary failure");
+          },
+          sync: async () => {},
+          close: async () => {
+            throw new Error("simulated close failure");
+          },
+        }),
+        removeFile: async () => {
+          removalAttempted = true;
+          throw new Error("simulated removal failure");
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Backup creation failed: simulated primary failure/u);
+        assert.match(error.message, /closing the temporary backup: simulated close failure/u);
+        assert.match(error.message, /removing the temporary backup: simulated removal failure/u);
+        return true;
+      },
+    );
+    assert.equal(removalAttempted, true);
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }
