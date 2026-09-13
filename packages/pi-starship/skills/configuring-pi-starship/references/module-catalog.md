@@ -16,6 +16,7 @@ Every `[module]` table accepts these fields:
 
 Most modules also accept `style` as listed below.
 Modules with state-selected or multiple style fields list those exact fields instead.
+`provider`, `model`, and `thinking` additionally accept an ordered `style_rules` array whose default is empty; each module section lists its exact selectors.
 Unknown fields warn and remain inactive.
 A wrong type or out-of-range option warns and uses that field's default.
 
@@ -62,6 +63,12 @@ Accepted style fields:
 | --- | --- |
 | `style` | `"bold blue"` |
 
+Accepted style-rule selectors (`style_rules` default: `[]`):
+
+| Selector | Matched value |
+| --- | --- |
+| `provider` | Raw Pi provider ID. |
+
 Additional options:
 
 | Option | Type | Default | Constraints and meaning |
@@ -83,6 +90,13 @@ Accepted style fields:
 | Field | Default |
 | --- | --- |
 | `style` | `"bold blue"` |
+
+Accepted style-rule selectors (`style_rules` default: `[]`):
+
+| Selector | Matched value |
+| --- | --- |
+| `provider` | Raw Pi provider ID. |
+| `model` | Raw Pi model ID. |
 
 Additional options:
 
@@ -115,6 +129,13 @@ Accepted style fields:
 | `style_high` | `""` |
 | `style_xhigh` | `""` |
 | `style_max` | `""` |
+
+Accepted style-rule selectors (`style_rules` default: `[]`):
+
+| Selector | Matched value |
+| --- | --- |
+| `provider` | Raw Pi provider ID. |
+| `level` | Current Pi thinking-level string. |
 
 ### `directory`
 

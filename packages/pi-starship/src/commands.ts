@@ -197,6 +197,8 @@ async function showMainMenu(ctx: ExtensionCommandContext, options: StarshipComma
               `Reason: ${module.reason}`,
               `Variables: ${module.variables.join(", ") || "none"}`,
               `Style fields: ${module.styleFields.join(", ") || "none"}`,
+              `Style-rule selectors: ${module.styleRuleSelectors.join(", ") || "none"}`,
+              `Style rules: ${module.styleRuleCount} configured`,
               `Display rules: ${module.displayRules.join(" · ") || "none"}`,
             ],
           })),

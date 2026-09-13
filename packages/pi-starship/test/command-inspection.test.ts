@@ -19,6 +19,8 @@ const MODEL: ModuleInspection = {
   preview: "◆ claude-sonnet-4",
   variables: ["symbol", "model"],
   styleFields: ["style"],
+  styleRuleSelectors: ["provider", "model"],
+  styleRuleCount: 2,
   displayRules: [],
   rootReferenced: true,
   reachable: true,
@@ -32,6 +34,8 @@ const GIT_BRANCH: ModuleInspection = {
   preview: "",
   variables: ["symbol", "branch", "remote_name"],
   styleFields: ["style"],
+  styleRuleSelectors: [],
+  styleRuleCount: 0,
   displayRules: [],
   rootReferenced: true,
   reachable: true,
@@ -45,6 +49,8 @@ const COST: ModuleInspection = {
   preview: "",
   variables: ["symbol", "cost", "subscription"],
   styleFields: ["style"],
+  styleRuleSelectors: [],
+  styleRuleCount: 0,
   displayRules: ["0: hidden", "1: yellow", "5: red"],
   rootReferenced: false,
   reachable: false,
@@ -112,6 +118,31 @@ test("/starship adds Explain footer and Modules without adding direct routes", a
   assert.match(frame, /Configuration/u);
   assert.match(frame, /Help/u);
   assert.match(frame, /Restore built-in…/u);
+  tui.press("ctrl+c");
+  await running;
+});
+
+test("Modules detail reports supported style-rule selectors and configured count", async () => {
+  const mock = createMockPi();
+  const path = "/tmp/missing-pi-starship-style-rule-detail.toml";
+  registerStarshipCommand(mock.pi, {
+    getLoaded: () => loadStarshipConfig(path),
+    getInspection: () => INSPECTION,
+    apply() {},
+    settingsPath: path,
+  });
+  const tui = createTuiHarness({ width: 80, rows: 24 });
+  const context = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
+  const running = mock.commands.get("starship")?.handler("", context.ctx);
+  await tui.waitForOpen();
+  for (let index = 0; index < 3; index += 1) tui.press("tui.select.down");
+  tui.press("tui.select.confirm");
+  await tui.waitForOpen();
+  tui.press("tui.select.confirm");
+  const frame = tui.render().join("\n");
+  assert.match(frame, /Style-rule selectors: provider, model/u);
+  assert.match(frame, /Style rules: 2 configured/u);
+  assert.equal(frame.includes("\u001b[31m"), false);
   tui.press("ctrl+c");
   await running;
 });
@@ -311,6 +342,10 @@ test("Modules is searchable, adaptive, terminal-safe, and restores search after 
     assert.match(frame, /snapshot produced no output/iu);
     assert.match(frame, /Variables:.*branch/u);
     assert.match(frame, /Style fields: style/u);
+    tui.press("tui.select.pageDown");
+    frame = tui.render().join("\n");
+    assert.match(frame, /Style-rule selectors: none/u);
+    assert.match(frame, /Style rules: 0 configured/u);
     for (const dimensions of [
       { width: 20, rows: 8 },
       { width: 80, rows: 24 },

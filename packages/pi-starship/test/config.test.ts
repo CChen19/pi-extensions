@@ -99,7 +99,7 @@ test("effective configuration projects every public catalog field in stable orde
 test("effective configuration normalizes custom public values without document-only data", () => {
   const loaded = validateConfigDocument(
     "/effective/pi-starship.toml",
-    `format = '$model$git_metrics$context$extension_status'\npalette = 'demo'\nfuture = 'document only'\n\n[palettes.demo]\nz = '#654321'\naccent = '#123456'\n\n[model]\nformat = '[$symbol$model]($style)'\nsymbol = 'M '\nstyle = 'bold accent'\ndisabled = false\ntruncation_length = 12\nmodel_aliases = { z = 'last', a = 'first' }\n\n[git_metrics]\nadded_style = 'green'\ndeleted_style = 'red'\ndisabled = false\n\n[[context.display]]\nthreshold = 0\nstyle = 'accent'\nhidden = false\n\n[extension_status]\nseparator = ' / '\nmax_statuses = 3\nicons = { demo = 'D' }\n`,
+    `format = '$model$git_metrics$context$extension_status'\npalette = 'demo'\nfuture = 'document only'\n\n[palettes.demo]\nz = '#654321'\naccent = '#123456'\n\n[model]\nformat = '[$symbol$model]($style)'\nsymbol = 'M '\nstyle = 'bold accent'\ndisabled = false\ntruncation_length = 12\nmodel_aliases = { z = 'last', a = 'first' }\n\n[[model.style_rules]]\nprovider = 'openai'\nstyle = 'accent'\n\n[[model.style_rules]]\nstyle = 'bold blue'\n\n[git_metrics]\nadded_style = 'green'\ndeleted_style = 'red'\ndisabled = false\n\n[[context.display]]\nthreshold = 0\nstyle = 'accent'\nhidden = false\n\n[extension_status]\nseparator = ' / '\nmax_statuses = 3\nicons = { demo = 'D' }\n`,
   );
   const serialized = serializeEffectiveConfig(loaded.config);
   const reparsed = normalizeConfig(parse(serialized));
@@ -109,6 +109,9 @@ test("effective configuration normalizes custom public values without document-o
   assert.match(serialized, /palette = "demo"/u);
   assert.match(serialized, /max_statuses = 3/u);
   assert.match(serialized, /truncation_length = 12/u);
+  const openaiRule = serialized.indexOf('provider = "openai"');
+  assert.ok(openaiRule >= 0);
+  assert.ok(serialized.indexOf('style = "bold blue"', openaiRule) > openaiRule);
   assert.ok(serialized.indexOf('accent = "#123456"') < serialized.indexOf('z = "#654321"'));
   assert.ok(serialized.indexOf('a = "first"') < serialized.indexOf('z = "last"'));
 });
@@ -578,6 +581,78 @@ test("multi-style and display settings normalize independently", () => {
   assert.match(messages, /context\.display\.1\.style/iu);
   assert.match(messages, /context\.display\.2\.future/iu);
   assert.match(messages, /cost\.display\.0\.threshold/iu);
+});
+
+test("style rules normalize exact selectors and preserve valid source order", () => {
+  const normalized = normalizeConfig({
+    palette: "mine",
+    palettes: { mine: { accent: "#010203" } },
+    provider: {
+      style_rules: [{ provider: "openai", style: "accent" }, { style: "bold green" }],
+    },
+    model: {
+      style_rules: [
+        { provider: "openai", model: "__proto__", style: "bold blue" },
+        { model: "constructor", style: "bold yellow" },
+      ],
+    },
+    thinking: { style_rules: [{ provider: "anthropic", level: "high", style: "bold purple" }] },
+  });
+
+  assert.deepEqual(normalized.diagnostics, []);
+  assert.deepEqual(normalized.config.modules.provider.styleRules, [
+    { selectors: { provider: "openai" }, style: "accent" },
+    { selectors: {}, style: "bold green" },
+  ]);
+  assert.deepEqual(normalized.config.modules.model.styleRules, [
+    { selectors: { provider: "openai", model: "__proto__" }, style: "bold blue" },
+    { selectors: { model: "constructor" }, style: "bold yellow" },
+  ]);
+  assert.deepEqual(normalized.config.modules.thinking.styleRules, [
+    { selectors: { provider: "anthropic", level: "high" }, style: "bold purple" },
+  ]);
+  assert.deepEqual(BUILT_IN_CONFIG.modules.provider.styleRules, []);
+  assert.deepEqual(normalizeConfig({ provider: { style_rules: [] } }).diagnostics, []);
+  normalized.config.modules.provider.styleRules.push({ selectors: {}, style: "red" });
+  assert.deepEqual(normalizeConfig({}).config.modules.provider.styleRules, []);
+});
+
+test("invalid style rules are dropped independently and unsupported modules warn", () => {
+  const normalized = normalizeConfig({
+    provider: { style_rules: "wrong" },
+    model: {
+      style_rules: [
+        1,
+        { provider: 7, style: "red" },
+        { level: "high", style: "blue" },
+        { provider: "openai" },
+        { provider: "openai", style: "not-a-style" },
+        { provider: "openai", style: "green" },
+      ],
+    },
+    directory: { style_rules: [{ style: "cyan" }] },
+  });
+
+  assert.deepEqual(normalized.config.modules.provider.styleRules, []);
+  assert.deepEqual(normalized.config.modules.model.styleRules, [{ selectors: { provider: "openai" }, style: "green" }]);
+  assert.deepEqual(normalized.config.modules.directory.styleRules, []);
+  assert.deepEqual(
+    normalized.diagnostics.map((item) => item.path),
+    [
+      "provider.style_rules",
+      "model.style_rules.0",
+      "model.style_rules.1.provider",
+      "model.style_rules.2.level",
+      "model.style_rules.3.style",
+      "model.style_rules.4.style",
+      "directory.style_rules",
+    ],
+  );
+  assert.ok(
+    normalized.diagnostics
+      .filter((item) => item.path.startsWith("model.style_rules"))
+      .every((item) => /rule ignored/u.test(item.message)),
+  );
 });
 
 test("display arrays use module defaults when no valid entries remain", () => {

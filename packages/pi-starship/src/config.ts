@@ -6,7 +6,7 @@ import type { TomlTable } from "smol-toml";
 import { type FormatNode, formatVariables, parseFormat, styleVariables } from "./format/formatter.js";
 import { type ColorPalette, isValidStyle, parseColor } from "./format/style.js";
 import { MODULE_DEFINITIONS, MODULE_NAMES, type ModuleName } from "./modules/catalog.js";
-import type { ModuleDisplayConfig, ModuleOptionSchema, ModuleOptionValue } from "./modules/types.js";
+import type { ModuleDisplayConfig, ModuleOptionSchema, ModuleOptionValue, ModuleStyleRule } from "./modules/types.js";
 
 export const CONFIG_FILE_NAME = "pi-starship.toml";
 export { MODULE_NAMES, type ModuleName } from "./modules/catalog.js";
@@ -21,6 +21,7 @@ export interface ModuleConfig {
   symbol: string;
   style: string;
   styles: Record<string, string>;
+  styleRules: ModuleStyleRule[];
   display: ModuleDisplayConfig[];
   disabled: boolean;
   options: Record<string, ModuleOptionValue>;
@@ -76,6 +77,7 @@ const BUILT_IN_MODULES = Object.fromEntries(
       ...defaults,
       formatAst: parseFormat(defaults.format),
       styles: { ...styleDefaults },
+      styleRules: [] as ModuleStyleRule[],
       display: structuredClone(displayDefaults ?? []),
       options: Object.fromEntries(
         Object.entries(options ?? {}).map(([key, schema]) => [key, cloneOptionValue(schema.default)]),
@@ -273,6 +275,7 @@ function normalizeModule(
     for (const field of Object.keys(definition.styleDefaults)) known.add(field);
   } else if (!definition.displayDefaults) known.add("style");
   if (definition.displayDefaults) known.add("display");
+  if (definition.styleRuleSelectors) known.add("style_rules");
   if (name === "extension_status") {
     known.add("separator");
     known.add("max_statuses");
@@ -322,6 +325,15 @@ function normalizeModule(
       name,
       value.display,
       definition.displayDefaults,
+      activePalette(config),
+      diagnostics,
+    );
+  }
+  if (definition.styleRuleSelectors && value.style_rules !== undefined) {
+    module.styleRules = normalizeStyleRules(
+      name,
+      value.style_rules,
+      new Set(Object.keys(definition.styleRuleSelectors)),
       activePalette(config),
       diagnostics,
     );
@@ -487,6 +499,7 @@ function cloneBuiltInConfig(): StarshipConfig {
           ...BUILT_IN_CONFIG.modules[name],
           formatAst: structuredClone(BUILT_IN_CONFIG.modules[name].formatAst),
           styles: { ...BUILT_IN_CONFIG.modules[name].styles },
+          styleRules: structuredClone(BUILT_IN_CONFIG.modules[name].styleRules),
           display: structuredClone(BUILT_IN_CONFIG.modules[name].display),
           options: structuredClone(BUILT_IN_CONFIG.modules[name].options),
         },
@@ -544,6 +557,48 @@ function validateModuleStyleField(
     const fallback = BUILT_IN_CONFIG.modules[name].styles[field];
     if (fallback !== undefined) module.styles[field] = fallback;
   }
+}
+
+function normalizeStyleRules(
+  name: ModuleName,
+  value: unknown,
+  allowedSelectors: ReadonlySet<string>,
+  palette: ColorPalette,
+  diagnostics: ConfigDiagnostic[],
+): ModuleStyleRule[] {
+  if (!Array.isArray(value)) {
+    diagnostics.push(typeDiagnostic(`${name}.style_rules`, "array of tables"));
+    return [];
+  }
+  const result: ModuleStyleRule[] = [];
+  for (const [index, entry] of value.entries()) {
+    const path = `${name}.style_rules.${index}`;
+    if (!isRecord(entry)) {
+      diagnostics.push(diagnostic("warning", path, "Expected a table; rule ignored"));
+      continue;
+    }
+    let valid = true;
+    for (const field of Object.keys(entry)) {
+      if (field !== "style" && !allowedSelectors.has(field)) {
+        diagnostics.push(diagnostic("warning", `${path}.${field}`, "Unknown style-rule field; rule ignored"));
+        valid = false;
+      }
+    }
+    if (typeof entry.style !== "string" || !isValidStyle(entry.style, palette)) {
+      diagnostics.push(diagnostic("warning", `${path}.style`, "Expected a valid Starship style string; rule ignored"));
+      valid = false;
+    }
+    const selectors: Record<string, string> = {};
+    for (const selector of allowedSelectors) {
+      if (entry[selector] === undefined) continue;
+      if (typeof entry[selector] !== "string") {
+        diagnostics.push(diagnostic("warning", `${path}.${selector}`, "Expected string; rule ignored"));
+        valid = false;
+      } else setOwn(selectors, selector, entry[selector]);
+    }
+    if (valid) result.push({ style: entry.style as string, selectors });
+  }
+  return result;
 }
 
 function normalizeDisplay(
