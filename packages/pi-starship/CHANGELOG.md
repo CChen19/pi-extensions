@@ -1,5 +1,15 @@
 # @narumitw/pi-starship
 
+## 0.56.0
+
+### Minor Changes
+
+- ff31206: Add ordered exact-match style rules for the provider, model, and thinking modules.
+
+### Patch Changes
+
+- 5e61ff4: Keep timestamped long-term backups when the bundled configuration skill replaces an existing pi-starship document.
+
 ## 0.55.2
 
 ### Patch Changes
