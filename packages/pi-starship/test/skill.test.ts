@@ -79,10 +79,15 @@ test("skill answers from references or source and edits configuration safely", (
     "Do not enable network, command-backed, cloud, deployment, host, or user metadata",
     "Create a separate draft without changing the active document",
     "keep an untouched baseline file containing the exact bytes initially inspected",
+    "saves the baseline permanently",
+    "pi-starship-202609130742.toml",
+    "retained backups are never overwritten or removed",
     "use the explicit `--expect-missing` state",
     "stages the proposed bytes in the destination directory",
     "immediately re-reads the active path",
     "rejects publication when the active bytes differ",
+    "writes the durable backup without replacement",
+    "keep the durable timestamped backup",
     "do not claim cross-process synchronization",
     "When the pi-starship extension and `/starship status` command are available",
     "When the extension or command is unavailable",
@@ -282,9 +287,15 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
       encoding: "utf8",
     });
     assert.equal(applied.status, 0, applied.stderr);
+    assert.match(applied.stdout, /Backed up the previous TOML/u);
     assert.match(applied.stdout, /Applied valid TOML atomically/u);
     assert.equal(readFileSync(destinationPath, "utf8"), replacement);
-    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship.toml"]);
+    const backupDirectory = path.join(settingsDirectory, "pi-starship");
+    const backupFiles = readdirSync(backupDirectory);
+    assert.equal(backupFiles.length, 1);
+    assert.match(backupFiles[0] ?? "", /^pi-starship-\d{12}\.toml$/u);
+    assert.equal(readFileSync(path.join(backupDirectory, backupFiles[0] ?? ""), "utf8"), original);
+    assert.deepEqual(readdirSync(settingsDirectory).sort(), ["pi-starship", "pi-starship.toml"]);
 
     writeFileSync(baselinePath, replacement);
     writeFileSync(draftPath, "[model\n");
@@ -294,7 +305,8 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /Draft was not applied/u);
     assert.equal(readFileSync(destinationPath, "utf8"), replacement);
-    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship.toml"]);
+    assert.deepEqual(readdirSync(backupDirectory), backupFiles);
+    assert.deepEqual(readdirSync(settingsDirectory).sort(), ["pi-starship", "pi-starship.toml"]);
 
     const concurrent = 'format = "$brand"\n';
     writeFileSync(draftPath, original);
@@ -305,7 +317,8 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
     assert.equal(changed.status, 1);
     assert.match(changed.stderr, /changed after inspection/u);
     assert.equal(readFileSync(destinationPath, "utf8"), concurrent);
-    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship.toml"]);
+    assert.deepEqual(readdirSync(backupDirectory), backupFiles);
+    assert.deepEqual(readdirSync(settingsDirectory).sort(), ["pi-starship", "pi-starship.toml"]);
 
     writeFileSync(baselinePath, concurrent);
     rmSync(destinationPath);
@@ -314,7 +327,8 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
     });
     assert.equal(removed.status, 1);
     assert.match(removed.stderr, /removed after inspection/u);
-    assert.deepEqual(readdirSync(settingsDirectory), []);
+    assert.deepEqual(readdirSync(backupDirectory), backupFiles);
+    assert.deepEqual(readdirSync(settingsDirectory), ["pi-starship"]);
 
     const appearedDirectory = path.join(directory, "appeared-agent");
     const appearedPath = path.join(appearedDirectory, "pi-starship.toml");
@@ -333,7 +347,64 @@ test("atomic apply validates staged TOML and rejects stale destinations", () => 
       encoding: "utf8",
     });
     assert.equal(created.status, 0, created.stderr);
+    assert.doesNotMatch(created.stdout, /Backed up/u);
     assert.equal(readFileSync(newDestination, "utf8"), original);
+    assert.deepEqual(readdirSync(path.dirname(newDestination)), ["pi-starship.toml"]);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("atomic apply backs up the exact inspected bytes of a malformed document", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-byte-backup-"));
+  const settingsDirectory = path.join(directory, "agent");
+  const destinationPath = path.join(settingsDirectory, "pi-starship.toml");
+  const draftPath = path.join(directory, "draft.toml");
+  const baselinePath = path.join(directory, "baseline.toml");
+  const original = Buffer.from([0xff, 0xfe, 0x00, 0x0a]);
+  try {
+    mkdirSync(settingsDirectory);
+    writeFileSync(destinationPath, original);
+    writeFileSync(baselinePath, original);
+    writeFileSync(draftPath, 'format = "$directory"\n');
+
+    const result = spawnSync(process.execPath, [applyPath, draftPath, destinationPath, baselinePath], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const backupDirectory = path.join(settingsDirectory, "pi-starship");
+    const backupFiles = readdirSync(backupDirectory);
+    assert.equal(backupFiles.length, 1);
+    assert.deepEqual(readFileSync(path.join(backupDirectory, backupFiles[0] ?? "")), original);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("atomic apply preserves the active document when its durable backup cannot be written", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-starship-skill-backup-failure-"));
+  const settingsDirectory = path.join(directory, "agent");
+  const destinationPath = path.join(settingsDirectory, "pi-starship.toml");
+  const backupDirectory = path.join(settingsDirectory, "pi-starship");
+  const draftPath = path.join(directory, "draft.toml");
+  const baselinePath = path.join(directory, "baseline.toml");
+  const original = 'format = "$model"\n';
+  try {
+    mkdirSync(settingsDirectory);
+    writeFileSync(destinationPath, original);
+    writeFileSync(backupDirectory, "occupied");
+    writeFileSync(draftPath, 'format = "$directory"\n');
+    writeFileSync(baselinePath, original);
+
+    const result = spawnSync(process.execPath, [applyPath, draftPath, destinationPath, baselinePath], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Draft was not applied/u);
+    assert.equal(readFileSync(destinationPath, "utf8"), original);
+    assert.equal(readFileSync(backupDirectory, "utf8"), "occupied");
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }

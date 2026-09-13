@@ -79,7 +79,13 @@ Create a separate draft without changing the active document, then make the smal
 
 When the active document exists, also keep an untouched baseline file containing the exact bytes initially inspected.
 
-When it is missing, use the explicit `--expect-missing` state instead of creating a baseline.
+Before replacing that document, the apply script saves the baseline permanently under `<directory containing pi-starship.toml>/pi-starship/` with a local-time name such as `pi-starship-202609130742.toml`.
+
+For the default settings path, this backup directory is `<getAgentDir()>/pi-starship/`.
+
+If that minute's backup name already exists, publication stops without changing the active document; retained backups are never overwritten or removed by this workflow.
+
+When the active document is missing, use the explicit `--expect-missing` state instead of creating a baseline or backup.
 
 Resolve the bundled scripts relative to this `SKILL.md`, validate the draft, and publish it through the guarded atomic apply script:
 
@@ -94,15 +100,19 @@ node "$skill_dir/scripts/apply.mjs" "$draft_path" "$config_path" "$expected_stat
 
 The apply script stages the proposed bytes in the destination directory, validates that staged file, and immediately re-reads the active path.
 
-It rejects publication when the active bytes differ from the baseline or when a supposedly missing document has appeared, then renames the staged file over the unchanged path.
+It rejects publication when the active bytes differ from the baseline or when a supposedly missing document has appeared.
+
+For an existing document, it then writes the durable backup without replacement before renaming the staged file over the unchanged active path.
 
 This comparison does not lock out other processes after the re-read, so do not claim cross-process synchronization.
 
 Fix every TOML syntax error and rerun the validator unless the user explicitly requested an invalid test fixture, which must not replace the active document.
 
-Remove the separate draft and baseline after a successful publication, then re-read the saved document and review the exact change for accidental replacement or unrelated edits.
+Remove the separate draft and temporary baseline after a successful publication, but keep the durable timestamped backup.
 
-Report the edited path, the effective layout or module change, and the validator and atomic-publication results.
+Then re-read the saved document and review the exact change for accidental replacement or unrelated edits.
+
+Report the edited path, durable backup path when one was created, effective layout or module change, and validator and atomic-publication results.
 
 External edits do not update an active footer immediately.
 

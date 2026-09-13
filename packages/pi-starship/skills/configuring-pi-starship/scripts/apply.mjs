@@ -21,14 +21,16 @@ if (!draftPath || !destinationPath || !expectedPath || extraArguments.length > 0
   try {
     const draft = await readFile(draftPath, "utf8");
     const expectMissing = expectedPath === "--expect-missing";
-    const expected = expectMissing ? undefined : await readFile(expectedPath, "utf8");
+    const expected = expectMissing ? undefined : await readFile(expectedPath);
     await mkdir(dirname(destinationPath), { recursive: true });
     temporaryPath = join(dirname(destinationPath), `.pi-starship.toml.${randomUUID()}.tmp`);
     await writeFile(temporaryPath, draft, { encoding: "utf8", flag: "wx" });
     parse(await readFile(temporaryPath, "utf8"));
     await assertDestinationUnchanged(destinationPath, expectMissing, expected);
+    const backupPath = expected === undefined ? undefined : await backupExpectedDocument(destinationPath, expected);
     await rename(temporaryPath, destinationPath);
     temporaryPath = undefined;
+    if (backupPath) console.log(`Backed up the previous TOML to ${formatDisplayValue(backupPath)}`);
     console.log(`Applied valid TOML atomically to ${formatDisplayValue(destinationPath)}`);
   } catch (error) {
     console.error(`Draft was not applied to ${formatDisplayValue(destinationPath)}: ${formatError(error)}`);
@@ -44,10 +46,31 @@ if (!draftPath || !destinationPath || !expectedPath || extraArguments.length > 0
   }
 }
 
+async function backupExpectedDocument(destinationPath, expected) {
+  const backupDirectory = join(dirname(destinationPath), "pi-starship");
+  const backupPath = join(backupDirectory, `pi-starship-${localTimestamp(new Date())}.toml`);
+  await mkdir(backupDirectory, { recursive: true });
+  try {
+    await writeFile(backupPath, expected, { flag: "wx" });
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "EEXIST") {
+      throw new Error(`Backup already exists at ${formatDisplayValue(backupPath)}; the active file was preserved.`);
+    }
+    throw error;
+  }
+  return backupPath;
+}
+
+function localTimestamp(date) {
+  return [date.getFullYear(), date.getMonth() + 1, date.getDate(), date.getHours(), date.getMinutes()]
+    .map((value, index) => String(value).padStart(index === 0 ? 4 : 2, "0"))
+    .join("");
+}
+
 async function assertDestinationUnchanged(destinationPath, expectMissing, expected) {
   let current;
   try {
-    current = await readFile(destinationPath, "utf8");
+    current = await readFile(destinationPath);
   } catch (error) {
     if (error && typeof error === "object" && error.code === "ENOENT") {
       if (expectMissing) return;
@@ -55,6 +78,6 @@ async function assertDestinationUnchanged(destinationPath, expectMissing, expect
     }
     throw error;
   }
-  if (!expectMissing && current === expected) return;
+  if (!expectMissing && expected !== undefined && current.equals(expected)) return;
   throw new Error("The active pi-starship.toml changed after inspection; the newer file was preserved.");
 }
