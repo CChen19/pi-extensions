@@ -6,7 +6,9 @@ import { createMockContext, createMockPi } from "../../../test/support.js";
 import { loadConfig } from "../src/settings/config.js";
 import { localConfigPath, withConfigReplacementInstalledHookForTest } from "../src/settings/config-file.js";
 import { updateLocalConfig } from "../src/settings/settings-store.js";
+import type { PiSyncSettingsV3 } from "../src/settings/settings-types.js";
 import { lockPath, writeStateForConfig } from "../src/state/sync-state-store.js";
+import { setSyncStatus } from "../src/ui/sync-status.js";
 import { v3S3Settings, withTempHome } from "./helpers.js";
 import { contextUi, deferred, inspectionFixture, observeCheckCompletion } from "./startup-check-helpers.js";
 
@@ -69,6 +71,39 @@ for (const reason of ["startup", "reload", "new", "resume", "fork"] as const) {
     });
   });
 }
+
+test("disabled status remains active when the session starts without a sync setup", async () => {
+  await configured(async () => {
+    await fs.writeFile(
+      localConfigPath(),
+      JSON.stringify({
+        version: 3,
+        onSwitch: "ask-before-pull",
+        skipSecretScan: false,
+        showStatus: false,
+        storageConnections: {},
+        syncSetups: {},
+      }),
+    );
+    const { default: sync } = await import("../src/sync-extension.js");
+    const mock = createMockPi();
+    sync(mock.pi);
+    const context = createMockContext({ mode: "rpc" });
+
+    await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+    const configuredSettings = v3S3Settings() as PiSyncSettingsV3;
+    await updateLocalConfig((settings) => ({
+      ...settings,
+      activeSyncSetup: configuredSettings.activeSyncSetup,
+      storageConnections: configuredSettings.storageConnections,
+      syncSetups: configuredSettings.syncSetups,
+    }));
+    setSyncStatus(context.ctx, "sync ⇡");
+
+    assert.equal(context.statuses.get("sync"), undefined);
+    await mock.events.get("session_shutdown")?.[0]?.({ reason: "reload" }, context.ctx);
+  });
+});
 
 test("disabled status suppresses startup progress and one-sided results", async () => {
   await configured(async () => {

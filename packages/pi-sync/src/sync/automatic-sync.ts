@@ -4,7 +4,7 @@ import type { CommandOptions } from "../commands/command-types.js";
 import { loadConfig, loadPartialConfig } from "../settings/config.js";
 import { isMissingConfigError } from "../settings/config-errors.js";
 import { consumeLocalConfigMigrationNotice } from "../settings/config-file.js";
-import { configuredSyncSetupNames } from "../settings/settings-store.js";
+import { readLocalConfigObject } from "../settings/settings-store.js";
 import { snapshotOptionsForContext } from "../snapshot/session-paths.js";
 import { recoverSnapshotTransactionsOnStartup } from "../snapshot/snapshot-transaction.js";
 import { withLock } from "../state/lock.js";
@@ -35,9 +35,11 @@ export async function startSession(ctx: ExtensionContext, signal: AbortSignal) {
   await recoverSnapshotTransactionsOnStartup();
   throwIfAborted(signal);
   try {
-    const names = await configuredSyncSetupNames();
+    const settings = await readLocalConfigObject();
     throwIfAborted(signal);
+    const names = settings ? Object.keys(settings.syncSetups).sort((left, right) => left.localeCompare(right)) : [];
     setSyncSetupCompletions(names);
+    configureSyncStatus(ctx, settings?.showStatus ?? true);
   } catch {
     if (signal.aborted) return;
     setSyncSetupCompletions([]);
