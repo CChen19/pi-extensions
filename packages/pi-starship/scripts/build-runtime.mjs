@@ -27,6 +27,10 @@ const FORBIDDEN_EAGER_INPUTS = [
   "src/runtime/package.ts",
 ];
 const FORBIDDEN_EAGER_EXTERNALS = new Set(["@narumitw/pi-tui-kit", "yaml"]);
+// `createRequire` is how a runtime resolves a package at call time instead of
+// importing it. The bundler renames the binding it produces, so the factory
+// call is the reliable marker, not the `require(...)` it returns.
+const CALL_TIME_RESOLUTION_PATTERN = /\bcreateRequire\s*\(/u;
 
 export async function buildRuntime({ outputDirectory = distDirectory, validateOutput = validateGeneratedFiles } = {}) {
   const resolvedOutputDirectory = resolve(outputDirectory);
@@ -126,6 +130,15 @@ export async function validateGeneratedFiles(outputDirectory) {
     }
     if (/["']\.\.?\/[^"']*src\//u.test(source)) {
       throw new Error(`Generated runtime imports authoritative source from ${runtimePath}`);
+    }
+    if (CALL_TIME_RESOLUTION_PATTERN.test(source)) {
+      // A compiled Pi binary loads the runtime through Jiti with tryNative
+      // disabled, so a package pulled in this late is resolved against the
+      // binary's embedded graph rather than the directory the package was
+      // installed into, and is simply not found there. Import it instead: the
+      // loader then resolves it while loading the extension, where a missing
+      // package is reported as a load error rather than a parse warning.
+      throw new Error(`Generated runtime resolves a package at call time in ${runtimePath}`);
     }
     for (const match of source.matchAll(/["'](\.\.?\/[^"']+\.js)["']/gu)) {
       const targetPath = join(dirname(runtimePath), match[1]).replaceAll("\\", "/");
