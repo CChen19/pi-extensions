@@ -4,9 +4,9 @@ import { syncCheckConfigFingerprint, syncConfigReviewFingerprint } from "../sett
 import type { AnySyncConfig } from "../settings/settings-types.js";
 import type { StartupObservation } from "../sync/sync-inspection.js";
 import { compareSyncInclude, type RemoteSelectionDecision, sameSyncInclude } from "../sync/sync-policy.js";
+import { setSyncStatus } from "./sync-status.js";
 import { safeTerminalText } from "./terminal-text.js";
 
-const STATUS_KEY = "sync";
 const WIDGET_KEY = "sync:attention";
 
 export type SyncAttentionOrigin = "sync" | "pull" | "push";
@@ -93,7 +93,7 @@ export function createSyncAttentionController(): SyncAttentionController {
       }
       if (!state && classification === "status") {
         ctx.ui.setWidget(WIDGET_KEY, undefined);
-        ctx.ui.setStatus(STATUS_KEY, observation?.inspection.remoteChanged ? "sync ⇣" : "sync ⇡");
+        setSyncStatus(ctx, observation?.inspection.remoteChanged ? "sync ⇣" : "sync ⇡");
         return;
       }
       const presentation = state
@@ -104,7 +104,7 @@ export function createSyncAttentionController(): SyncAttentionController {
           };
       if (ctx.mode !== "tui") {
         ctx.ui.setWidget(WIDGET_KEY, undefined);
-        ctx.ui.setStatus(STATUS_KEY, presentation.status);
+        setSyncStatus(ctx, presentation.status);
         return;
       }
       // Keep Kit outside the eager startup graph; module loading owns no cancellable resources.
@@ -113,7 +113,7 @@ export function createSyncAttentionController(): SyncAttentionController {
         throw error;
       });
       if (generation !== currentGeneration || signal?.aborted) return;
-      ctx.ui.setStatus(STATUS_KEY, presentation.status);
+      setSyncStatus(ctx, presentation.status);
       ctx.ui.setWidget(
         WIDGET_KEY,
         (_tui, theme) =>
@@ -190,6 +190,6 @@ function observationLines(observation: StartupObservation) {
 
 function clearAttentionPresentation(ctx: ExtensionContext) {
   if (!ctx.hasUI) return;
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  setSyncStatus(ctx, undefined);
   ctx.ui.setWidget(WIDGET_KEY, undefined);
 }

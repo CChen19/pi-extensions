@@ -64,6 +64,9 @@ export function validateSettingsDocument(value: Record<string, unknown>): PiSync
   if (value.skipSecretScan !== undefined && typeof value.skipSecretScan !== "boolean") {
     throw new Error("Invalid pi-sync settings: skipSecretScan must be boolean.");
   }
+  if (value.showStatus !== undefined && typeof value.showStatus !== "boolean") {
+    throw new Error("Invalid pi-sync settings: showStatus must be boolean.");
+  }
   const storageConnections = requireNamedObjectMap(
     value.storageConnections,
     "storageConnections",

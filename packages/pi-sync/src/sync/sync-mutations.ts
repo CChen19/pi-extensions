@@ -34,6 +34,7 @@ import {
   formatPushSummary,
   formatRollbackSummary,
 } from "../ui/sync-format.js";
+import { setSyncStatus } from "../ui/sync-status.js";
 import { readRemoteSnapshot, readSnapshotForHead, requireCompatibleRemoteSelection } from "./remote-snapshot.js";
 import { throwIfAborted } from "./signals.js";
 import { createSyncDecision } from "./sync-decision.js";
@@ -53,7 +54,6 @@ import {
   syncPolicyChanged,
 } from "./sync-state.js";
 
-const STATUS_KEY = "sync";
 const VERSION = 1;
 const POST_LOCAL_COMMIT_TIMEOUT_MS = 30_000;
 
@@ -99,7 +99,7 @@ export async function push(
 ) {
   const config = input?.config ?? (await loadConfig(options.setup));
   throwIfAborted(options.signal);
-  ctx.ui.setStatus(STATUS_KEY, `pushing ${config.setupName}`);
+  setSyncStatus(ctx, `pushing ${config.setupName}`);
   const backend = input?.backend ?? (await factory(config));
   const state = input?.state ?? (await readStateForConfig(config));
   throwIfAborted(options.signal);
@@ -191,7 +191,7 @@ export async function push(
     throw new PublicationStatePersistenceError(result.head, error);
   }
   if (options.signal?.aborted) return;
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  setSyncStatus(ctx, undefined);
   if (!options.silent) {
     ctx.ui.notify(
       [
@@ -213,7 +213,7 @@ export async function pull(
 ) {
   const config = await loadConfig(options.setup);
   throwIfAborted(options.signal);
-  ctx.ui.setStatus(STATUS_KEY, `pulling ${config.setupName}`);
+  setSyncStatus(ctx, `pulling ${config.setupName}`);
   const backend = await factory(config);
   const state = await readStateForConfig(config);
   throwIfAborted(options.signal);
@@ -256,7 +256,7 @@ export async function pull(
       formatPullSummary(config, backend.destination, local, remote, protectedSessionPaths(ctx).size),
     ))
   ) {
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setSyncStatus(ctx, undefined);
     ctx.ui.notify("Pull cancelled.", "info");
     return "cancelled" as const;
   }
@@ -279,7 +279,7 @@ export async function pull(
     include: [...config.include],
   });
   if (options.signal?.aborted) return "applied" as const;
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  setSyncStatus(ctx, undefined);
   if (!options.silent) {
     ctx.ui.notify(`Pulled ${remote.files.length} files from ${remote.id}. Backup: ${backup}`, "info");
   } else if (options.auto && config.include.includes("sessions") && snapshotIncludesSessions(remote)) {
@@ -574,7 +574,7 @@ async function confirmPush(
   );
   throwIfAborted(options.signal);
   if (confirmed) return true;
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  setSyncStatus(ctx, undefined);
   ctx.ui.notify("Push cancelled.", "info");
   return false;
 }

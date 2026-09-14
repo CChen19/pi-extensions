@@ -4,6 +4,7 @@
 
 - [Complete version 3 example](#complete-version-3-example)
 - [Required backend shapes](#required-backend-shapes)
+- [Status display](#status-display)
 - [Secret scanning](#secret-scanning)
 - [Included content](#included-content)
 - [Unsupported old settings and recovery](#unsupported-old-settings-and-recovery)
@@ -36,6 +37,7 @@ If both paths exist, `pi-sync.json` wins and the legacy file remains untouched.
   "activeSyncSetup": "home",
   "onSwitch": "ask-before-pull",
   "skipSecretScan": false,
+  "showStatus": true,
   "storageConnections": {
     "r2": {
       "type": "s3",
@@ -139,6 +141,13 @@ The global **After switching setup (all setups)** setting persists as `onSwitch`
 - `ask-before-pull` — switch, then ask in TUI whether to start a reviewed pull;
 - `pull-after-switch` — require observable UI and start the normal reviewed pull;
 - `switch-only` — switch without reading or applying remote content.
+
+### Status display
+
+The global `showStatus` setting accepts a boolean and defaults to `true` when omitted from an existing version 3 document.
+Set it through **/sync → Settings → Show status (all setups)**; changes are saved and applied immediately for every setup.
+When `false`, pi-sync clears and suppresses status text for background checks, manual and automatic transfers, and review attention.
+TUI review widgets and TUI/RPC notifications remain available, and lifecycle cleanup still clears any stale status owned by pi-sync.
 
 ### Secret scanning
 

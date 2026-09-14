@@ -12,10 +12,9 @@ import type { SyncLoaders } from "../sync/sync-loaders.js";
 import { RemoteSelectionMismatchError } from "../sync/sync-policy.js";
 import { automaticSyncSummary } from "../ui/automatic-sync-summary.js";
 import type { RunRouteResult } from "../ui/cancellable-operation.js";
+import { setSyncStatus } from "../ui/sync-status.js";
 import { parseOptions, resolveSyncCommand, splitArgs, usage, validateCommandOptions } from "./command.js";
 import type { CommandOptions } from "./command-types.js";
-
-const STATUS_KEY = "sync";
 
 export async function executeRecoveryCommand(
   rawArgs: string,
@@ -51,7 +50,7 @@ export async function executeRecoveryCommand(
     return { kind: "completed" };
   } catch (error) {
     if (signal?.aborted) return { kind: "failed" };
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setSyncStatus(ctx, undefined);
     if (error instanceof RemoteSelectionMismatchError) {
       return { kind: "remote-selection-required", decision: error.decision };
     }
@@ -173,7 +172,7 @@ export async function executeCommand(
     }
   } catch (error) {
     if (signal?.aborted) return { kind: "failed" };
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setSyncStatus(ctx, undefined);
     if (error instanceof SetupPullRequiresUiError) throw error;
     if (error instanceof RemoteSelectionMismatchError) {
       return { kind: "remote-selection-required", decision: error.decision };

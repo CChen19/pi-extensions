@@ -12,10 +12,9 @@ import {
   type SyncAttentionOrigin,
   syncAttentionMatchesConfig,
 } from "../ui/sync-attention.js";
+import { setSyncStatus } from "../ui/sync-status.js";
 import { parseOptions, splitArgs } from "./command.js";
 import { executeCommand, executeRecoveryCommand } from "./command-execution.js";
-
-const STATUS_KEY = "sync";
 
 export async function handleCommand(
   rawArgs: string,
@@ -49,7 +48,7 @@ export async function handleCommand(
       });
     } catch (error) {
       if (sessionSignal.aborted) return;
-      ctx.ui.setStatus(STATUS_KEY, undefined);
+      setSyncStatus(ctx, undefined);
       ctx.ui.notify(errorMessage(error), "error");
     }
     await reconcileObservation(attention, sessionSignal);

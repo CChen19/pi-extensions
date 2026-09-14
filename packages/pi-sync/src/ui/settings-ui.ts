@@ -13,6 +13,7 @@ import {
 import type { RunRoute } from "./cancellable-operation.js";
 import { dispatchManagerResult } from "./manager-result-dispatcher.js";
 import { AUTOMATIC_SYNC_DESCRIPTION } from "./setup/setup-prompts.js";
+import { configureSyncStatus } from "./sync-status.js";
 import { safeTerminalText } from "./terminal-text.js";
 
 export type SyncSettingsRoute = RunRoute;
@@ -29,7 +30,7 @@ export async function showSyncSettings(
   const initial = await loadConfig();
   if (signal?.aborted) return;
   const setupName = initial.setupName;
-  type Action = "automatic" | "skip-secret-scan" | "on-switch" | "include" | "remote-include";
+  type Action = "automatic" | "skip-secret-scan" | "show-status" | "on-switch" | "include" | "remote-include";
   const menu = defineMenu<Awaited<ReturnType<typeof loadConfig>>, "settings", Action, ExtensionCommandContext>({
     start: "settings",
     screens: {
@@ -55,6 +56,14 @@ export async function showSyncSettings(
             currentValue: state.skipSecretScan ? "On" : "Off",
             values: ["On", "Off"],
             action: "skip-secret-scan",
+          },
+          {
+            id: "showStatus",
+            label: "Show status (all setups)",
+            description: "All setups: show sync progress and attention in Pi status.",
+            currentValue: state.showStatus ? "On" : "Off",
+            values: ["On", "Off"],
+            action: "show-status",
           },
           {
             id: "onSwitch",
@@ -113,6 +122,23 @@ export async function showSyncSettings(
           await updateLocalConfig((settings) => ({ ...settings, skipSecretScan }), mutationSignal);
           if (mutationSignal.aborted) return { kind: "rejected" };
           ctx.ui.notify(`Secret scan ${skipSecretScan ? "disabled" : "enabled"} for pushes in all setups.`, "info");
+          return { kind: "stay" };
+        } catch (error) {
+          if (!mutationSignal.aborted) notifySaveFailure(ctx, error);
+          return { kind: "rejected" };
+        }
+      },
+      "show-status": async ({ value, signal: actionSignal }) => {
+        const showStatus = value === "On";
+        const mutationSignal = signal ? AbortSignal.any([signal, actionSignal]) : actionSignal;
+        try {
+          const latest = await loadConfig(setupName);
+          if (mutationSignal.aborted) return { kind: "rejected" };
+          if (latest.showStatus === showStatus) return { kind: "stay" };
+          await updateLocalConfig((settings) => ({ ...settings, showStatus }), mutationSignal);
+          if (mutationSignal.aborted) return { kind: "rejected" };
+          configureSyncStatus(ctx, showStatus);
+          ctx.ui.notify(`Pi Sync status ${showStatus ? "enabled" : "disabled"} for all setups.`, "info");
           return { kind: "stay" };
         } catch (error) {
           if (!mutationSignal.aborted) notifySaveFailure(ctx, error);

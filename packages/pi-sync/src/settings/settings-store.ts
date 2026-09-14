@@ -29,6 +29,7 @@ export function localConfigTemplate(): PiSyncSettingsV3 {
     version: 3,
     onSwitch: DEFAULT_ON_SWITCH,
     skipSecretScan: false,
+    showStatus: true,
     storageConnections: {},
     syncSetups: {},
   };

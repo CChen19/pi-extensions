@@ -158,6 +158,8 @@ Checks run once per session start, including `/reload`, new, resumed, and forked
 
 Shutdown behavior is unchanged: when **Automatic sync** is On and sessions are included, pi-sync can automatically push the selected content, not only session files. This also applies to headless modes; shutdown never opens a dialog, and `/reload` skips this push. Turning the setting Off disables both future startup checks and automatic shutdown pushes.
 
+**Settings → Show status (all setups)** defaults to **On**. Turning it Off immediately clears and suppresses pi-sync status text for background checks, transfers, and review attention; widgets and notifications remain available.
+
 **Settings → Skip secret scan (all setups)** defaults to **Off**; enable it only after reviewing the destination and selected content because it disables push scanning for every setup.
 See [Secret scanning](./docs/settings.md#secret-scanning) for the setting and diagnostic behavior.
 
@@ -169,6 +171,7 @@ A minimal Git setup uses an existing private remote and keeps automatic sync off
   "activeSyncSetup": "home",
   "onSwitch": "ask-before-pull",
   "skipSecretScan": false,
+  "showStatus": true,
   "storageConnections": {
     "github": {
       "type": "git",

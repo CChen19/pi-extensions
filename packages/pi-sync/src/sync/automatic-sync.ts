@@ -4,12 +4,13 @@ import type { CommandOptions } from "../commands/command-types.js";
 import { loadConfig, loadPartialConfig } from "../settings/config.js";
 import { isMissingConfigError } from "../settings/config-errors.js";
 import { consumeLocalConfigMigrationNotice } from "../settings/config-file.js";
-import { configuredSyncSetupNames } from "../settings/settings-store.js";
+import { readLocalConfigObject } from "../settings/settings-store.js";
 import { snapshotOptionsForContext } from "../snapshot/session-paths.js";
 import { recoverSnapshotTransactionsOnStartup } from "../snapshot/snapshot-transaction.js";
 import { withLock } from "../state/lock.js";
 import { stateDirectoryMigrationNotice } from "../state/state-directory.js";
 import { ensureStateDir, readStateForConfig } from "../state/sync-state-store.js";
+import { configureSyncStatus, setSyncStatus } from "../ui/sync-status.js";
 import { safeTerminalText } from "../ui/terminal-text.js";
 import { throwIfAborted } from "./signals.js";
 import { errorMessage } from "./sync-errors.js";
@@ -25,8 +26,6 @@ const AUTO_SYNC_OPTIONS: CommandOptions = {
   args: [],
 };
 
-const STATUS_KEY = "sync";
-
 export async function startSession(ctx: ExtensionContext, signal: AbortSignal) {
   throwIfAborted(signal);
   const stateNotice = stateDirectoryMigrationNotice();
@@ -36,9 +35,11 @@ export async function startSession(ctx: ExtensionContext, signal: AbortSignal) {
   await recoverSnapshotTransactionsOnStartup();
   throwIfAborted(signal);
   try {
-    const names = await configuredSyncSetupNames();
+    const settings = await readLocalConfigObject();
     throwIfAborted(signal);
+    const names = settings ? Object.keys(settings.syncSetups).sort((left, right) => left.localeCompare(right)) : [];
     setSyncSetupCompletions(names);
+    configureSyncStatus(ctx, settings?.showStatus ?? true);
   } catch {
     if (signal.aborted) return;
     setSyncSetupCompletions([]);
@@ -50,6 +51,7 @@ export async function startSession(ctx: ExtensionContext, signal: AbortSignal) {
   try {
     const config = await loadConfig();
     throwIfAborted(signal);
+    configureSyncStatus(ctx, config.showStatus);
     return config.automatic ? config : undefined;
   } catch (error) {
     throwIfAborted(signal);
@@ -90,7 +92,7 @@ export async function autoPushSessions(ctx: ExtensionContext, signal: AbortSigna
     });
   } catch (error) {
     if (signal.aborted || isMissingConfigError(error)) return;
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setSyncStatus(ctx, undefined);
     ctx.ui.notify(`pi-sync session push skipped: ${errorMessage(error)}`, "warning");
   }
 }

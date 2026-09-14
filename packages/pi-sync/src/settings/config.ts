@@ -58,6 +58,7 @@ function configFromSettings(settings: PiSyncSettingsV3, setupName?: string): Any
     connection,
     settings.onSwitch,
     settings.skipSecretScan ?? false,
+    settings.showStatus ?? true,
   );
 }
 
@@ -75,6 +76,7 @@ export async function loadPartialConfig(setupName?: string): Promise<PartialConf
     include: [...config.include],
     automatic: config.automatic,
     onSwitch: config.onSwitch,
+    showStatus: config.showStatus,
   };
 }
 
@@ -85,7 +87,7 @@ export function syncSetupStorageReview(
   connection: StorageConnectionSettings,
 ): SyncSetupStorageReview {
   return storageReviewFromConfig(
-    resolveSyncConfig(setupName, setup, connectionName, connection, DEFAULT_ON_SWITCH, false),
+    resolveSyncConfig(setupName, setup, connectionName, connection, DEFAULT_ON_SWITCH, false, true),
   );
 }
 
@@ -96,7 +98,7 @@ export function syncSetupReviewIdentity(
   connection: StorageConnectionSettings,
 ) {
   return syncConfigReviewIdentity(
-    resolveSyncConfig(setupName, setup, connectionName, connection, DEFAULT_ON_SWITCH, false),
+    resolveSyncConfig(setupName, setup, connectionName, connection, DEFAULT_ON_SWITCH, false, true),
   );
 }
 
@@ -116,7 +118,9 @@ export function syncConfigReviewFingerprint(config: AnySyncConfig) {
 
 /** Internal freshness token, including credentials; never display or persist it. */
 export function syncCheckConfigFingerprint(config: AnySyncConfig) {
-  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify({ ...config, showStatus: undefined }))
+    .digest("hex");
 }
 
 function storageReviewFromConfig(config: AnySyncConfig): SyncSetupStorageReview {
@@ -139,6 +143,7 @@ function resolveSyncConfig(
   connection: StorageConnectionSettings,
   onSwitch: OnSwitchAction,
   skipSecretScan: boolean,
+  showStatus: boolean,
 ): AnySyncConfig {
   const storagePath = normalizeStoragePath(setup.storage.path);
   const namespace = storagePath === "./" ? "root" : storagePath.slice(storagePath.lastIndexOf("/") + 1);
@@ -152,6 +157,7 @@ function resolveSyncConfig(
     automatic: setup.sync.automatic,
     onSwitch,
     skipSecretScan,
+    showStatus,
   };
   if (connection.type === "git") {
     return {

@@ -20,9 +20,8 @@ import {
   sameSyncInclude,
 } from "../sync/sync-policy.js";
 import { type RunRoute, type RunRouteResult, runCancellableOperation } from "./cancellable-operation.js";
+import { setSyncStatus } from "./sync-status.js";
 import { safeTerminalText } from "./terminal-text.js";
-
-const STATUS_KEY = "sync";
 
 export type RemoteSelectionOrigin = "settings" | "sync" | "pull" | "push";
 
@@ -123,7 +122,7 @@ export async function showRemoteSelectionReview(
     ctx.ui.notify(`Could not review synced content: ${errorMessage(error)}`, "error");
     return { kind: "back" };
   } finally {
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setSyncStatus(ctx, undefined);
   }
 }
 
@@ -241,6 +240,7 @@ async function showSelectionDifference(
             include: [...state.decision.remoteInclude],
             automatic: review.config.automatic,
             onSwitch: review.config.onSwitch,
+            showStatus: review.config.showStatus,
           };
           flowState = { decision: state.decision, saved: true };
           return { kind: "to" as const, screen: "saved" as const };
@@ -434,7 +434,7 @@ async function inspectConfiguredRemoteSelection(
 > {
   const config = await loadConfig(setupName);
   if (signal?.aborted) return undefined;
-  ctx.ui.setStatus(STATUS_KEY, `checking synced content for ${safeTerminalText(config.setupName)}`);
+  setSyncStatus(ctx, `checking synced content for ${safeTerminalText(config.setupName)}`);
   const backend = await factory(config);
   if (signal?.aborted) return undefined;
   const head = await backend.readHead(signal);
