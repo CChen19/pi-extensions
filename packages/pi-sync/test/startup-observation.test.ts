@@ -61,7 +61,7 @@ test("advisory widget is read-only, sanitized, narrow, themed at render time, an
       "sync",
     );
     await attention.publish(context.ctx);
-    assert.equal(context.statuses.get("sync"), "⇕");
+    assert.equal(context.statuses.get("sync"), "sync ⇕");
     attention.reset(context.ctx);
     assert.equal(attention.observation(), undefined);
     assert.equal(context.widgets.get("sync:attention"), undefined);
@@ -181,7 +181,7 @@ test("replacement sessions sharing a UI cannot inherit a late failure or clear n
     const completion = observeCheckCompletion(second.ctx);
     await mock.events.get("session_start")?.[0]?.({}, second.ctx);
     await completion.completed;
-    assert.equal(first.statuses.get("sync"), "⇡");
+    assert.equal(first.statuses.get("sync"), "sync ⇡");
     assert.equal(first.widgets.get("sync:attention"), undefined);
     assert.deepEqual(first.notifications, []);
     await mock.events.get("session_shutdown")?.[0]?.({ reason: "reload" }, second.ctx);

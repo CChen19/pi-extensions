@@ -54,7 +54,7 @@ export function observeCheckCompletion(ctx: ExtensionContext) {
   ui.setStatus = (key, value) => {
     setStatus(key, value);
     if (key !== "sync") return;
-    if (value === "checking in background") {
+    if (value === "sync ...") {
       started = true;
       checking.resolve();
     } else if (started) completed.resolve();

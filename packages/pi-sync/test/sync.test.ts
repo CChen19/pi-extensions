@@ -227,7 +227,7 @@ test("direct interactive selection mismatch opens recovery and cancellation pres
     await running;
 
     assert.deepEqual(notifications, []);
-    assert.match(statuses.get("sync") ?? "", /⇕/u);
+    assert.match(statuses.get("sync") ?? "", /sync ⇕/u);
     assert.ok(widgets.get("sync:attention"));
   });
 });
@@ -310,7 +310,7 @@ test("direct TUI --yes mismatch remains non-interactive but publishes attention"
 
     assert.equal(customCalls, 0);
     assert.match(notifications.at(-1)?.message ?? "", /Remote-only: models\.json/u);
-    assert.match(statuses.get("sync") ?? "", /⇕/u);
+    assert.match(statuses.get("sync") ?? "", /sync ⇕/u);
   });
 });
 
@@ -335,7 +335,7 @@ test("a successful deterministic force push clears matching attention", async ()
     });
     const { ctx, statuses, widgets } = createMockContext({ hasUI: true, mode: "tui" });
     await mock.commands.get("sync")?.handler("pull --yes --setup home", ctx);
-    assert.match(statuses.get("sync") ?? "", /⇕/u);
+    assert.match(statuses.get("sync") ?? "", /sync ⇕/u);
 
     await mock.commands.get("sync")?.handler("push --force --yes --setup home", ctx);
 
@@ -364,7 +364,7 @@ test("a later direct command clears attention invalidated by local setup changes
     });
     const { ctx, statuses, widgets } = createMockContext({ hasUI: true, mode: "tui" });
     await mock.commands.get("sync")?.handler("pull --yes --setup home", ctx);
-    assert.match(statuses.get("sync") ?? "", /⇕/u);
+    assert.match(statuses.get("sync") ?? "", /sync ⇕/u);
     await updateLocalConfig((settings) => ({
       ...settings,
       syncSetups: {
@@ -511,7 +511,7 @@ test("startup selection mismatch stays passive until the user opens the manager"
     await mock.events.get("session_start")?.[0]?.({}, ctx);
     await completion.completed;
     assert.deepEqual(notifications, []);
-    assert.match(statuses.get("sync") ?? "", /⇕/u);
+    assert.match(statuses.get("sync") ?? "", /sync ⇕/u);
     assert.ok(widgets.get("sync:attention"));
     assert.deepEqual(readFileSync(localConfigPath()), before);
 
