@@ -25,7 +25,7 @@ test("attention presentation is sanitized, textual, bounded, and clearable", asy
 
   await controller.publish(ctx);
 
-  assert.equal(statuses.get("sync"), "⇕");
+  assert.equal(statuses.get("sync"), "sync ⇕");
   const factory = widgets.get("sync:attention");
   assert.equal(typeof factory, "function");
   const themeCalls: string[] = [];
@@ -176,7 +176,13 @@ for (const selection of ["absent", "same", "legacy", "order", "scope"] as const)
             assert.equal(typeof widgets.get("sync:attention"), expected === "review" ? "function" : "undefined");
             assert.equal(
               statuses.get("sync"),
-              expected === "review" ? "⇕" : expected === "status" ? (remoteChanged ? "⇣" : "⇡") : undefined,
+              expected === "review"
+                ? "sync ⇕"
+                : expected === "status"
+                  ? remoteChanged
+                    ? "sync ⇣"
+                    : "sync ⇡"
+                  : undefined,
             );
             assert.equal(notifications.length, expected === "review" ? 1 : 0);
             assert.equal(controller.observation(), value);
@@ -210,7 +216,7 @@ for (const inspection of [
       "sync",
     );
     await controller.publish(ctx);
-    assert.equal(statuses.get("sync"), "⇕");
+    assert.equal(statuses.get("sync"), "sync ⇕");
     assert.equal(typeof widgets.get("sync:attention"), "function");
     assert.equal(controller.markOffered(), true);
     assert.equal(controller.markOffered(), false);
@@ -247,11 +253,11 @@ for (const mode of ["tui", "rpc", "print", "json"] as const) {
         mode === "print" || mode === "json"
           ? undefined
           : review
-            ? "⇕"
+            ? "sync ⇕"
             : changes.remoteChanged
-              ? "⇣"
+              ? "sync ⇣"
               : changes.localChanged
-                ? "⇡"
+                ? "sync ⇡"
                 : undefined,
       );
       assert.equal(controller.observation(), value);
@@ -281,7 +287,7 @@ for (const next of ["status", "none", "guidance", "reset", "abort"] as const) {
     }
     await pending;
     assert.equal(widgets.get("sync:attention"), undefined);
-    assert.equal(statuses.get("sync"), next === "status" ? "⇡" : undefined);
+    assert.equal(statuses.get("sync"), next === "status" ? "sync ⇡" : undefined);
   });
 }
 
@@ -321,7 +327,7 @@ for (const stale of [false, true]) {
       release();
       await rejected;
       assert.equal(widgets.get("sync:attention"), undefined);
-      assert.equal(statuses.get("sync"), stale ? "⇡" : undefined);
+      assert.equal(statuses.get("sync"), stale ? "sync ⇡" : undefined);
     } finally {
       release();
       await rejected;

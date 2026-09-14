@@ -50,7 +50,7 @@ export function createStartupCheck(loaders: SyncLoaders, attention: SyncAttentio
             const captured = config;
             const identity = syncCheckConfigFingerprint(captured);
             checking = true;
-            ctx.ui.setStatus(STATUS_KEY, "checking in background");
+            ctx.ui.setStatus(STATUS_KEY, "sync ...");
             const { inspectSync } = await loaders.inspection();
             throwIfAborted(signal);
             const currentConfig = await loadConfigForCheck();

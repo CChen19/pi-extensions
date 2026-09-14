@@ -55,7 +55,7 @@ for (const reason of ["startup", "reload", "new", "resume", "fork"] as const) {
       await mock.events.get("session_start")?.[0]?.({ reason }, context.ctx);
       await started.promise;
       assert.equal(mutatingLoads, 0);
-      assert.equal(context.statuses.get("sync"), "checking in background");
+      assert.equal(context.statuses.get("sync"), "sync ...");
       const command = mock.commands.get("sync")?.handler("help", context.ctx);
       // Use the task's abort event, not a network sleep, as the handoff boundary.
       await vi.waitFor(() => assert.equal(aborted, true));
