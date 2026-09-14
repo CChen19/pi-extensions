@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import type { TomlTable } from "smol-toml";
+import { parse as parseToml, type TomlTable } from "smol-toml";
 import { type FormatNode, formatVariables, parseFormat, styleVariables } from "./format/formatter.js";
 import { type ColorPalette, isValidStyle, parseColor } from "./format/style.js";
 import { MODULE_DEFINITIONS, MODULE_NAMES, type ModuleName } from "./modules/catalog.js";
@@ -96,14 +95,6 @@ export const BUILT_IN_CONFIG: StarshipConfig = {
 };
 
 export const BUILT_IN_EXAMPLE = `# Native Pi modules with Starship-compatible format and style syntax.\n${BUILT_IN_FORMAT_DOCUMENT}\n`;
-
-const require = createRequire(import.meta.url);
-let parseTomlImplementation: typeof import("smol-toml")["parse"] | undefined;
-
-function parseToml(document: string): TomlTable {
-  parseTomlImplementation ??= (require("smol-toml") as typeof import("smol-toml")).parse;
-  return parseTomlImplementation(document);
-}
 
 export function settingsFilePath(agentDir: string): string {
   return join(agentDir, CONFIG_FILE_NAME);

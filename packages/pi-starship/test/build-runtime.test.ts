@@ -4,6 +4,7 @@ import { SourceMap } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 
 const packageRoot = resolve("packages/pi-starship");
@@ -190,6 +191,71 @@ test("runtime builds are deterministic, mapped, external, and remove stale chunk
     assert.ok("originalSource" in mapped, "expected generated entry to map to source");
     assert.match(mapped.originalSource ?? "", /src\/pi-starship\.ts$/u);
   } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("generated runtime refuses to resolve a package at call time", async () => {
+  const builder = await loadBuilder();
+  const root = await mkdtemp(join(packageRoot, ".pi-starship-build-test-"));
+  try {
+    const output = join(root, "dist");
+    await builder.buildRuntime({ outputDirectory: output });
+    await assert.doesNotReject(builder.validateGeneratedFiles(output));
+
+    // What `createRequire(import.meta.url)` compiles to. A compiled Pi binary
+    // resolves the package it returns against the binary's embedded graph
+    // rather than the directory the package was installed into, so the package
+    // is not found there (#1307). The bundler renames the binding, so the
+    // factory call is what the gate looks for.
+    const chunkName = (await listFiles(output)).find((path) => path.startsWith("chunks/") && path.endsWith(".js"));
+    assert.ok(chunkName);
+    const chunkPath = join(output, chunkName);
+    const chunkSource = await readFile(chunkPath, "utf8");
+    await writeFile(
+      chunkPath,
+      `${chunkSource}\nvar require2 = createRequire(import.meta.url);\nvar late = require2("smol-toml");\n`,
+      "utf8",
+    );
+    await assert.rejects(
+      builder.validateGeneratedFiles(output),
+      new RegExp(`resolves a package at call time in ${chunkName.replace(".", "\\.")}`, "u"),
+    );
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("generated runtime is loadable by Pi's Jiti resource loader", async () => {
+  const builder = await loadBuilder();
+  const root = await mkdtemp(join(packageRoot, ".pi-starship-build-test-"));
+  const agentDir = join(root, "agent");
+  const output = join(root, "dist");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  try {
+    await builder.buildRuntime({ outputDirectory: output });
+    await mkdir(agentDir, { recursive: true });
+    // The settings file is the representative boundary: reading it is the only
+    // thing the runtime needs an external package for.
+    await writeFile(join(agentDir, "pi-starship.toml"), 'format = "$directory"\n', "utf8");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const loader = new DefaultResourceLoader({
+      cwd: root,
+      agentDir,
+      settingsManager: SettingsManager.inMemory({}),
+      additionalExtensionPaths: [join(output, "index.ts")],
+    });
+    await loader.reload();
+    const loaded = loader.getExtensions();
+    assert.deepEqual(loaded.errors, []);
+    assert.equal(loaded.extensions.length, 1);
+    const extension = loaded.extensions[0];
+    assert.ok(extension?.commands.has("starship"));
+    assert.ok(extension?.handlers.has("session_start"));
+    assert.ok(extension?.handlers.has("session_shutdown"));
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     await rm(root, { force: true, recursive: true });
   }
 });
