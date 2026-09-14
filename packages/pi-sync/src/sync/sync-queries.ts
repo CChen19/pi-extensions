@@ -8,6 +8,7 @@ import { createSnapshot, scanSnapshot } from "../snapshot/snapshot.js";
 import type { SnapshotOptions } from "../snapshot/snapshot-types.js";
 import { inspectLock, isLockGuardHeld, isStaleLock, withLock } from "../state/lock.js";
 import { formatDiff, formatSnapshotOnlyDiff, publicationCapabilityDescription } from "../ui/sync-format.js";
+import { setSyncStatus } from "../ui/sync-status.js";
 import { safeTerminalText } from "../ui/terminal-text.js";
 import { formatRemoteSelectionStatus, readRemoteSnapshot } from "./remote-snapshot.js";
 import { throwIfAborted } from "./signals.js";
@@ -15,7 +16,6 @@ import { errorMessage } from "./sync-errors.js";
 import { inspectSync } from "./sync-inspection.js";
 import { rollback } from "./sync-mutations.js";
 
-const STATUS_KEY = "sync";
 const DEFAULT_PROFILE = "default";
 
 export async function status(
@@ -25,7 +25,7 @@ export async function status(
 ) {
   const config = await loadConfig(options.setup);
   throwIfAborted(options.signal);
-  ctx.ui.setStatus(STATUS_KEY, `checking ${config.setupName}`);
+  setSyncStatus(ctx, `checking ${config.setupName}`);
   const { head, selectionState, localChanged, remoteChanged, localFiles, destination, capability } = await inspectSync(
     config,
     snapshotOptionsForContext(ctx, config),
@@ -36,7 +36,7 @@ export async function status(
 
   const remoteText = head ? `remote: ${head.snapshotId} from ${head.machine} at ${head.createdAt}` : "remote: empty";
   const warnings = syncSessionsWarnings(config);
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  setSyncStatus(ctx, undefined);
   ctx.ui.notify(
     [
       `sync setup: ${config.setupName}`,
@@ -63,7 +63,7 @@ export async function diff(
 ) {
   const config = await loadConfig(options.setup);
   throwIfAborted(options.signal);
-  ctx.ui.setStatus(STATUS_KEY, `checking ${config.setupName}`);
+  setSyncStatus(ctx, `checking ${config.setupName}`);
   const backend = await factory(config);
   const local = await createSnapshot(config.snapshotIdentity, snapshotOptionsForContext(ctx, config));
   throwIfAborted(options.signal);
@@ -71,7 +71,7 @@ export async function diff(
     allowSelectionDifference: true,
   });
   throwIfAborted(options.signal);
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  setSyncStatus(ctx, undefined);
 
   const warnings = syncSessionsWarnings(config);
   const header = [

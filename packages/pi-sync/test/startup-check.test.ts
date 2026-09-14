@@ -70,6 +70,35 @@ for (const reason of ["startup", "reload", "new", "resume", "fork"] as const) {
   });
 }
 
+test("disabled status suppresses startup progress and one-sided results", async () => {
+  await configured(async () => {
+    const settings = { ...v3S3Settings({ automatic: true }), showStatus: false };
+    await fs.writeFile(localConfigPath(), JSON.stringify(settings));
+    const { default: sync } = await import("../src/sync-extension.js");
+    const entered = deferred();
+    const release = deferred();
+    const mock = createMockPi();
+    sync(mock.pi, {
+      loadSyncInspection: async () => ({
+        inspectSync: async (config) => {
+          entered.resolve();
+          await release.promise;
+          return inspectionFixture(config, { localChanged: true });
+        },
+      }),
+    });
+    const context = createMockContext({ mode: "rpc" });
+    await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+    await entered.promise;
+    assert.equal(context.statuses.get("sync"), undefined);
+    release.resolve();
+    await mock.commands.get("sync")?.handler("help", context.ctx);
+    assert.equal(context.statuses.get("sync"), undefined);
+    assert.equal(context.widgets.get("sync:attention"), undefined);
+    await mock.events.get("session_shutdown")?.[0]?.({ reason: "reload" }, context.ctx);
+  });
+});
+
 for (const mode of ["tui", "rpc", "print", "json"] as const) {
   for (const automatic of [false, true]) {
     test(`${mode} automatic=${automatic}: correct loading and no startup dialogs`, async () => {

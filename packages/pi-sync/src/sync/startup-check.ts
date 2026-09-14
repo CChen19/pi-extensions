@@ -7,12 +7,11 @@ import { withLock } from "../state/lock.js";
 import { withStateDirectoryAccess } from "../state/state-directory.js";
 import { readStateForConfig, syncStateFingerprint } from "../state/sync-state-store.js";
 import type { SyncAttentionController } from "../ui/sync-attention.js";
+import { setSyncStatus } from "../ui/sync-status.js";
 import { safeTerminalText } from "../ui/terminal-text.js";
 import { combineSignals, throwIfAborted } from "./signals.js";
 import { errorMessage } from "./sync-errors.js";
 import type { SyncLoaders } from "./sync-loaders.js";
-
-const STATUS_KEY = "sync";
 
 /** One owned task per extension session, never keyed by the shared headless UI. */
 export function createStartupCheck(loaders: SyncLoaders, attention: SyncAttentionController, timeoutMs = 30_000) {
@@ -50,7 +49,7 @@ export function createStartupCheck(loaders: SyncLoaders, attention: SyncAttentio
             const captured = config;
             const identity = syncCheckConfigFingerprint(captured);
             checking = true;
-            ctx.ui.setStatus(STATUS_KEY, "sync ...");
+            setSyncStatus(ctx, "sync ...");
             const { inspectSync } = await loaders.inspection();
             throwIfAborted(signal);
             const currentConfig = await loadConfigForCheck();

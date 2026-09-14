@@ -93,6 +93,7 @@ export interface PiSyncSettingsV3 {
   activeSyncSetup?: string;
   onSwitch: OnSwitchAction;
   skipSecretScan?: boolean;
+  showStatus?: boolean;
   storageConnections: Record<string, StorageConnectionSettings>;
   syncSetups: Record<string, SyncSetupSettings>;
   [key: string]: unknown;
@@ -108,6 +109,7 @@ export interface SyncConfig<Backend extends ResolvedSyncBackend = ResolvedS3Back
   automatic: boolean;
   onSwitch: OnSwitchAction;
   skipSecretScan: boolean;
+  showStatus: boolean;
   backend: Backend;
 }
 
@@ -123,6 +125,7 @@ export interface PartialConfig {
   include: string[];
   automatic: boolean;
   onSwitch: OnSwitchAction;
+  showStatus: boolean;
   bucket?: string;
   branch?: string;
 }

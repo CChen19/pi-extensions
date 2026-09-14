@@ -9,6 +9,7 @@ import {
   observationNeedsAttention,
   observationSummary,
 } from "../src/ui/sync-attention.js";
+import { configureSyncStatus } from "../src/ui/sync-status.js";
 
 test("attention presentation is sanitized, textual, bounded, and clearable", async () => {
   const controller = createSyncAttentionController();
@@ -57,6 +58,18 @@ test("attention presentation is sanitized, textual, bounded, and clearable", asy
   controller.clear(ctx);
   assert.equal(statuses.get("sync"), undefined);
   assert.equal(widgets.get("sync:attention"), undefined);
+});
+
+test("disabled status preserves the TUI review widget", async () => {
+  const controller = createSyncAttentionController();
+  const { ctx, statuses, widgets } = createMockContext({ hasUI: true, mode: "tui" });
+  configureSyncStatus(ctx, false);
+  controller.observe(observation({ localChanged: true, remoteChanged: true }));
+
+  await controller.publish(ctx);
+
+  assert.equal(statuses.get("sync"), undefined);
+  assert.equal(typeof widgets.get("sync:attention"), "function");
 });
 
 test("attention presentation explains an order-only difference", async () => {

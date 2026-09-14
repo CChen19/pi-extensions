@@ -28,6 +28,7 @@ import sync from "../src/sync.js";
 import { showSyncSettings } from "../src/ui/settings-ui.js";
 import { showSetupWizard } from "../src/ui/setup/setup-wizard.js";
 import { showStorageConnections } from "../src/ui/storage-connections-ui.js";
+import { configureSyncStatus, setSyncStatus } from "../src/ui/sync-status.js";
 import { v3S3Settings, withTempHome } from "./helpers.js";
 import { createMockContext } from "./setup-test-context.js";
 
@@ -79,6 +80,7 @@ test.each([
     await mock.commands.get("sync")?.handler("", ctx);
     const saved = await readLocalConfigObject();
     assert.equal(saved?.skipSecretScan, false);
+    assert.equal(saved?.showStatus, true);
     assert.deepEqual(saved?.storageConnections[name], {
       type: "s3",
       endpoint: "https://account.r2.cloudflarestorage.com",
@@ -714,6 +716,37 @@ test("settings UI persists the global secret-scan override", async () => {
   });
 });
 
+test("settings UI disables status globally and applies the saved value immediately", async () => {
+  await withTempHome(async (agentDir) => {
+    mkdirSync(agentDir, { recursive: true });
+    writeSettings();
+    const context = createMockContext({
+      hasUI: true,
+      mode: "tui",
+      custom: async (factory: unknown) => {
+        const harness = createCustomSelectorHarness(factory, 100);
+        harness.handleInput("tui.select.down");
+        harness.handleInput("tui.select.down");
+        harness.handleInput("\r");
+        for (let attempt = 0; attempt < 100 && context.notifications.length === 0; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        harness.handleInput("\u001b");
+        return harness.result;
+      },
+    });
+    setSyncStatus(context.ctx, "before");
+
+    await showSyncSettings(context.ctx, async () => undefined);
+
+    assert.equal((await loadConfig()).showStatus, false);
+    assert.equal((await readLocalConfigObject())?.showStatus, false);
+    assert.equal(context.statuses.get("sync"), undefined);
+    setSyncStatus(context.ctx, "after");
+    assert.equal(context.statuses.get("sync"), undefined);
+  });
+});
+
 test("settings UI disposes on session replacement without mutating settings", async () => {
   await withTempHome(async (agentDir) => {
     mkdirSync(agentDir, { recursive: true });
@@ -771,6 +804,50 @@ test("settings UI restores its displayed value when a private atomic save is rej
     assert.match(afterFailure, /Off/u);
     assert.match(notifications.at(-1)?.message ?? "", /settings save failed/iu);
     assert.equal((await loadConfig()).skipSecretScan, false);
+  });
+});
+
+test("a rejected status save preserves its displayed, persisted, and runtime value", {
+  skip: process.platform === "win32",
+}, async () => {
+  await withTempHome(async (agentDir) => {
+    mkdirSync(agentDir, { recursive: true });
+    writeSettings();
+    let afterFailure = "";
+    const context = createMockContext({
+      hasUI: true,
+      mode: "tui",
+      custom: async (factory: unknown) => {
+        const harness = createCustomSelectorHarness(factory, 80);
+        harness.handleInput("tui.select.down");
+        harness.handleInput("tui.select.down");
+        harness.handleInput("\r");
+        for (let attempt = 0; attempt < 100 && context.notifications.length === 0; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        afterFailure = harness.render().join("\n");
+        harness.handleInput("\u001b");
+        return harness.result;
+      },
+    });
+    configureSyncStatus(context.ctx, true);
+    setSyncStatus(context.ctx, "before");
+    await withConfigFilePublicationForTest(
+      async () => {
+        const error = new Error("injected status settings failure") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      },
+      () => showSyncSettings(context.ctx, async () => undefined),
+    );
+
+    assert.match(afterFailure, /Show status/u);
+    assert.match(afterFailure, /On/u);
+    assert.match(context.notifications.at(-1)?.message ?? "", /settings save failed/iu);
+    assert.equal((await loadConfig()).showStatus, true);
+    assert.equal((await readLocalConfigObject())?.showStatus, undefined);
+    setSyncStatus(context.ctx, "after");
+    assert.equal(context.statuses.get("sync"), "after");
   });
 });
 

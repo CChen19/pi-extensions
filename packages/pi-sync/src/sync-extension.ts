@@ -9,9 +9,8 @@ import { createStartupCheck } from "./sync/startup-check.js";
 import { errorMessage } from "./sync/sync-errors.js";
 import { createSyncLoaders, type SyncDependencies } from "./sync/sync-loaders.js";
 import { createSyncAttentionController } from "./ui/sync-attention.js";
+import { setSyncStatus } from "./ui/sync-status.js";
 import { safeTerminalText } from "./ui/terminal-text.js";
-
-const STATUS_KEY = "sync";
 
 export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDependencies> = {}) {
   const loaders = createSyncLoaders(dependencies);
@@ -103,7 +102,7 @@ export default function sync(pi: ExtensionAPI, dependencies: Partial<SyncDepende
       if (shutdownAbort === controller) shutdownAbort = undefined;
     }
     if (signal.aborted) return;
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setSyncStatus(ctx, undefined);
   });
 }
 

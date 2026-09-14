@@ -10,6 +10,7 @@ import { recoverSnapshotTransactionsOnStartup } from "../snapshot/snapshot-trans
 import { withLock } from "../state/lock.js";
 import { stateDirectoryMigrationNotice } from "../state/state-directory.js";
 import { ensureStateDir, readStateForConfig } from "../state/sync-state-store.js";
+import { configureSyncStatus, setSyncStatus } from "../ui/sync-status.js";
 import { safeTerminalText } from "../ui/terminal-text.js";
 import { throwIfAborted } from "./signals.js";
 import { errorMessage } from "./sync-errors.js";
@@ -24,8 +25,6 @@ const AUTO_SYNC_OPTIONS: CommandOptions = {
   auto: true,
   args: [],
 };
-
-const STATUS_KEY = "sync";
 
 export async function startSession(ctx: ExtensionContext, signal: AbortSignal) {
   throwIfAborted(signal);
@@ -50,6 +49,7 @@ export async function startSession(ctx: ExtensionContext, signal: AbortSignal) {
   try {
     const config = await loadConfig();
     throwIfAborted(signal);
+    configureSyncStatus(ctx, config.showStatus);
     return config.automatic ? config : undefined;
   } catch (error) {
     throwIfAborted(signal);
@@ -90,7 +90,7 @@ export async function autoPushSessions(ctx: ExtensionContext, signal: AbortSigna
     });
   } catch (error) {
     if (signal.aborted || isMissingConfigError(error)) return;
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setSyncStatus(ctx, undefined);
     ctx.ui.notify(`pi-sync session push skipped: ${errorMessage(error)}`, "warning");
   }
 }
