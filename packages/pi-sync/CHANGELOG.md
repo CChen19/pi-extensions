@@ -1,5 +1,15 @@
 # @narumitw/pi-sync
 
+## 0.51.0
+
+### Minor Changes
+
+- bef29cf: Add a global Show status setting that can suppress pi-sync status text while preserving widgets and notifications.
+
+### Patch Changes
+
+- ae48402: Replace verbose status messages with compact `sync ...`, `sync ⇡`, `sync ⇣`, and `sync ⇕` indicators.
+
 ## 0.50.3
 
 ### Patch Changes
