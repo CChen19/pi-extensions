@@ -93,16 +93,13 @@ export function createSyncAttentionController(): SyncAttentionController {
       }
       if (!state && classification === "status") {
         ctx.ui.setWidget(WIDGET_KEY, undefined);
-        ctx.ui.setStatus(
-          STATUS_KEY,
-          observation?.inspection.remoteChanged ? "remote changes pending" : "local changes pending",
-        );
+        ctx.ui.setStatus(STATUS_KEY, observation?.inspection.remoteChanged ? "⇣" : "⇡");
         return;
       }
       const presentation = state
         ? attentionPresentation(state.decision)
         : {
-            status: "changes to review",
+            status: "⇕",
             lines: observationLines(observation as StartupObservation),
           };
       if (ctx.mode !== "tui") {
@@ -140,7 +137,7 @@ function attentionPresentation(decision: RemoteSelectionDecision) {
       ? "Only list order differs"
       : `Remote ${comparison.remoteOnly.length} · Device ${comparison.localOnly.length}`;
   return {
-    status: "review needed",
+    status: "⇕",
     lines: [`Pi Sync needs review · ${setupName}`, difference, "No changes · Run /sync to review"],
   };
 }

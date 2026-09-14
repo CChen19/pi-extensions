@@ -80,7 +80,7 @@ test("cancelling a real push confirmation preserves the hint and all content wit
     assert.equal(headReads, 1);
     assert.equal(confirmations, 1);
     assert.equal(attention.observation(), observation);
-    assert.equal(context.statuses.get("sync"), "local changes pending");
+    assert.equal(context.statuses.get("sync"), "⇡");
     assert.equal(context.widgets.get("sync:attention"), undefined);
     assert.deepEqual(await fs.readFile(localConfigPath()), settingsBefore);
     assert.equal(await fs.readFile(managedPath, "utf8"), managedBytes);
@@ -114,7 +114,7 @@ for (const route of ["sync", "push", "pull", "rollback snapshot"]) {
         assert.equal(runs, 1);
         const committed = outcome.startsWith("commit");
         assert.equal(attention.observation(), committed ? undefined : observation);
-        assert.equal(context.statuses.get("sync"), committed ? undefined : "local changes pending");
+        assert.equal(context.statuses.get("sync"), committed ? undefined : "⇡");
         assert.equal(context.widgets.get("sync:attention"), undefined);
       });
     });
@@ -148,7 +148,7 @@ test("a busy manager hides unavailable baseline data without discarding the stor
       handleCommand("", context.ctx, new AbortController().signal, createSyncLoaders({}), attention),
     );
     assert.equal(attention.observation(), observation);
-    assert.equal(context.statuses.get("sync"), "local changes pending");
+    assert.equal(context.statuses.get("sync"), "⇡");
   });
 });
 
