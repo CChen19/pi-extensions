@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, test } from "vitest";
-import { resolveCompactionRoute, usesResponsesCompactionApi } from "../src/model-api.js";
+import { resolveCompactionRoute } from "../src/model-api.js";
 
 function model(api: Api, provider = "custom"): Model<Api> {
   return {
@@ -25,21 +25,26 @@ describe("Responses compaction route selection", () => {
         enabled: true,
         protocol: "auto",
       }),
-      { kind: "remote", protocol: "remote-v2", api: "openai-codex-responses" },
+      { kind: "remote", protocol: "remote-v2", api: "openai-codex-responses", profile: "codex-responses-v1" },
     );
     assert.deepEqual(
       resolveCompactionRoute(model("openai-responses"), {
         enabled: true,
         protocol: "auto",
       }),
-      { kind: "remote", protocol: "responses-compact", api: "openai-responses" },
+      { kind: "remote", protocol: "responses-compact", api: "openai-responses", profile: "openai-responses-v1" },
     );
     assert.deepEqual(
       resolveCompactionRoute(model("azure-openai-responses"), {
         enabled: true,
         protocol: "auto",
       }),
-      { kind: "remote", protocol: "responses-compact", api: "azure-openai-responses" },
+      {
+        kind: "remote",
+        protocol: "responses-compact",
+        api: "azure-openai-responses",
+        profile: "openai-responses-v1",
+      },
     );
   });
 
@@ -50,14 +55,24 @@ describe("Responses compaction route selection", () => {
           enabled: true,
           protocol: "remote-v2",
         }),
-        { kind: "remote", protocol: "remote-v2", api },
+        {
+          kind: "remote",
+          protocol: "remote-v2",
+          api,
+          profile: api === "openai-codex-responses" ? "codex-responses-v1" : "openai-responses-v1",
+        },
       );
       assert.deepEqual(
         resolveCompactionRoute(model(api, "company-proxy"), {
           enabled: true,
           protocol: "responses-compact",
         }),
-        { kind: "remote", protocol: "responses-compact", api },
+        {
+          kind: "remote",
+          protocol: "responses-compact",
+          api,
+          profile: api === "openai-codex-responses" ? "codex-responses-v1" : "openai-responses-v1",
+        },
       );
     }
   });
@@ -84,7 +99,30 @@ describe("Responses compaction route selection", () => {
         reason: "API anthropic-messages does not support Responses compaction",
       },
     );
-    assert.equal(usesResponsesCompactionApi(model("openai-responses")), true);
-    assert.equal(usesResponsesCompactionApi(model("github-copilot")), false);
+  });
+
+  test("requires explicit opt-in before routing a custom API through the Codex profile", () => {
+    const customApi = "custom-responses" as Api;
+    const settings = {
+      enabled: true,
+      protocol: "auto" as const,
+      apiProfiles: { [customApi]: "codex-responses-v1" as const },
+    };
+    assert.deepEqual(resolveCompactionRoute(model(customApi), settings), {
+      kind: "remote",
+      protocol: "remote-v2",
+      api: customApi,
+      profile: "codex-responses-v1",
+    });
+    assert.deepEqual(resolveCompactionRoute(model(customApi), { enabled: true, protocol: "auto" }), {
+      kind: "native",
+      reason: "API custom-responses does not support Responses compaction",
+    });
+    assert.deepEqual(resolveCompactionRoute(model(customApi), { ...settings, protocol: "responses-compact" }), {
+      kind: "remote",
+      protocol: "responses-compact",
+      api: customApi,
+      profile: "codex-responses-v1",
+    });
   });
 });

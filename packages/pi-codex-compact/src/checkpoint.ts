@@ -1,18 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Api } from "@earendil-works/pi-ai";
 import type { CompactionEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { RemoteCompactionProtocol, ResponsesCompactionApi } from "./model-api.js";
-import { RESPONSES_COMPACTION_APIS } from "./model-api.js";
+import type { RemoteCompactionProtocol, ResponsesCompactionProfile } from "./model-api.js";
 import { type JsonObject, validateCompactionItem } from "./protocol.js";
 
 export const CHECKPOINT_KIND = "pi-codex-remote-compaction";
-export const CHECKPOINT_VERSION = 2;
+export const CHECKPOINT_VERSION = 3;
 export const REPLACEMENT_TOKEN_BUDGET = 64_000;
 export const REPLACEMENT_BYTE_BUDGET = 8 * 1024 * 1024;
 const MAX_MEDIA_ITEM_BYTES = 2 * 1024 * 1024;
 const MAX_CHECKPOINT_DETAILS_BYTES = 10 * 1024 * 1024;
 const MAX_CHECKPOINT_ID_LENGTH = 128;
 const MAX_PROVIDER_ID_LENGTH = 256;
+const MAX_API_ID_LENGTH = 256;
 const MAX_MODEL_ID_LENGTH = 512;
 const MAX_KEPT_FINGERPRINTS = 100_000;
 
@@ -21,7 +22,8 @@ export interface CodexCheckpointDetails {
   version: typeof CHECKPOINT_VERSION;
   checkpointId: string;
   provider: string;
-  api: ResponsesCompactionApi;
+  api: Api;
+  profile: ResponsesCompactionProfile;
   modelId: string;
   protocol: RemoteCompactionProtocol;
   replacementHistory: JsonObject[];
@@ -87,12 +89,21 @@ export function parseCheckpointDetails(value: unknown): CodexCheckpointDetails |
   const isVersionOne =
     value.version === 1 && value.api === "openai-codex-responses" && value.protocol === "remote-compaction-v2";
   const isVersionTwo =
+    value.version === 2 &&
+    (value.api === "openai-codex-responses" ||
+      value.api === "openai-responses" ||
+      value.api === "azure-openai-responses") &&
+    (value.protocol === "remote-v2" || value.protocol === "responses-compact");
+  const isVersionThree =
     value.version === CHECKPOINT_VERSION &&
-    RESPONSES_COMPACTION_APIS.includes(value.api as ResponsesCompactionApi) &&
+    typeof value.api === "string" &&
+    value.api.length > 0 &&
+    value.api.length <= MAX_API_ID_LENGTH &&
+    (value.profile === "codex-responses-v1" || value.profile === "openai-responses-v1") &&
     (value.protocol === "remote-v2" || value.protocol === "responses-compact");
   if (
     value.kind !== CHECKPOINT_KIND ||
-    (!isVersionOne && !isVersionTwo) ||
+    (!isVersionOne && !isVersionTwo && !isVersionThree) ||
     typeof value.checkpointId !== "string" ||
     value.checkpointId.length < 8 ||
     value.checkpointId.length > MAX_CHECKPOINT_ID_LENGTH ||
@@ -107,6 +118,23 @@ export function parseCheckpointDetails(value: unknown): CodexCheckpointDetails |
     value.keptMessageFingerprints.length > MAX_KEPT_FINGERPRINTS ||
     typeof value.createdAt !== "string" ||
     value.createdAt.length > 64
+  ) {
+    return undefined;
+  }
+  const api = value.api as Api;
+  const profile =
+    api === "openai-codex-responses"
+      ? "codex-responses-v1"
+      : api === "openai-responses" || api === "azure-openai-responses"
+        ? "openai-responses-v1"
+        : value.profile;
+  if (
+    (profile !== "codex-responses-v1" && profile !== "openai-responses-v1") ||
+    (api !== "openai-codex-responses" &&
+      api !== "openai-responses" &&
+      api !== "azure-openai-responses" &&
+      profile !== "codex-responses-v1") ||
+    (isVersionThree && value.profile !== profile)
   ) {
     return undefined;
   }
@@ -131,7 +159,8 @@ export function parseCheckpointDetails(value: unknown): CodexCheckpointDetails |
     version: CHECKPOINT_VERSION,
     checkpointId: value.checkpointId,
     provider: value.provider,
-    api: isVersionOne ? "openai-codex-responses" : (value.api as ResponsesCompactionApi),
+    api,
+    profile,
     modelId: value.modelId,
     protocol: isVersionOne ? "remote-v2" : (value.protocol as RemoteCompactionProtocol),
     replacementHistory: structuredClone(value.replacementHistory),
@@ -272,7 +301,8 @@ export function buildReplacementHistory(
 
 export function createCheckpointDetails(input: {
   provider: string;
-  api: ResponsesCompactionApi;
+  api: Api;
+  profile: ResponsesCompactionProfile;
   modelId: string;
   protocol: RemoteCompactionProtocol;
   replacementHistory: JsonObject[];
@@ -286,6 +316,7 @@ export function createCheckpointDetails(input: {
     checkpointId: input.checkpointId ?? randomUUID(),
     provider: input.provider,
     api: input.api,
+    profile: input.profile,
     modelId: input.modelId,
     protocol: input.protocol,
     replacementHistory: structuredClone(input.replacementHistory),

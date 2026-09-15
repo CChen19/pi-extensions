@@ -8,7 +8,7 @@ Pi still decides when compaction runs and keeps its normal `/compact`, threshold
 
 ## ✨ Features
 
-- Supports `openai-codex-responses`, `openai-responses`, and `azure-openai-responses`.
+- Supports `openai-codex-responses`, `openai-responses`, and `azure-openai-responses`, plus explicitly profiled custom APIs.
 - Uses Remote V2 or same-origin unary `responses/compact` through the active provider and credentials.
 - Handles manual, threshold, and overflow compaction through Pi's existing lifecycle.
 - Validates and persists one bounded opaque checkpoint that survives compatible reloads, resumes, and forks.
@@ -56,6 +56,7 @@ After compaction, compatible requests replay the opaque checkpoint automatically
 
 With the default `auto` protocol, Codex Responses uses Remote V2 while OpenAI and Azure OpenAI Responses use unary `responses/compact`.
 When the active model uses another API, compaction remains entirely Pi-native.
+To opt in a compatible custom API, add it to `apiProfiles` as described below.
 
 ## 💬 Commands
 
@@ -82,6 +83,9 @@ There is no environment-variable or project-level override.
 {
   "enabled": true,
   "protocol": "auto",
+  "apiProfiles": {
+    "custom-responses": "codex-responses-v1"
+  },
   "requestTimeoutMs": 300000,
   "maxRetries": 2,
   "replacementTokenBudget": 64000,
@@ -93,6 +97,7 @@ There is no environment-variable or project-level override.
 | --- | ---: | --- | --- | --- |
 | `enabled` | `true` | Boolean | Attempt a supported remote compaction route. | Keep enabled unless diagnosing provider behavior. |
 | `protocol` | `"auto"` | `"auto"`, `"remote-v2"`, or `"responses-compact"` | Select by API or force one remote protocol. | Keep `auto`; force a route only when diagnosing a compatible backend. |
+| `apiProfiles` | `{}` | Object mapping a custom API id to `"codex-responses-v1"` | Explicitly opts a non-built-in API into Codex-compatible request fields and replay. | Leave empty unless the provider documents Codex Responses compatibility. |
 | `requestTimeoutMs` | `300000` | Integer from 30,000 to 600,000 ms | Bound one extension-owned remote request. | Keep five minutes; increase only for a consistently slow connection. |
 | `maxRetries` | `2` | Integer from 0 to 2 | Retry transient provider transport failures before Pi fallback. | Keep two; use zero when diagnosing the first failure. |
 | `replacementTokenBudget` | `64000` | Integer from 8,000 to 128,000 tokens | Bound approximate retained user-message text beside the opaque item. | Keep 64K; lower it to reduce session size or raise it only when recent user context is being lost. |
@@ -122,7 +127,7 @@ This extension does **not** read `~/.codex/config.toml`.
 ## ✅ Requirements and compatibility
 
 - Pi APIs compatible with the package's declared peer dependencies.
-- One of `openai-codex-responses`, `openai-responses`, or `azure-openai-responses` on the active model.
+- One of `openai-codex-responses`, `openai-responses`, or `azure-openai-responses` on the active model, or an explicit `apiProfiles` entry for a custom Codex-compatible API.
 - A provider whose HTTP Responses adapter honors Pi's public `onPayload` and injected `fetch` options.
 - A backend supporting the selected protocol and opaque `compaction` replay.
 - Working credentials and any required compaction entitlement.
@@ -135,10 +140,12 @@ This extension does **not** read `~/.codex/config.toml`.
 
 The installed built-in adapters are covered by deterministic transport tests.
 A custom provider or proxy is eligible when its model explicitly uses one of these APIs, but its backend still owns compatible routing, authentication, request transforms, and opaque replay.
+For a custom API label, eligibility is opt-in: `apiProfiles` must map that exact non-built-in label to `"codex-responses-v1"`. The default is empty, and an unconfigured custom API remains Pi-native.
+`codex-responses-v1` uses Remote V2 in `auto` mode. With `responses-compact` explicitly selected, it retains the Codex Compact request fields, including tools and reasoning. The provider must honor Pi's public `transport: "sse"`, `onPayload`, and injected `fetch` options, and its backend must support the selected compaction protocol and opaque item replay. The profile declares compatibility; it does not probe the backend.
 The extension does not send a separate capability probe or automatically retry a failed billable request through the other protocol.
 A failed remote attempt falls back to Pi native, but an ordinary request cannot transparently recover after an incompatible provider has already received an existing opaque checkpoint.
 Provider provenance is stored for diagnosis but is not a replay gate.
-Switching providers can replay a checkpoint only when the API label and exact model ID still match; switching APIs or model IDs leaves Pi's visible fallback marker plus retained recent messages in context.
+Switching providers can replay a checkpoint only when the API label, compatibility profile, and exact model ID still match. Custom API checkpoints also require a current matching `apiProfiles` entry; removing or changing it leaves Pi's visible fallback marker plus retained recent messages in context.
 
 ## 🔄 How it works
 
@@ -147,11 +154,12 @@ Switching providers can replay a checkpoint only when the API label and exact mo
 3. Remote V2 projects that checkpoint into a normal Responses SSE request and appends exactly one final `compaction_trigger`.
 4. Unary compact captures the provider-built payload and authentication, rewrites only the same-origin `/responses` path to `/responses/compact`, and requests JSON without making a normal inference call.
 5. It requires one bounded non-empty opaque `compaction` item; unary output may precede it only with user-role retained messages.
-6. It constructs bounded replacement history and stores it with Pi suffix fingerprints in versioned `CompactionEntry.details`.
+6. It constructs bounded replacement history and stores it with Pi suffix fingerprints, the real API label, and the resolved compatibility profile in versioned `CompactionEntry.details`.
 7. On later compatible requests, it replaces an exactly validated marker with the persisted replacement history immediately before provider dispatch.
 
 The persisted entry remains the summary identity source, so replay does not depend on the wording generated by the currently installed extension version.
 If persisted summary identity, fingerprints, model identity, payload shape, or marker count do not match exactly, the extension leaves Pi's visible fallback context unchanged instead of guessing.
+Older v1 and v2 checkpoints are normalized to the current checkpoint format when read; their built-in API label determines the profile. They still replay only when the current route authorizes that API/profile/model combination.
 
 ## 🔒 Security and privacy
 
@@ -176,7 +184,7 @@ These hard byte ceilings are intentionally not configurable.
 ## 🚧 Limitations
 
 - Codex Remote V2 remains an undocumented hosted contract and can change independently of Pi or this package; keep backups of important sessions.
-- Full older history depends on this extension, the checkpoint API label, the exact checkpoint model ID, and a provider route whose backend accepts the opaque item.
+- Full older history depends on this extension, the checkpoint API label and compatibility profile, the exact checkpoint model ID, and a provider route whose backend accepts the opaque item.
   Removing the extension exposes only the portability fallback marker and Pi-retained recent messages.
 - The package does not reproduce Codex core's context-window UUID/number lineage, previous-model compatibility fallback, exact pre-turn ordering, or exact mid-turn model-session ownership.
 - Pi's public `getAllTools()` metadata does not expose `constrainedSampling`; Remote V2 preserves active tool order, names, descriptions, and parameter schemas but cannot reproduce that optional field.

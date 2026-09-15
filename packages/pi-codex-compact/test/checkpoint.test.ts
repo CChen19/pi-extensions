@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Api } from "@earendil-works/pi-ai";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import {
@@ -27,6 +28,7 @@ function checkpoint(kept: AgentMessage[] = [user("kept", 2)], id = "checkpoint-1
   return createCheckpointDetails({
     provider,
     api: "openai-codex-responses",
+    profile: "codex-responses-v1",
     modelId: "gpt-5.6",
     protocol: "remote-v2",
     replacementHistory: [rawUser("old"), opaque],
@@ -134,7 +136,16 @@ test("validates versioned details and rejects malformed or unbounded persisted d
     }),
     details,
   );
-  assert.equal(parseCheckpointDetails({ ...details, version: 3 }), undefined);
+  assert.deepEqual(
+    parseCheckpointDetails({
+      ...details,
+      version: 2,
+      api: "openai-responses",
+      protocol: "responses-compact",
+    }),
+    { ...details, api: "openai-responses", profile: "openai-responses-v1", protocol: "responses-compact" },
+  );
+  assert.equal(parseCheckpointDetails({ ...details, version: 4 }), undefined);
   assert.equal(parseCheckpointDetails({ ...details, checkpointId: "x".repeat(129) }), undefined);
   assert.equal(parseCheckpointDetails({ ...details, provider: "" }), undefined);
   assert.equal(parseCheckpointDetails({ ...details, provider: "x".repeat(257) }), undefined);
@@ -147,9 +158,21 @@ test("validates versioned details and rejects malformed or unbounded persisted d
   assert.equal(parseCheckpointDetails(cyclic), undefined);
   for (const api of ["openai-responses", "azure-openai-responses"] as const) {
     for (const protocol of ["remote-v2", "responses-compact"] as const) {
-      assert.equal(parseCheckpointDetails({ ...details, api, protocol })?.api, api);
+      assert.deepEqual(parseCheckpointDetails({ ...details, api, profile: "openai-responses-v1", protocol }), {
+        ...details,
+        api,
+        profile: "openai-responses-v1",
+        protocol,
+      });
     }
   }
+  const custom = {
+    ...details,
+    api: "custom-responses" as Api,
+    profile: "codex-responses-v1" as const,
+  };
+  assert.deepEqual(parseCheckpointDetails(custom), custom);
+  assert.equal(parseCheckpointDetails({ ...custom, profile: "openai-responses-v1" }), undefined);
   assert.doesNotMatch(JSON.stringify(details), /token|authorization|header/i);
 });
 

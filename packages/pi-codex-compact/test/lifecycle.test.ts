@@ -243,11 +243,12 @@ test("command rejects no-argument use in print and JSON modes", async () => {
   }
 });
 
-test("custom Codex Responses providers compact and replay by API and exact model ID", async () => {
+test("configured custom Codex Responses APIs compact and replay only while currently authorized", async () => {
   const mock = createMockPi();
-  const customModel = { ...model, provider: "company-codex-proxy" };
+  const customApi = "custom-codex-responses" as Api;
+  const customModel = { ...model, api: customApi, provider: "company-codex-proxy" };
   let forwardedHeaders: OpenAICodexResponsesOptions["headers"];
-  const runtime = settingsRuntime();
+  const runtime = settingsRuntime({ apiProfiles: { [customApi]: "codex-responses-v1" } });
   createCodexCompactExtension({ settingsRuntime: runtime, fetch: async () => sseResponse() })(mock.pi);
   assert.equal(mock.commands.get("codex-compact")?.description, "Compact now or configure Responses compaction");
   const handler = mock.events.get("session_before_compact")?.[0];
@@ -282,6 +283,8 @@ test("custom Codex Responses providers compact and replay by API and exact model
   const details = parseCheckpointDetails(result.compaction.details);
   assert.ok(details);
   assert.equal(details.provider, customModel.provider);
+  assert.equal(details.api, customApi);
+  assert.equal(details.profile, "codex-responses-v1");
   assert.doesNotMatch(JSON.stringify(details), /provider-secret|X-Provider-Token/);
   assert.match(result.compaction.summary, /requires @narumitw\/pi-codex-compact/);
   assert.equal(statuses.get("codex-compact"), undefined);
@@ -350,6 +353,10 @@ test("custom Codex Responses providers compact and replay by API and exact model
     sessionManager: replaySessionManager,
   }).ctx;
   assert.equal(await contextHandler?.(contextEvent, differentApi), undefined);
+  await runtime.update({ apiProfiles: {} });
+  assert.equal(await contextHandler?.(contextEvent, replayContext), undefined);
+  await runtime.update({ apiProfiles: { [customApi]: "codex-responses-v1" } });
+  assert.deepEqual(await contextHandler?.(contextEvent, replayContext), projected);
 });
 
 test("generic OpenAI Responses compacts through the unary endpoint", async () => {
@@ -387,6 +394,7 @@ test("generic OpenAI Responses compacts through the unary endpoint", async () =>
   const details = parseCheckpointDetails(result.compaction.details);
   assert.ok(details);
   assert.equal(details.api, "openai-responses");
+  assert.equal(details.profile, "openai-responses-v1");
   assert.equal(details.protocol, "responses-compact");
   assert.deepEqual(result.compaction.usage, usage);
   assert.deepEqual(notifications, []);
@@ -488,6 +496,7 @@ test("checkpoint projection is idempotent and preserves ordinary request prefixe
   const details = createCheckpointDetails({
     provider: model.provider,
     api: model.api,
+    profile: "codex-responses-v1",
     modelId: model.id,
     protocol: "remote-v2",
     replacementHistory: [
@@ -569,6 +578,7 @@ test("repeated compaction projects a persisted legacy summary across protocols",
   const details = createCheckpointDetails({
     provider: model.provider,
     api: model.api,
+    profile: "codex-responses-v1",
     modelId: model.id,
     protocol: "remote-v2",
     replacementHistory: [
