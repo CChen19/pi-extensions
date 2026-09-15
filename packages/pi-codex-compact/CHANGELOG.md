@@ -1,5 +1,11 @@
 # @narumitw/pi-codex-compact
 
+## 0.53.0
+
+### Minor Changes
+
+- 2edfea9: Support explicit Codex Responses compatibility profiles for custom Pi model APIs, including safe checkpoint replay authorization and migration of earlier checkpoints.
+
 ## 0.52.0
 
 ### Minor Changes
