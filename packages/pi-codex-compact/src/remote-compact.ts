@@ -1,5 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ResponsesCompactionApi } from "./model-api.js";
+import type { ResponsesCompactionProfile } from "./model-api.js";
 import {
   CodexCompactionProtocolError,
   type CollectedCompactResponse,
@@ -39,8 +39,8 @@ const CODEX_COMPACT_FIELDS = [
   "access_programs",
 ] as const;
 
-function compactPayload(payload: JsonObject, api: ResponsesCompactionApi): JsonObject {
-  const fields = api === "openai-codex-responses" ? CODEX_COMPACT_FIELDS : OFFICIAL_COMPACT_FIELDS;
+function compactPayload(payload: JsonObject, profile: ResponsesCompactionProfile): JsonObject {
+  const fields = profile === "codex-responses-v1" ? CODEX_COMPACT_FIELDS : OFFICIAL_COMPACT_FIELDS;
   const result: JsonObject = {};
   for (const field of fields) {
     if (Object.hasOwn(payload, field) && payload[field] !== undefined) {
@@ -249,7 +249,7 @@ export async function requestResponsesCompact(request: RemoteCompactionRequest):
         throw new CodexCompactionProtocolError("Provider exposed more than one compaction request payload");
       }
       const expanded = expandRemoteCompactionPayload(payload, request.priorCheckpoint);
-      preparedPayload = compactPayload(expanded, request.model.api);
+      preparedPayload = compactPayload(expanded, request.profile);
       sentInput = assertPreparedInput(preparedPayload);
       return expanded;
     },

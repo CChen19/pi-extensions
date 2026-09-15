@@ -11,6 +11,7 @@ export const MAX_SETTINGS_BYTES = 64 * 1024;
 export interface CodexCompactSettings {
   enabled: boolean;
   protocol: RemoteCompactionProtocolSetting;
+  apiProfiles: Record<string, "codex-responses-v1">;
   requestTimeoutMs: number;
   maxRetries: number;
   replacementTokenBudget: number;
@@ -20,6 +21,7 @@ export interface CodexCompactSettings {
 export const DEFAULT_CODEX_COMPACT_SETTINGS: Readonly<CodexCompactSettings> = Object.freeze({
   enabled: true,
   protocol: "auto",
+  apiProfiles: {},
   requestTimeoutMs: 300_000,
   maxRetries: 2,
   replacementTokenBudget: 64_000,
@@ -31,6 +33,20 @@ const LIMITS = Object.freeze({
   maxRetries: { minimum: 0, maximum: 2 },
   replacementTokenBudget: { minimum: 8_000, maximum: 128_000 },
 });
+
+const BUILT_IN_APIS = new Set([
+  "openai-completions",
+  "mistral-conversations",
+  "openai-codex-responses",
+  "openai-responses",
+  "azure-openai-responses",
+  "anthropic-messages",
+  "bedrock-converse-stream",
+  "google-generative-ai",
+  "google-vertex",
+  "pi-messages",
+]);
+const MAX_API_PROFILE_ID_LENGTH = 256;
 
 export interface CodexCompactSettingsState {
   kind: "missing" | "loaded" | "invalid";
@@ -55,6 +71,40 @@ function validInteger(value: unknown, minimum: number, maximum: number): value i
   return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }
 
+function hasWhitespaceOrControl(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code <= 0x20 || code === 0x7f;
+  });
+}
+
+function normalizeApiProfiles(value: unknown): Record<string, "codex-responses-v1"> | undefined {
+  if (
+    !isRecord(value) ||
+    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
+    return undefined;
+  }
+  const profiles: Record<string, "codex-responses-v1"> = {};
+  for (const [api, profile] of Object.entries(value)) {
+    if (
+      api.length === 0 ||
+      api.length > MAX_API_PROFILE_ID_LENGTH ||
+      api.trim() !== api ||
+      hasWhitespaceOrControl(api) ||
+      BUILT_IN_APIS.has(api) ||
+      api === "__proto__" ||
+      api === "constructor" ||
+      api === "prototype" ||
+      profile !== "codex-responses-v1"
+    ) {
+      return undefined;
+    }
+    profiles[api] = profile;
+  }
+  return profiles;
+}
+
 export function normalizeCodexCompactSettings(value: unknown): CodexCompactSettings | undefined {
   if (!isRecord(value)) return undefined;
   if (Object.hasOwn(value, "enabled") && typeof value.enabled !== "boolean") return undefined;
@@ -69,6 +119,7 @@ export function normalizeCodexCompactSettings(value: unknown): CodexCompactSetti
   if (Object.hasOwn(value, "notifyOnFallback") && typeof value.notifyOnFallback !== "boolean") {
     return undefined;
   }
+  if (Object.hasOwn(value, "apiProfiles") && normalizeApiProfiles(value.apiProfiles) === undefined) return undefined;
   for (const [field, limits] of Object.entries(LIMITS) as [
     keyof typeof LIMITS,
     { minimum: number; maximum: number },
@@ -83,6 +134,7 @@ export function normalizeCodexCompactSettings(value: unknown): CodexCompactSetti
       value.protocol === "remote-v2" || value.protocol === "responses-compact"
         ? value.protocol
         : DEFAULT_CODEX_COMPACT_SETTINGS.protocol,
+    apiProfiles: normalizeApiProfiles(value.apiProfiles) ?? structuredClone(DEFAULT_CODEX_COMPACT_SETTINGS.apiProfiles),
     requestTimeoutMs:
       typeof value.requestTimeoutMs === "number"
         ? value.requestTimeoutMs

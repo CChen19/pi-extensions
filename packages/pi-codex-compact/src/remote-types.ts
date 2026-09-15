@@ -1,5 +1,5 @@
-import type { Context, Model, Provider, ProviderHeaders, Usage } from "@earendil-works/pi-ai";
-import type { RemoteCompactionProtocol, ResponsesCompactionApi } from "./model-api.js";
+import type { Api, Context, Model, Provider, ProviderHeaders, Usage } from "@earendil-works/pi-ai";
+import type { RemoteCompactionProtocol, ResponsesCompactionProfile } from "./model-api.js";
 import type { JsonObject } from "./protocol.js";
 
 export interface PriorCheckpointPayload {
@@ -9,7 +9,8 @@ export interface PriorCheckpointPayload {
 
 export interface RemoteCompactionRequest {
   provider: Provider;
-  model: Model<ResponsesCompactionApi>;
+  model: Model<Api>;
+  profile: ResponsesCompactionProfile;
   context: Context;
   protocol: RemoteCompactionProtocol;
   apiKey?: string;

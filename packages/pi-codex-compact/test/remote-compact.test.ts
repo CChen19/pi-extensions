@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { type Context, createAssistantMessageEventStream, type Model, type Provider } from "@earendil-works/pi-ai";
+import {
+  type Api,
+  type Context,
+  createAssistantMessageEventStream,
+  type Model,
+  type Provider,
+} from "@earendil-works/pi-ai";
 import { describe, test } from "vitest";
 import type { ResponsesCompactionApi } from "../src/model-api.js";
 import { requestRemoteCompaction } from "../src/remote.js";
@@ -114,6 +120,7 @@ for (const api of Object.keys(PROVIDER_MODULES) as ResponsesCompactionApi[]) {
         model,
         context: context(),
         protocol: "responses-compact",
+        profile: api === "openai-codex-responses" ? "codex-responses-v1" : "openai-responses-v1",
         apiKey: apiKey(api),
         signal: new AbortController().signal,
         maxRetries: 0,
@@ -156,6 +163,79 @@ for (const api of Object.keys(PROVIDER_MODULES) as ResponsesCompactionApi[]) {
   });
 }
 
+test("a custom Codex profile keeps Codex unary fields when the route is forced", async () => {
+  const model = {
+    ...modelFor("openai-responses"),
+    api: "custom-codex-responses" as Api,
+  };
+  const provider: Provider = {
+    id: model.provider,
+    name: "custom Responses fixture",
+    auth: {} as Provider["auth"],
+    getModels: () => [model],
+    stream(activeModel, _context, options) {
+      const stream = createAssistantMessageEventStream();
+      void (async () => {
+        try {
+          await options?.onPayload?.(
+            {
+              model: activeModel.id,
+              input: [{ role: "user", content: [{ type: "input_text", text: "current" }] }],
+              tools: [{ type: "function", name: "fixture" }],
+              reasoning: { effort: "high" },
+              access_programs: ["fixture"],
+            },
+            activeModel,
+          );
+          await options?.fetch?.("https://example.test/v1/responses", { method: "POST" });
+          const message = {
+            role: "assistant" as const,
+            content: [],
+            api: activeModel.api,
+            provider: activeModel.provider,
+            model: activeModel.id,
+            usage: {
+              input: 1,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 2,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "stop" as const,
+            timestamp: Date.now(),
+          };
+          stream.push({ type: "done", reason: "stop", message });
+          stream.end(message);
+        } catch (error) {
+          stream.end();
+          throw error;
+        }
+      })();
+      return stream;
+    },
+    streamSimple() {
+      throw new Error("not used");
+    },
+  };
+  let body: Record<string, unknown> | undefined;
+  await requestRemoteCompaction({
+    provider,
+    model,
+    context: context(),
+    protocol: "responses-compact",
+    profile: "codex-responses-v1",
+    signal: new AbortController().signal,
+    fetch: async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return compactResponse();
+    },
+  });
+  assert.deepEqual(body?.tools, [{ type: "function", name: "fixture" }]);
+  assert.deepEqual(body?.reasoning, { effort: "high" });
+  assert.deepEqual(body?.access_programs, ["fixture"]);
+});
+
 test("unary compact expands a previous checkpoint without adding a trigger", async () => {
   const api = "openai-responses";
   const provider = await providerFor(api);
@@ -165,6 +245,7 @@ test("unary compact expands a previous checkpoint without adding a trigger", asy
     model: modelFor(api),
     context: context("checkpoint marker"),
     protocol: "responses-compact",
+    profile: "openai-responses-v1",
     apiKey: apiKey(api),
     signal: new AbortController().signal,
     priorCheckpoint: {
@@ -201,6 +282,7 @@ test("unary compact retries transient HTTP failures but not malformed successful
     model: modelFor(api),
     context: context(),
     protocol: "responses-compact",
+    profile: "openai-responses-v1",
     apiKey: apiKey(api),
     signal: new AbortController().signal,
     maxRetries: 1,
@@ -220,6 +302,7 @@ test("unary compact retries transient HTTP failures but not malformed successful
       model: modelFor(api),
       context: context(),
       protocol: "responses-compact",
+      profile: "openai-responses-v1",
       apiKey: apiKey(api),
       signal: new AbortController().signal,
       maxRetries: 2,
@@ -239,6 +322,7 @@ test("unary compact retries transient HTTP failures but not malformed successful
       model: modelFor(api),
       context: context(),
       protocol: "responses-compact",
+      profile: "openai-responses-v1",
       apiKey: apiKey(api),
       signal: new AbortController().signal,
       maxRetries: 2,
@@ -257,6 +341,7 @@ test("unary compact retries transient HTTP failures but not malformed successful
       model: modelFor(api),
       context: context(),
       protocol: "responses-compact",
+      profile: "openai-responses-v1",
       apiKey: apiKey(api),
       signal: new AbortController().signal,
       maxRetries: 0,
@@ -327,6 +412,7 @@ test("unary compact rejects overlapping provider dispatch without a second exter
       model,
       context: context(),
       protocol: "responses-compact",
+      profile: "openai-responses-v1",
       apiKey: "fixture",
       signal: new AbortController().signal,
       fetch: async () => {
@@ -398,6 +484,7 @@ test("unary compact preserves cancellation carried by a Request input", async ()
     model,
     context: context(),
     protocol: "responses-compact",
+    profile: "openai-responses-v1",
     apiKey: "fixture",
     signal: controller.signal,
     maxRetries: 0,
@@ -430,6 +517,7 @@ test("unary compact aborts stalled response parsing without publishing output", 
     model: modelFor(api),
     context: context(),
     protocol: "responses-compact",
+    profile: "openai-responses-v1",
     apiKey: apiKey(api),
     signal: controller.signal,
     fetch: async () =>

@@ -18,7 +18,7 @@ import {
   latestCheckpoint,
   projectCheckpointContext,
 } from "./checkpoint.js";
-import { resolveCompactionRoute, usesResponsesCompactionApi } from "./model-api.js";
+import { type CompactionRoute, resolveCompactionRoute } from "./model-api.js";
 import { hasCheckpointMarker, rewriteCheckpointMarker } from "./protocol.js";
 import { requestRemoteCompaction } from "./remote.js";
 import {
@@ -35,8 +35,19 @@ function activeCheckpoint(ctx: ExtensionContext) {
   return latestCheckpoint(ctx.sessionManager.getBranch());
 }
 
-function isCheckpointCompatible(details: CodexCheckpointDetails, model: Model<Api> | undefined): boolean {
-  return usesResponsesCompactionApi(model) && model.api === details.api && model.id === details.modelId;
+function isCheckpointCompatible(
+  details: CodexCheckpointDetails,
+  model: Model<Api> | undefined,
+  settings: CodexCompactSettings,
+): boolean {
+  const route = resolveCompactionRoute(model, settings);
+  return (
+    route.kind === "remote" &&
+    model !== undefined &&
+    route.api === details.api &&
+    route.profile === details.profile &&
+    model.id === details.modelId
+  );
 }
 
 function keptMessages(event: SessionBeforeCompactEvent): AgentMessage[] {
@@ -68,12 +79,17 @@ function activeTools(pi: ExtensionAPI): Tool[] {
 function projectedCurrentMessages(
   event: SessionBeforeCompactEvent,
   model: Model<Api>,
+  route: Extract<CompactionRoute, { kind: "remote" }>,
 ): { messages: AgentMessage[]; prior?: CodexCheckpointDetails } {
   const leafId = event.branchEntries.at(-1)?.id ?? null;
   const session = buildSessionContext(event.branchEntries, leafId);
   const prior = latestCheckpoint(event.branchEntries);
   if (!prior) return { messages: session.messages };
-  if (prior.details.api !== model.api || prior.details.modelId !== model.id) {
+  if (
+    prior.details.api !== route.api ||
+    prior.details.profile !== route.profile ||
+    prior.details.modelId !== model.id
+  ) {
     throw new Error("The active opaque checkpoint belongs to a different Responses model");
   }
   const projected = projectCheckpointContext(session.messages, prior.details, prior.entry.summary);
@@ -103,7 +119,7 @@ async function compactRemotely(
 ) {
   const model = ctx.model;
   const route = resolveCompactionRoute(model, settings);
-  if (route.kind === "native" || !usesResponsesCompactionApi(model)) return undefined;
+  if (route.kind === "native" || !model) return undefined;
   const signal = AbortSignal.any([event.signal, ownerSignal]);
   if (signal.aborted) return { cancel: true };
   const sessionId = ctx.sessionManager.getSessionId();
@@ -114,7 +130,7 @@ async function compactRemotely(
     if (!auth.ok) throw new Error(auth.error);
     const provider = ctx.modelRegistry.getProvider(model.provider);
     if (!provider) throw new Error("The active Responses provider is unavailable");
-    const current = projectedCurrentMessages(event, model);
+    const current = projectedCurrentMessages(event, model, route);
     const context: Context = {
       systemPrompt: ctx.getSystemPrompt(),
       messages: convertToLlm(current.messages),
@@ -125,6 +141,7 @@ async function compactRemotely(
       model,
       context,
       protocol: route.protocol,
+      profile: route.profile,
       apiKey: auth.apiKey,
       headers: auth.headers,
       env: auth.env,
@@ -148,6 +165,7 @@ async function compactRemotely(
     const details = createCheckpointDetails({
       provider: model.provider,
       api: route.api,
+      profile: route.profile,
       modelId: model.id,
       protocol: route.protocol,
       replacementHistory,
@@ -238,16 +256,18 @@ export function createCodexCompactExtension(
 
     pi.on("context", (event, ctx) => {
       if (!settingsRuntime.get().settings.enabled) return undefined;
+      const settings = settingsRuntime.get().settings;
       const checkpoint = activeCheckpoint(ctx);
-      if (!checkpoint || !isCheckpointCompatible(checkpoint.details, ctx.model)) return undefined;
+      if (!checkpoint || !isCheckpointCompatible(checkpoint.details, ctx.model, settings)) return undefined;
       const messages = projectCheckpointContext(event.messages, checkpoint.details, checkpoint.entry.summary);
       return messages ? { messages } : undefined;
     });
 
     pi.on("before_provider_request", (event, ctx) => {
       if (!settingsRuntime.get().settings.enabled) return undefined;
+      const settings = settingsRuntime.get().settings;
       const checkpoint = activeCheckpoint(ctx);
-      if (!checkpoint || !isCheckpointCompatible(checkpoint.details, ctx.model)) return undefined;
+      if (!checkpoint || !isCheckpointCompatible(checkpoint.details, ctx.model, settings)) return undefined;
       const marker = checkpointMarker(checkpoint.details.checkpointId);
       if (!hasCheckpointMarker(event.payload, marker)) return undefined;
       return rewriteCheckpointMarker(event.payload, marker, checkpoint.details.replacementHistory);
@@ -255,8 +275,9 @@ export function createCodexCompactExtension(
 
     pi.on("model_select", (event, ctx) => {
       if (!settingsRuntime.get().settings.enabled) return;
+      const settings = settingsRuntime.get().settings;
       const checkpoint = activeCheckpoint(ctx);
-      if (!checkpoint || isCheckpointCompatible(checkpoint.details, event.model)) return;
+      if (!checkpoint || isCheckpointCompatible(checkpoint.details, event.model, settings)) return;
       const key = `${ctx.sessionManager.getSessionId()}:${event.model.provider}:${event.model.id}`;
       if (providerWarnings.has(key)) return;
       providerWarnings.add(key);

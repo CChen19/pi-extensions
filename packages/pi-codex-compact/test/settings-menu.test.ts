@@ -88,6 +88,21 @@ test("root menu makes manual compaction primary and exposes its effective route"
   assert.equal(openAI.kind, "actions");
   if (openAI.kind !== "actions") assert.fail("Expected OpenAI actions screen");
   assert.match(openAI.lines?.join("\n") ?? "", /Responses Compact API/);
+
+  const configuredCustom = resolveMenuScreen(
+    createCodexCompactMenu(current.runtime, { status: { model: "custom/gpt-5.6", api: "custom-responses" } }),
+    "main",
+    {
+      ...current.runtime.get(),
+      settings: {
+        ...current.runtime.get().settings,
+        apiProfiles: { "custom-responses": "codex-responses-v1" },
+      },
+    },
+  );
+  assert.equal(configuredCustom.kind, "actions");
+  if (configuredCustom.kind !== "actions") assert.fail("Expected configured custom actions");
+  assert.match(configuredCustom.lines?.join("\n") ?? "", /Responses Remote V2/);
 });
 
 test("settings screen exposes bounded controls and invalid files remain repairable", () => {

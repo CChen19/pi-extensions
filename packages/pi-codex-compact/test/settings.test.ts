@@ -28,16 +28,29 @@ test("normalizes defaults and bounded user settings", () => {
     normalizeCodexCompactSettings({
       enabled: false,
       protocol: "responses-compact",
+      apiProfiles: { "custom-responses": "codex-responses-v1" },
       maxRetries: 0,
     }),
     {
       ...DEFAULT_CODEX_COMPACT_SETTINGS,
       enabled: false,
       protocol: "responses-compact",
+      apiProfiles: { "custom-responses": "codex-responses-v1" },
       maxRetries: 0,
     },
   );
   assert.equal(normalizeCodexCompactSettings({ protocol: "unknown" }), undefined);
+  assert.equal(
+    normalizeCodexCompactSettings({ apiProfiles: { "openai-codex-responses": "codex-responses-v1" } }),
+    undefined,
+  );
+  assert.equal(
+    normalizeCodexCompactSettings({ apiProfiles: { "anthropic-messages": "codex-responses-v1" } }),
+    undefined,
+  );
+  assert.equal(normalizeCodexCompactSettings({ apiProfiles: { "custom-responses": "unknown" } }), undefined);
+  assert.equal(normalizeCodexCompactSettings({ apiProfiles: { "custom responses": "codex-responses-v1" } }), undefined);
+  assert.equal(normalizeCodexCompactSettings({ apiProfiles: [] }), undefined);
   assert.equal(normalizeCodexCompactSettings({ maxRetries: 3 }), undefined);
   assert.equal(normalizeCodexCompactSettings({ requestTimeoutMs: 10 }), undefined);
   assert.equal(normalizeCodexCompactSettings({ replacementTokenBudget: 1_000_000 }), undefined);
