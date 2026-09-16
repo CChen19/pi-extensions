@@ -141,6 +141,10 @@ test("runtime builds are deterministic, mapped, external, and remove stale outpu
       assert.doesNotMatch(source, /["']\.\.?\/[^"']*src\//u);
       assert.ok(files.includes(`${runtimePath}.map`), `missing map for ${runtimePath}`);
     }
+    const entrySource = await readFile(join(first, "index.ts"), "utf8");
+    assert.match(entrySource, /@narumitw\/pi-tui-kit\/markdown/u);
+    assert.match(entrySource, /await import\(MERMAID_MARKDOWN_MODULE\)/u);
+    assert.doesNotMatch(entrySource, /from ["']@narumitw\/pi-tui-kit\/markdown["']/u);
     for (const output of Object.values(firstMetadata.outputs ?? {})) {
       for (const input of Object.keys(output.inputs ?? {})) {
         assert.equal(input.includes("node_modules/"), false, `bundled package input: ${input}`);
