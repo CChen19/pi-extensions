@@ -78,6 +78,7 @@ export function createContextManagementExtension(
       manager.startSession(ctx);
     });
 
+    pi.on("input", (_event, ctx) => manager.onInput(ctx));
     pi.on("session_before_compact", (event, ctx) => manager.beforeCompact(event, ctx));
     pi.on("context", (event, ctx) => {
       const messages = manager.projectContext(event.messages, ctx);

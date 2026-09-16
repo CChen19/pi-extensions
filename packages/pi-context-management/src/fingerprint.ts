@@ -2,8 +2,20 @@ import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 const MAX_FINGERPRINT_DEPTH = 512;
-const MAX_FINGERPRINT_UNITS = 4 * 1024 * 1024;
-const MAX_FINGERPRINT_BYTES = 8 * 1024 * 1024;
+export const MAX_FINGERPRINT_OPERATION_UNITS = 4 * 1024 * 1024;
+export const MAX_FINGERPRINT_OPERATION_BYTES = 8 * 1024 * 1024;
+
+export interface FingerprintBudget {
+  remainingUnits: number;
+  remainingBytes: number;
+}
+
+export function createFingerprintBudget(): FingerprintBudget {
+  return {
+    remainingUnits: MAX_FINGERPRINT_OPERATION_UNITS,
+    remainingBytes: MAX_FINGERPRINT_OPERATION_BYTES,
+  };
+}
 
 type JsonContainer = unknown[] | Record<string, unknown>;
 
@@ -23,13 +35,16 @@ function assign(parent: JsonContainer, key: string | number, value: unknown): vo
   else parent[String(key)] = value;
 }
 
-function stableValue(value: unknown): unknown {
+function stableValue(value: unknown, operationBudget: FingerprintBudget): unknown {
   const root: Record<string, unknown> = {};
   const tasks: CloneTask[] = [{ source: value, parent: root, key: "value", depth: 0 }];
-  let remainingUnits = MAX_FINGERPRINT_UNITS;
+  let remainingUnits = MAX_FINGERPRINT_OPERATION_UNITS;
   const consume = (units: number) => {
-    if (!Number.isSafeInteger(units) || units < 0 || units > remainingUnits) failLimit();
+    if (!Number.isSafeInteger(units) || units < 0 || units > remainingUnits || units > operationBudget.remainingUnits) {
+      failLimit();
+    }
     remainingUnits -= units;
+    operationBudget.remainingUnits -= units;
   };
 
   while (tasks.length > 0) {
@@ -76,8 +91,14 @@ function stableValue(value: unknown): unknown {
   return root.value;
 }
 
-export function fingerprintMessage(message: AgentMessage): string {
-  const serialized = JSON.stringify(stableValue(message));
-  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > MAX_FINGERPRINT_BYTES) failLimit();
+export function fingerprintMessage(
+  message: AgentMessage,
+  operationBudget: FingerprintBudget = createFingerprintBudget(),
+): string {
+  const serialized = JSON.stringify(stableValue(message, operationBudget));
+  if (serialized === undefined) failLimit();
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes > MAX_FINGERPRINT_OPERATION_BYTES || bytes > operationBudget.remainingBytes) failLimit();
+  operationBudget.remainingBytes -= bytes;
   return createHash("sha256").update(serialized).digest("hex");
 }

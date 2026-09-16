@@ -178,8 +178,8 @@ async function start(setupResult: ReturnType<typeof setup>) {
   await handler({ type: "session_start", reason: "startup" }, setupResult.current.ctx);
 }
 
-function persistLastSentCustomMessage(setupResult: ReturnType<typeof setup>) {
-  const message = setupResult.mock.sentMessages.at(-1)?.message as
+function persistSentCustomMessage(entries: SessionEntry[], sentMessage: unknown) {
+  const message = sentMessage as
     | {
         customType?: string;
         content?: string;
@@ -190,20 +190,24 @@ function persistLastSentCustomMessage(setupResult: ReturnType<typeof setup>) {
   if (!message || typeof message.customType !== "string" || typeof message.content !== "string") {
     assert.fail("Expected a sent custom message");
   }
-  setupResult.entries.push({
+  entries.push({
     type: "message",
-    id: `sent-${setupResult.entries.length}`,
-    parentId: setupResult.entries.at(-1)?.id ?? null,
-    timestamp: new Date(setupResult.entries.length).toISOString(),
+    id: `sent-${entries.length}`,
+    parentId: entries.at(-1)?.id ?? null,
+    timestamp: new Date(entries.length).toISOString(),
     message: {
       role: "custom",
       customType: message.customType,
       content: message.content,
       display: message.display ?? false,
       details: message.details,
-      timestamp: setupResult.entries.length,
+      timestamp: entries.length,
     },
   });
+}
+
+function persistLastSentCustomMessage(setupResult: ReturnType<typeof setup>) {
+  persistSentCustomMessage(setupResult.entries, setupResult.mock.sentMessages.at(-1)?.message);
 }
 
 function persistToolResult(
@@ -2316,6 +2320,80 @@ test("concurrent headless session managers keep independent rollover ownership",
   assert.ok(projected);
 });
 
+test("idle non-initiating sessions persist deactivation before later turns", async () => {
+  let selection = 0;
+  const current = setup(true, undefined, {
+    select: async (_title: string, options: string[]) => {
+      selection += 1;
+      if (selection === 1) return options.find((option) => option.startsWith("Settings"));
+      if (selection === 2) {
+        return options.find((option) => option.startsWith("Experimental context management"));
+      }
+      if (selection === 3) return options.find((option) => option === "Off");
+      return undefined;
+    },
+  });
+  await start(current);
+  persistLastSentCustomMessage(current);
+
+  const secondLineage = createInitialContextState("22222222-2222-4222-8222-222222222222");
+  const secondEntries: SessionEntry[] = [
+    messageEntry(),
+    {
+      type: "custom",
+      customType: CONTEXT_STATE_ENTRY_TYPE,
+      data: secondLineage,
+      id: "second-state",
+      parentId: "user",
+      timestamp: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const second = createMockContext({
+    mode: "print",
+    hasUI: false,
+    sessionManager: {
+      getSessionId: () => "second-context-session",
+      getSessionName: () => undefined,
+      getBranch: () => secondEntries,
+      getEntries: () => secondEntries,
+    },
+  });
+  const sessionStart = current.mock.events.get("session_start")?.[0];
+  assert.ok(sessionStart);
+  await sessionStart({ type: "session_start", reason: "startup" }, second.ctx);
+  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+
+  const command = current.mock.commands.get("context-management");
+  assert.ok(command);
+  await command.handler("", current.current.ctx);
+  const sentBeforeSecondInput = current.mock.sentMessages.length;
+  const input = current.mock.events.get("input")?.[0];
+  assert.ok(input);
+  await input({ source: "interactive", text: "later" }, second.ctx);
+  assert.equal(current.mock.sentMessages.length, sentBeforeSecondInput + 1);
+  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+  secondEntries.push({
+    type: "message",
+    id: "second-later-turn",
+    parentId: secondEntries.at(-1)?.id ?? null,
+    timestamp: "2026-01-01T00:00:03.000Z",
+    message: { role: "user", content: [{ type: "text", text: "later" }], timestamp: 3 },
+  });
+  await input({ source: "interactive", text: "another turn" }, second.ctx);
+  assert.equal(current.mock.sentMessages.length, sentBeforeSecondInput + 1);
+
+  const context = current.mock.events.get("context")?.[0];
+  assert.ok(context);
+  assert.equal(
+    await context({ type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) }, second.ctx),
+    undefined,
+  );
+  assert.equal(current.mock.sentMessages.length, sentBeforeSecondInput + 1);
+  const durableDeactivation = secondEntries.at(-2);
+  assert.ok(durableDeactivation?.type === "message" && durableDeactivation.message.role === "custom");
+  assert.equal(durableDeactivation.message.customType, CONTEXT_DEACTIVATION_MESSAGE_TYPE);
+});
+
 test("global tool removal waits for every active session to settle", async () => {
   const current = setup();
   await start(current);
@@ -2472,6 +2550,58 @@ test("restores a completed rollover once and recognizes its persisted continuati
   );
 });
 
+test.each(["automatic", "requested"] as const)(
+  "persists a suppressed %s rollover before reload recovery",
+  async (path) => {
+    const current = setup();
+    await start(current);
+    const accepted = await tool(current, "context_management_start_new_context").execute(
+      "suppressed-request",
+      {},
+      undefined,
+      undefined,
+      current.current.ctx,
+    );
+    persistToolResult(current, "suppressed-request", accepted);
+
+    if (path === "automatic") await emitAutomaticCompaction(current);
+    await current.mock.events.get("turn_start")?.[0](
+      { type: "turn_start", turnIndex: 1, timestamp: Date.now() },
+      current.current.ctx,
+    );
+    await current.mock.events.get("agent_end")?.[0](
+      { type: "agent_end", messages: [assistantMessage("stop")] },
+      current.current.ctx,
+    );
+    await current.mock.events.get("agent_settled")?.[0]({ type: "agent_settled" }, current.current.ctx);
+    if (path === "requested") await completeRequestedCompaction(current);
+
+    const requestId = (accepted.details as { requestId: string }).requestId;
+    assert.ok(
+      current.entries.some(
+        (entry) =>
+          entry.type === "custom" &&
+          entry.customType === "pi-context-management-rollover" &&
+          (entry.data as { requestId?: string; status?: string }).requestId === requestId &&
+          (entry.data as { status?: string }).status === "suppressed",
+      ),
+    );
+    const continuationsBeforeReload = current.mock.sentMessages.filter(
+      (item) => (item.options as { triggerTurn?: boolean } | undefined)?.triggerTurn,
+    ).length;
+    await current.mock.events.get("session_shutdown")?.[0](
+      { type: "session_shutdown", reason: "reload" },
+      current.current.ctx,
+    );
+    await start(current);
+    assert.equal(
+      current.mock.sentMessages.filter((item) => (item.options as { triggerTurn?: boolean } | undefined)?.triggerTurn)
+        .length,
+      continuationsBeforeReload,
+    );
+  },
+);
+
 test("fails rollover recovery explicitly at its branch-entry limit", async () => {
   const current = setup();
   current.setBranch(
@@ -2482,7 +2612,7 @@ test("fails rollover recovery explicitly at its branch-entry limit", async () =>
     })),
   );
 
-  await assert.rejects(() => start(current), /rollover recovery exceeded its entry limit/);
+  await assert.rejects(() => start(current), /context branch traversal exceeded its entry limit/);
   assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read"]);
 });
 

@@ -24,10 +24,12 @@ import {
   CONTEXT_DETAILS_KIND,
   CONTEXT_STATE_ENTRY_TYPE,
   CONTEXT_VERSION,
+  type ContextBranchScanBudget,
   type ContextLineage,
   compactionRetainedContext,
   contextContract,
   contextDeactivation,
+  createContextBranchScanBudget,
   createContextManagementDetails,
   createInitialContextState,
   hasContextContract,
@@ -36,14 +38,15 @@ import {
   parseContextManagementCompaction,
   projectContextManagementContext,
   reconcileContextContract,
+  visitContextBranchEntry,
 } from "./context-window.js";
+import { createFingerprintBudget } from "./fingerprint.js";
 import type { ContextManagementSettingsRuntime } from "./settings.js";
 import { terminalText } from "./terminal.js";
 
 const CONTINUATION_MESSAGE_TYPE = "pi-context-management-continuation";
 const ROLLOVER_STATE_ENTRY_TYPE = "pi-context-management-rollover";
 const START_NEW_CONTEXT_TOOL_NAME = "context_management_start_new_context";
-const MAX_ROLLOVER_RECOVERY_ENTRY_VISITS = 100_000;
 const EXTENSION_ENTRY_PATH = realpathSync(join(fileURLToPath(new URL(".", import.meta.url)), "index.ts"));
 
 type PendingRollover = {
@@ -146,7 +149,7 @@ function terminalRolloverRequestId(entry: SessionEntry): string | undefined {
     return isRecord(data) &&
       data.kind === CONTEXT_DETAILS_KIND &&
       data.version === CONTEXT_VERSION &&
-      data.status === "cancelled" &&
+      (data.status === "cancelled" || data.status === "suppressed") &&
       isIdentifier(data.requestId)
       ? data.requestId
       : undefined;
@@ -169,20 +172,17 @@ function restoredRollover(
   entries: readonly SessionEntry[],
   sessionId: string,
   generation: number,
+  budget: ContextBranchScanBudget = createContextBranchScanBudget(),
 ): PendingRollover | undefined {
   const terminalRequests = new Set<string>();
   const completedRequests = new Map<string, string>();
-  let remainingVisits = MAX_ROLLOVER_RECOVERY_ENTRY_VISITS;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (remainingVisits <= 0) {
-      throw new Error("context_management rollover recovery exceeded its entry limit");
-    }
-    remainingVisits -= 1;
+    visitContextBranchEntry(budget);
     const entry = entries[index];
     const terminalRequestId = terminalRolloverRequestId(entry);
     if (terminalRequestId) terminalRequests.add(terminalRequestId);
     if (entry.type === "compaction") {
-      const details = parseContextManagementCompaction(entry);
+      const details = parseContextManagementCompaction(entry, budget);
       if (details?.requestId) completedRequests.set(details.requestId, details.currentWindowId);
       continue;
     }
@@ -218,6 +218,25 @@ function restoredRollover(
   return undefined;
 }
 
+function boundedContextMessages(entries: readonly SessionEntry[]): AgentMessage[] {
+  const budget = createContextBranchScanBudget();
+  const messages: AgentMessage[] = [];
+  for (const entry of entries) {
+    visitContextBranchEntry(budget);
+    messages.push(...sessionEntryToContextMessages(entry));
+  }
+  return messages;
+}
+
+function branchContainsEntry(entries: readonly SessionEntry[], entryId: string): boolean {
+  const budget = createContextBranchScanBudget();
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    visitContextBranchEntry(budget);
+    if (entries[index].id === entryId) return true;
+  }
+  return false;
+}
+
 type BeforeCompactResult =
   | { cancel: true }
   | {
@@ -234,6 +253,7 @@ export interface ContextManager {
   startSession(ctx: ExtensionContext): void;
   onSessionTree(ctx: ExtensionContext): void;
   applySettings(ctx: ExtensionContext): void;
+  onInput(ctx: ExtensionContext): void;
   beforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext): BeforeCompactResult | undefined;
   projectContext(messages: readonly AgentMessage[], ctx: ExtensionContext): AgentMessage[] | undefined;
   onCompact(event: SessionCompactEvent, ctx: ExtensionContext): void;
@@ -381,15 +401,15 @@ export function createContextManager(
           candidate.fallbackDeactivationPending = false;
           continue;
         }
-        const candidateBranchIsActive = latestContextMode(candidate.key.getBranch()) === "active";
         candidate.removeToolsAtSettlement = false;
-        candidate.fallbackDeactivationPending =
-          candidate === state ? candidateBranchIsActive && candidateRunIsActive : candidateBranchIsActive;
-      }
-      const branchIsActive = latestContextMode(branch) === "active";
-      if (!runIsActive && branchIsActive) {
-        pi.sendMessage(deactivationMessage(), { triggerTurn: false });
-        state.fallbackDeactivationPending = false;
+        const branchIsActive =
+          !candidate.controller.signal.aborted &&
+          candidate.sessionId === candidate.key.getSessionId() &&
+          latestContextMode(candidate.key.getBranch()) === "active";
+        candidate.fallbackDeactivationPending = branchIsActive && (candidate !== state || candidateRunIsActive);
+        if (branchIsActive && candidate === state && !candidateRunIsActive) {
+          pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+        }
       }
       reconcileTools(state, hasDeferredToolRemoval(), ctx);
       return;
@@ -422,7 +442,7 @@ export function createContextManager(
       reconcileTools(state, false, ctx);
       throw error;
     }
-    const messages = branch.flatMap(sessionEntryToContextMessages);
+    const messages = boundedContextMessages(branch);
     if (
       deactivationAlreadyPending ||
       (!contractAlreadyActiveOrQueued &&
@@ -522,13 +542,18 @@ export function createContextManager(
     );
   };
 
-  const cancelRollover = (state: SessionState, ctx: ExtensionContext, request: PendingRollover) => {
+  const finishRolloverWithoutContinuation = (
+    state: SessionState,
+    ctx: ExtensionContext,
+    request: PendingRollover,
+    status: "cancelled" | "suppressed",
+  ) => {
     if (!isOwned(state, ctx, request)) return;
     pi.appendEntry(ROLLOVER_STATE_ENTRY_TYPE, {
       kind: CONTEXT_DETAILS_KIND,
       version: CONTEXT_VERSION,
       requestId: request.requestId,
-      status: "cancelled",
+      status,
     });
     if (isOwned(state, ctx, request)) state.pending = undefined;
   };
@@ -537,8 +562,9 @@ export function createContextManager(
     if (!isOwned(state, ctx)) return;
     state.agentRunActive = ctx.signal !== undefined;
     if (state.agentRunActive) return;
-    if (state.removeToolsAtSettlement) {
+    if (state.removeToolsAtSettlement || state.fallbackDeactivationPending) {
       state.removeToolsAtSettlement = false;
+      state.fallbackDeactivationPending = false;
       if (!isConfigured()) {
         if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
           pi.sendMessage(deactivationMessage(), { triggerTurn: false });
@@ -553,8 +579,11 @@ export function createContextManager(
       request.errorMessage = "Experimental context management was disabled before rollover completed.";
     }
     if (request.status === "completed") {
-      if (request.successfulTurnAfterRequest) state.pending = undefined;
-      else continueAfterRollover(state, ctx, request);
+      if (request.successfulTurnAfterRequest) {
+        finishRolloverWithoutContinuation(state, ctx, request, "suppressed");
+      } else {
+        continueAfterRollover(state, ctx, request);
+      }
       return;
     }
     if (request.status === "failed") {
@@ -581,8 +610,11 @@ export function createContextManager(
           return;
         }
         state.lineage = details;
-        if (request.successfulTurnAfterRequest) state.pending = undefined;
-        else continueAfterRollover(state, ctx, request);
+        if (request.successfulTurnAfterRequest) {
+          finishRolloverWithoutContinuation(state, ctx, request, "suppressed");
+        } else {
+          continueAfterRollover(state, ctx, request);
+        }
       },
       onError: (error) => failRollover(state, ctx, request, error.message),
     });
@@ -598,12 +630,14 @@ export function createContextManager(
       previous?.controller.abort();
       const generation = ++nextGeneration;
       const branch = ctx.sessionManager.getBranch();
+      const sessionId = ctx.sessionManager.getSessionId();
+      const recoveryBudget = createContextBranchScanBudget();
       const state: SessionState = {
         key: ctx.sessionManager,
         generation,
-        sessionId: ctx.sessionManager.getSessionId(),
-        lineage: loadContextLineage(branch),
-        pending: restoredRollover(branch, ctx.sessionManager.getSessionId(), generation),
+        sessionId,
+        lineage: loadContextLineage(branch, recoveryBudget),
+        pending: restoredRollover(branch, sessionId, generation, recoveryBudget),
         warned: false,
         warnedUnavailableTools: false,
         warnedProjectionFailure: false,
@@ -623,11 +657,12 @@ export function createContextManager(
       previous.controller.abort();
       const generation = ++nextGeneration;
       const branch = ctx.sessionManager.getBranch();
+      const recoveryBudget = createContextBranchScanBudget();
       const state: SessionState = {
         ...previous,
         generation,
-        lineage: loadContextLineage(branch),
-        pending: restoredRollover(branch, previous.sessionId, generation),
+        lineage: loadContextLineage(branch, recoveryBudget),
+        pending: restoredRollover(branch, previous.sessionId, generation, recoveryBudget),
         removeToolsAtSettlement: false,
         fallbackDeactivationPending: false,
         agentRunActive: false,
@@ -638,6 +673,14 @@ export function createContextManager(
       if (state.pending && ctx.isIdle()) settle(state, ctx);
     },
     applySettings,
+    onInput(ctx) {
+      const state = stateFor(ctx);
+      if (!state || isConfigured() || !state.fallbackDeactivationPending || !ctx.isIdle()) return;
+      if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
+        pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+      }
+      state.fallbackDeactivationPending = false;
+    },
     beforeCompact(event, ctx) {
       const state = stateFor(ctx);
       if (!state || event.signal.aborted) return undefined;
@@ -647,12 +690,16 @@ export function createContextManager(
         state.pending?.status === "requested" || state.pending?.status === "compacting" ? state.pending : undefined;
       try {
         const activeLineage = ensureLineage(state, ctx);
-        const details = createContextManagementDetails({
-          lineage: activeLineage,
-          ...compactionRetainedContext(event),
-          reason: event.reason,
-          ...(request ? { requestId: request.requestId, windowId: request.nextWindowId } : {}),
-        });
+        const fingerprintBudget = createFingerprintBudget();
+        const details = createContextManagementDetails(
+          {
+            lineage: activeLineage,
+            ...compactionRetainedContext(event, fingerprintBudget),
+            reason: event.reason,
+            ...(request ? { requestId: request.requestId, windowId: request.nextWindowId } : {}),
+          },
+          fingerprintBudget,
+        );
         if (request) request.status = "compacting";
         return {
           compaction: {
@@ -679,6 +726,8 @@ export function createContextManager(
       if (!enabledFor(state)) {
         if (state.fallbackDeactivationPending) {
           if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
+            pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+            state.fallbackDeactivationPending = false;
             return [...messages, deactivationAgentMessage()];
           }
           state.fallbackDeactivationPending = false;
@@ -709,7 +758,7 @@ export function createContextManager(
     },
     onCompact(event, ctx) {
       const state = stateFor(ctx);
-      if (!state || !ctx.sessionManager.getBranch().some((entry) => entry.id === event.compactionEntry.id)) {
+      if (!state || !branchContainsEntry(ctx.sessionManager.getBranch(), event.compactionEntry.id)) {
         return;
       }
       const details = parseContextManagementCompaction(event.compactionEntry);
@@ -731,7 +780,7 @@ export function createContextManager(
       const request = state?.pending;
       if (!state || request?.status !== "compacting" || !isOwned(state, ctx, request)) return;
       if (event.aborted) {
-        cancelRollover(state, ctx, request);
+        finishRolloverWithoutContinuation(state, ctx, request, "cancelled");
         return;
       }
       request.status = "failed";
@@ -747,7 +796,7 @@ export function createContextManager(
       if (!state || !request || !isOwned(state, ctx, request)) return;
       const stopReason = latestAssistantStopReason(event.messages);
       if (ctx.signal?.aborted || stopReason === "aborted") {
-        cancelRollover(state, ctx, request);
+        finishRolloverWithoutContinuation(state, ctx, request, "cancelled");
         return;
       }
       if (request.turnStartedAfterRequest && (stopReason === "stop" || stopReason === "toolUse")) {

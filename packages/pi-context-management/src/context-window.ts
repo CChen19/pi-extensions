@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { CompactionEntry, SessionBeforeCompactEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { buildContextEntries, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
-import { fingerprintMessage } from "./fingerprint.js";
+import { createFingerprintBudget, type FingerprintBudget, fingerprintMessage } from "./fingerprint.js";
 
 export const CONTEXT_STATE_ENTRY_TYPE = "pi-context-management-state";
 export const CONTEXT_CONTRACT_MESSAGE_TYPE = "pi-context-management-contract";
@@ -11,6 +11,34 @@ export const CONTEXT_DETAILS_KIND = "pi-context-management-window";
 export const CONTEXT_VERSION = 1;
 const MAX_DETAILS_BYTES = 8 * 1024 * 1024;
 const MAX_FINGERPRINTS = 100_000;
+export const MAX_CONTEXT_BRANCH_ENTRY_VISITS = 100_000;
+export const MAX_CONTEXT_BRANCH_SCAN_UNITS = 8 * 1024 * 1024;
+
+export interface ContextBranchScanBudget {
+  remainingVisits: number;
+  remainingScanUnits: number;
+}
+
+export function createContextBranchScanBudget(): ContextBranchScanBudget {
+  return {
+    remainingVisits: MAX_CONTEXT_BRANCH_ENTRY_VISITS,
+    remainingScanUnits: MAX_CONTEXT_BRANCH_SCAN_UNITS,
+  };
+}
+
+export function visitContextBranchEntry(budget: ContextBranchScanBudget): void {
+  if (budget.remainingVisits <= 0) {
+    throw new Error("context_management context branch traversal exceeded its entry limit");
+  }
+  budget.remainingVisits -= 1;
+}
+
+function consumeContextBranchScan(budget: ContextBranchScanBudget, units: number): void {
+  if (!Number.isSafeInteger(units) || units < 0 || units > budget.remainingScanUnits) {
+    throw new Error("context_management context branch traversal exceeded its scan limit");
+  }
+  budget.remainingScanUnits -= units;
+}
 
 export interface ContextLineage {
   firstWindowId: string;
@@ -41,10 +69,6 @@ function isIdentifier(value: unknown): value is string {
   return typeof value === "string" && value.length >= 8 && value.length <= 128;
 }
 
-function serializedBytes(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value), "utf8");
-}
-
 function parseLineage(value: Record<string, unknown>): ContextLineage | undefined {
   if (!isIdentifier(value.firstWindowId) || !isIdentifier(value.currentWindowId)) return undefined;
   if (value.previousWindowId !== undefined && !isIdentifier(value.previousWindowId)) return undefined;
@@ -70,13 +94,11 @@ export function parseContextState(value: unknown): ContextStateEntryData | undef
   return { kind: CONTEXT_DETAILS_KIND, version: CONTEXT_VERSION, ...lineage };
 }
 
-export function parseContextManagementDetails(value: unknown): ContextManagementDetails | undefined {
+export function parseContextManagementDetails(
+  value: unknown,
+  budget?: ContextBranchScanBudget,
+): ContextManagementDetails | undefined {
   if (!isRecord(value) || value.kind !== CONTEXT_DETAILS_KIND || value.version !== CONTEXT_VERSION) return undefined;
-  try {
-    if (serializedBytes(value) > MAX_DETAILS_BYTES) return undefined;
-  } catch {
-    return undefined;
-  }
   const lineage = parseLineage(value);
   if (
     !lineage?.previousWindowId ||
@@ -85,17 +107,42 @@ export function parseContextManagementDetails(value: unknown): ContextManagement
     (value.requestId !== undefined && !isIdentifier(value.requestId)) ||
     !Array.isArray(value.keptMessageFingerprints) ||
     value.keptMessageFingerprints.length > MAX_FINGERPRINTS ||
-    !value.keptMessageFingerprints.every(
-      (fingerprint) => typeof fingerprint === "string" && /^[a-f0-9]{64}$/.test(fingerprint),
-    ) ||
     (value.retryResponseFingerprint !== undefined &&
-      (typeof value.retryResponseFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(value.retryResponseFingerprint))) ||
+      (typeof value.retryResponseFingerprint !== "string" || value.retryResponseFingerprint.length !== 64)) ||
     typeof value.createdAt !== "string" ||
     value.createdAt.length > 64
   ) {
     return undefined;
   }
-  return {
+  const scanUnits =
+    1 +
+    lineage.firstWindowId.length +
+    lineage.previousWindowId.length +
+    lineage.currentWindowId.length +
+    value.createdAt.length +
+    (typeof value.requestId === "string" ? value.requestId.length : 0) +
+    (typeof value.retryResponseFingerprint === "string" ? value.retryResponseFingerprint.length : 0) +
+    value.keptMessageFingerprints.length +
+    value.keptMessageFingerprints.reduce(
+      (total, fingerprint) => total + (typeof fingerprint === "string" ? fingerprint.length : 1),
+      0,
+    );
+  const scanBudget = budget ?? createContextBranchScanBudget();
+  try {
+    consumeContextBranchScan(scanBudget, scanUnits);
+  } catch (error) {
+    if (budget) throw error;
+    return undefined;
+  }
+  if (
+    !value.keptMessageFingerprints.every(
+      (fingerprint) => typeof fingerprint === "string" && /^[a-f0-9]{64}$/.test(fingerprint),
+    ) ||
+    (typeof value.retryResponseFingerprint === "string" && !/^[a-f0-9]{64}$/.test(value.retryResponseFingerprint))
+  ) {
+    return undefined;
+  }
+  const details: ContextManagementDetails = {
     kind: CONTEXT_DETAILS_KIND,
     version: CONTEXT_VERSION,
     ...lineage,
@@ -107,12 +154,14 @@ export function parseContextManagementDetails(value: unknown): ContextManagement
       : {}),
     createdAt: value.createdAt,
   };
+  return Buffer.byteLength(JSON.stringify(details), "utf8") <= MAX_DETAILS_BYTES ? details : undefined;
 }
 
 export function parseContextManagementCompaction(
   entry: Pick<CompactionEntry, "summary" | "details">,
+  budget?: ContextBranchScanBudget,
 ): ContextManagementDetails | undefined {
-  const details = parseContextManagementDetails(entry.details);
+  const details = parseContextManagementDetails(entry.details, budget);
   return details && entry.summary === contextContract(details) ? details : undefined;
 }
 
@@ -125,11 +174,15 @@ export function createInitialContextState(windowId = randomUUID()): ContextState
   };
 }
 
-export function loadContextLineage(entries: readonly SessionEntry[]): ContextLineage | undefined {
+export function loadContextLineage(
+  entries: readonly SessionEntry[],
+  budget: ContextBranchScanBudget = createContextBranchScanBudget(),
+): ContextLineage | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
+    visitContextBranchEntry(budget);
     const entry = entries[index];
     if (entry.type === "compaction") {
-      const details = parseContextManagementCompaction(entry);
+      const details = parseContextManagementCompaction(entry, budget);
       if (details) return details;
       continue;
     }
@@ -141,16 +194,20 @@ export function loadContextLineage(entries: readonly SessionEntry[]): ContextLin
   return undefined;
 }
 
-export function activeContextManagementCompaction(entries: readonly SessionEntry[]):
+export function activeContextManagementCompaction(
+  entries: readonly SessionEntry[],
+  budget: ContextBranchScanBudget = createContextBranchScanBudget(),
+):
   | {
       entry: CompactionEntry<ContextManagementDetails>;
       details: ContextManagementDetails;
     }
   | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
+    visitContextBranchEntry(budget);
     const entry = entries[index];
     if (entry.type !== "compaction") continue;
-    const details = parseContextManagementCompaction(entry);
+    const details = parseContextManagementCompaction(entry, budget);
     return details ? { entry: entry as CompactionEntry<ContextManagementDetails>, details } : undefined;
   }
   return undefined;
@@ -175,11 +232,15 @@ export function contextDeactivation(): string {
   ].join("\n");
 }
 
-export function latestContextMode(entries: readonly SessionEntry[]): "active" | "inactive" | undefined {
+export function latestContextMode(
+  entries: readonly SessionEntry[],
+  budget: ContextBranchScanBudget = createContextBranchScanBudget(),
+): "active" | "inactive" | undefined {
   let mode: "active" | "inactive" | undefined;
+  for (const _entry of entries) visitContextBranchEntry(budget);
   const leafId = entries.at(-1)?.id ?? null;
   for (const entry of buildContextEntries([...entries], leafId)) {
-    if (entry.type === "compaction" && parseContextManagementCompaction(entry)) mode = "active";
+    if (entry.type === "compaction" && parseContextManagementCompaction(entry, budget)) mode = "active";
     for (const message of sessionEntryToContextMessages(entry)) {
       if (message.role !== "custom") continue;
       if (message.customType === CONTEXT_CONTRACT_MESSAGE_TYPE) mode = "active";
@@ -222,7 +283,10 @@ export function reconcileContextContract(messages: readonly AgentMessage[], line
   return [...messages, createContextContractMessage(lineage)];
 }
 
-export function compactionRetainedContext(event: SessionBeforeCompactEvent): {
+export function compactionRetainedContext(
+  event: SessionBeforeCompactEvent,
+  fingerprintBudget: FingerprintBudget = createFingerprintBudget(),
+): {
   keptMessages: AgentMessage[];
   retryResponseFingerprint?: string;
 } {
@@ -241,21 +305,24 @@ export function compactionRetainedContext(event: SessionBeforeCompactEvent): {
   ) {
     return {
       keptMessages: keptMessages.slice(0, -1),
-      retryResponseFingerprint: fingerprintMessage(lastMessage),
+      retryResponseFingerprint: fingerprintMessage(lastMessage, fingerprintBudget),
     };
   }
   return { keptMessages };
 }
 
-export function createContextManagementDetails(input: {
-  lineage: ContextLineage;
-  keptMessages: readonly AgentMessage[];
-  retryResponseFingerprint?: string;
-  reason: SessionBeforeCompactEvent["reason"];
-  requestId?: string;
-  windowId?: string;
-  createdAt?: string;
-}): ContextManagementDetails {
+export function createContextManagementDetails(
+  input: {
+    lineage: ContextLineage;
+    keptMessages: readonly AgentMessage[];
+    retryResponseFingerprint?: string;
+    reason: SessionBeforeCompactEvent["reason"];
+    requestId?: string;
+    windowId?: string;
+    createdAt?: string;
+  },
+  fingerprintBudget: FingerprintBudget = createFingerprintBudget(),
+): ContextManagementDetails {
   const currentWindowId = input.windowId ?? randomUUID();
   const details: ContextManagementDetails = {
     kind: CONTEXT_DETAILS_KIND,
@@ -265,7 +332,7 @@ export function createContextManagementDetails(input: {
     currentWindowId,
     reason: input.reason,
     ...(input.requestId ? { requestId: input.requestId } : {}),
-    keptMessageFingerprints: input.keptMessages.map(fingerprintMessage),
+    keptMessageFingerprints: input.keptMessages.map((message) => fingerprintMessage(message, fingerprintBudget)),
     ...(input.retryResponseFingerprint ? { retryResponseFingerprint: input.retryResponseFingerprint } : {}),
     createdAt: input.createdAt ?? new Date().toISOString(),
   };
@@ -288,6 +355,7 @@ export function projectContextManagementContext(
   entry: CompactionEntry<ContextManagementDetails>,
   details: ContextManagementDetails,
 ): AgentMessage[] | undefined {
+  const fingerprintBudget = createFingerprintBudget();
   const expectedSummary = contextContract(details);
   if (entry.summary !== expectedSummary) return undefined;
   const summaryIndex = messages.findIndex(
@@ -300,7 +368,7 @@ export function projectContextManagementContext(
   while (fingerprintIndex < details.keptMessageFingerprints.length) {
     if (messageIndex >= messages.length) return undefined;
     const message = messages[messageIndex];
-    if (fingerprintMessage(message) === details.keptMessageFingerprints[fingerprintIndex]) {
+    if (fingerprintMessage(message, fingerprintBudget) === details.keptMessageFingerprints[fingerprintIndex]) {
       messageIndex += 1;
       fingerprintIndex += 1;
       continue;
@@ -317,7 +385,7 @@ export function projectContextManagementContext(
   if (
     details.retryResponseFingerprint &&
     messageIndex < messages.length &&
-    fingerprintMessage(messages[messageIndex]) === details.retryResponseFingerprint
+    fingerprintMessage(messages[messageIndex], fingerprintBudget) === details.retryResponseFingerprint
   ) {
     messageIndex += 1;
   }

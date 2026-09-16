@@ -61,7 +61,7 @@ output-length cutoff remains eligible for one. If Pi already starts automatic co
 compaction consumes the request; otherwise the extension calls `ctx.compact()` at `agent_settled`.
 The scheduled tool result persists the request and target-window identifiers. On session restart or
 reload, the extension resumes an unresolved request, completes a persisted compaction's missing
-continuation once, and does not repeat work after its continuation or cancellation marker is present.
+continuation once, and does not repeat work after its continuation, cancellation, or successful-turn suppression marker is present.
 
 Successful compaction moves to the new window and sends a hidden next-turn message asking the model
 to continue. Failed compaction keeps the old context, reports one warning, and sends a hidden failure
@@ -198,10 +198,10 @@ Limits are fixed to keep session growth and tool responses bounded:
 | Recall query | 512 characters |
 | Recall search page | 20 matches |
 | History branch traversal | 100,000 entry visits per request |
-| Rollover recovery traversal | 100,000 entry visits per session start or tree change |
+| Context lineage, mode, and rollover recovery | 100,000 combined entry visits and 8,388,608 persisted-detail scan units per operation |
 | History read scan | 4,194,304 scan units per selected item |
 | History search scan | 4,194,304 scan units across indexed characters and visited values per request |
-| Retained-message fingerprint | 512 levels, 4,194,304 scan units, and 8 MiB serialized per message |
+| Retained-message fingerprints | 512 levels per message, plus 4,194,304 scan units and 8 MiB serialized across one creation or projection operation |
 | Recall response | 32 KiB and 1,000 lines |
 
 Long reads and additional list or search matches use cursors. History actions fail explicitly when
@@ -215,9 +215,12 @@ Malformed, unsupported, or unrelated persisted entries remain untouched and are 
 this package starts or resumes only lineages that use its `context_management_*` tools and
 `pi-context-management-*` persisted identifiers.
 
-Disabling the experiment at idle appends one deterministic hidden deactivation transition and then
-removes the four tools. During an active run, the current contract and tools remain available through
-settlement; the extension then publishes deactivation before removing the tools. An accepted but
+Disabling the experiment at idle appends one deterministic hidden deactivation transition in each
+owning session and then removes the four tools. A non-initiating idle session publishes its durable
+transition before its next input is persisted; a no-input continuation queues the same transition at
+its next context boundary. During an
+active run, the current contract and tools remain available through settlement; the extension then
+publishes deactivation before removing the tools. An accepted but
 unfinished rollover reports a failure continuation at that boundary instead of being discarded, while
 a rollover that already completed retains its success continuation and reports that context tools are
 unavailable. Re-enabling before settlement cancels the pending tool-removal transition and leaves an

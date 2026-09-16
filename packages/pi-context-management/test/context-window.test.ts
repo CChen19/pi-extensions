@@ -15,6 +15,7 @@ import {
   CONTEXT_DETAILS_KIND,
   CONTEXT_STATE_ENTRY_TYPE,
   CONTEXT_VERSION,
+  type ContextManagementDetails,
   compactionRetainedContext,
   contextContract,
   contextDeactivation,
@@ -27,6 +28,7 @@ import {
   projectContextManagementContext,
   reconcileContextContract,
 } from "../src/context-window.js";
+import { fingerprintMessage } from "../src/fingerprint.js";
 
 const first = "11111111-1111-4111-8111-111111111111";
 const second = "22222222-2222-4222-8222-222222222222";
@@ -164,6 +166,68 @@ test("loads the newest owned lineage without replaying older entries", () => {
   assert.deepEqual(loadContextLineage(entries), details);
 });
 
+test("bounds every branch scan and shares one details-work budget", () => {
+  const entries: SessionEntry[] = [
+    {
+      type: "message",
+      id: "first-message",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: message("first", 1),
+    },
+    {
+      type: "message",
+      id: "second-message",
+      parentId: "first-message",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      message: message("second", 2),
+    },
+  ];
+  for (const scan of [loadContextLineage, activeContextManagementCompaction, latestContextMode]) {
+    assert.throws(
+      () => scan(entries, { remainingVisits: 1, remainingScanUnits: 1_000 }),
+      /context branch traversal exceeded its entry limit/,
+    );
+  }
+
+  const malformedDetails = {
+    kind: CONTEXT_DETAILS_KIND,
+    version: CONTEXT_VERSION,
+    firstWindowId: first,
+    previousWindowId: first,
+    currentWindowId: second,
+    reason: "manual",
+    keptMessageFingerprints: ["g".repeat(64)],
+    createdAt: "now",
+  };
+  const malformedCompactions: SessionEntry[] = [
+    {
+      type: "compaction",
+      id: "first-malformed",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      summary: "malformed",
+      firstKeptEntryId: "first-malformed",
+      tokensBefore: 1,
+      details: malformedDetails,
+    },
+    {
+      type: "compaction",
+      id: "second-malformed",
+      parentId: "first-malformed",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      summary: "malformed",
+      firstKeptEntryId: "second-malformed",
+      tokensBefore: 1,
+      details: malformedDetails,
+    },
+  ];
+  assert.throws(
+    () => loadContextLineage(malformedCompactions, { remainingVisits: 10, remainingScanUnits: 250 }),
+    /context branch traversal exceeded its scan limit/,
+  );
+});
+
 test("accepts persisted context details only with their canonical summary", () => {
   const state = createInitialContextState(first);
   const details = createContextManagementDetails({
@@ -282,6 +346,46 @@ test("projects only an exactly fingerprinted retained prefix", () => {
   const firstProjection = projectContextManagementContext([summary, kept, later], entry, details);
   const secondProjection = projectContextManagementContext([summary, kept, later, next], entry, details);
   assert.deepEqual(secondProjection?.slice(0, firstProjection?.length), firstProjection);
+});
+
+test("shares one fingerprint budget across retained creation and projection", () => {
+  const retained = [message("a".repeat(2_100_000), 2), message("b".repeat(2_100_000), 3)];
+  const fingerprints = retained.map((item) => fingerprintMessage(item));
+  assert.throws(
+    () =>
+      createContextManagementDetails({
+        lineage: createInitialContextState(first),
+        keptMessages: retained,
+        reason: "threshold",
+        windowId: second,
+      }),
+    /fingerprint exceeded its traversal limit/,
+  );
+
+  const details: ContextManagementDetails = {
+    kind: CONTEXT_DETAILS_KIND,
+    version: CONTEXT_VERSION,
+    firstWindowId: first,
+    previousWindowId: first,
+    currentWindowId: second,
+    reason: "threshold",
+    keptMessageFingerprints: fingerprints,
+    createdAt: "2026-01-01T00:00:03.000Z",
+  };
+  const summary: AgentMessage = {
+    role: "compactionSummary",
+    summary: contextContract(details),
+    tokensBefore: 100,
+    timestamp: 4,
+  };
+  const entry = {
+    type: "compaction",
+    summary: contextContract(details),
+  } as CompactionEntry<ContextManagementDetails>;
+  assert.throws(
+    () => projectContextManagementContext([summary, ...retained], entry, details),
+    /fingerprint exceeded its traversal limit/,
+  );
 });
 
 test.each(["error", "length"] as const)(
