@@ -237,6 +237,72 @@ Print and JSON return `unsupported`.
 Owner abort, session replacement, external TUI disposal, and failures remain distinct `stale` or `error` results.
 The Kit owns only this interaction lifecycle—the caller performs every confirmed side effect and must abort its owner signal on replacement or shutdown.
 
+### Document reviews
+
+Use `runDocumentReview()` for one standalone read-only document with optional confirmation:
+
+```ts
+import { runDocumentReview } from "@narumitw/pi-tui-kit/document-review";
+
+const result = await runDocumentReview(ctx, {
+  title: "Review generated configuration",
+  content: generatedDocument,
+  format: { kind: "diff", filePath: "settings.json" },
+  viewportSize: "adaptive",
+  enableSearch: true,
+  confirmation: { label: "Apply" },
+  signal: currentSessionSignal(),
+  isCurrent: () => generation === currentGeneration(),
+});
+
+if (result.kind === "confirmed") await persistGeneratedConfiguration();
+```
+
+The API uses the same text, code, diff, and Markdown formatter as declarative `review` screens, including exact cell-width wrapping, terminal sanitization, syntax highlighting, LaTeX, Mermaid fallback, custom keybindings, search, scrolling, and mouse wheel behavior.
+Before opening a TUI Markdown review with an enabled top-level Mermaid fence, it awaits Kit's lazy renderer preparation and revalidates the owner signal and generation.
+Mermaid preparation remains internal; callers receive no renderer or component factory.
+
+TUI Escape and Ctrl+C return typed `cancelled` results with Back and Close reasons.
+When `confirmation` is omitted, the document is read-only and can only be cancelled.
+RPC uses the authoritative sanitized document pages, optional confirmation, and signal-aware `select()` dialogs; TUI-only search is ignored.
+Print and JSON return `unsupported`.
+Owner abort, stale ownership, external disposal, invalid options, and failures remain distinct `stale` or `error` results.
+The caller owns every confirmed side effect and must revalidate domain state before applying it.
+
+### Multi-selects
+
+Use `runMultiSelect()` to collect a set of stable IDs without moving domain state or persistence into Kit:
+
+```ts
+import { runMultiSelect } from "@narumitw/pi-tui-kit/multi-select";
+
+const result = await runMultiSelect(ctx, {
+  title: "Enabled tools",
+  items: tools.map((tool) => ({
+    id: tool.id,
+    label: tool.label,
+    selected: tool.enabled,
+    disabled: tool.required,
+    disabledReason: tool.required ? "Required by policy" : undefined,
+    searchText: tool.aliases.join(" "),
+  })),
+  enableSearch: true,
+  completionLabel: "Apply",
+  signal: currentSessionSignal(),
+  isCurrent: () => generation === currentGeneration(),
+});
+
+if (result.kind === "completed") await saveEnabledToolIds(result.selectedItemIds);
+```
+
+TUI reuses the standard multi-select screen's optimistic toggles, disabled explanations, fuzzy search, callback-provided keybindings, IME focus, paste behavior, width bounds, and mouse routing.
+The explicit completion row waits for pending toggles before returning selected IDs in input order.
+Escape and Ctrl+C cancel without returning a completed set.
+RPC presents a deterministic unfiltered list, loops after each enabled toggle, keeps disabled rows inert, and completes only through the explicit completion row; protocol cancellation returns `cancelled`.
+Print and JSON return `unsupported`.
+Owner abort, stale ownership, external disposal, invalid options, and failures remain typed.
+The interaction mutates only its private selected-ID set; the caller decides whether and how to validate, persist, or apply a completed result.
+
 ### Live choices
 
 For a choice whose cursor drives an extension-owned preview, use `runLiveChoice()` instead of making a declarative `choice` screen side-effecting:
@@ -967,7 +1033,9 @@ Consumer fixtures continue to own domain state, persistence, generation checks, 
 - `runMenu()` — runs the definition in the current Pi mode and preserves root Back versus Close.
 - `runTask()` — runs typed abort-aware work with a cancellable TUI loader and direct non-TUI fallback.
 - `runConfirmation()` — preserves Confirmed, Back, Close, Stale, Unsupported, and Error for one standalone confirmation without owning the confirmed side effect.
+- `runDocumentReview()` — reuses authoritative text, code, diff, and Markdown review behavior with search, optional confirmation, TUI/RPC adaptation, and typed lifecycle outcomes.
 - `runLiveChoice()` — adapts live-preview choice to TUI and RPC while preserving typed selection, gating, shortcuts, and lifecycle outcomes.
+- `runMultiSelect()` — reuses authoritative multi-select behavior with interaction-local selection, disabled rows, optional TUI search, explicit completion, and TUI/RPC adaptation.
 - `prepareMermaidMarkdownRenderer()` and `createMermaidMarkdownTransformer()` — lazily prepare and synchronously transform finalized Pi message Markdown; the root and `@narumitw/pi-tui-kit/markdown` both export them plus `MermaidMarkdownTheme`.
 - `runModelSelector()` and `runThinkingSelector()` — provide searchable TUI selectors with current/default markers and typed save-default intent.
 - `runQuestionnaire()` — adapts choices, free-form answers, optional TUI notes, direct single-question submission, multi-question review, and sequential RPC.
@@ -983,8 +1051,10 @@ Consumer fixtures continue to own domain state, persistence, generation checks, 
 - `resolveMenuScreen()` — resolves and validates a dynamic screen for tests or adapters.
 - `createMenuNavigator()` — lower-level stack and selection state helper.
 - exported screen, item, action, transition, runtime option, `BrowseDetailDocument`, `MenuCloseReason`, and result types.
+- Focused interaction subpaths — `confirmation`, `custom-interaction`, `document-review`, `live-choice`, `multi-select`, `questionnaire`, `selectors`, and `task` export the matching runtime functions and types without requiring the package root.
 - `@narumitw/pi-tui-kit/testing` — test-only subpath for `createTuiHarness()`, `createRpcHarness()`, strict scripts, and their types; the production root does not re-export it.
-- `PI_EXTENSION_MENU_API_VERSION` — current API version (`19`).
+- `PI_EXTENSION_MENU_API_VERSION` — current API version (`20`).
+Version 20 adds focused interaction subpaths plus standalone document-review and multi-select APIs while version-19 definitions remain valid.
 Version 19 adds public lazy Mermaid Markdown transformer preparation and the focused `/markdown` subpath while version-18 definitions remain valid.
 Version 18 adds standard-screen mouse routing, intraline diff emphasis, searchable live choices, input prefill, and masked secret input while version-17 definitions remain valid.
 Version 17 adds searchable default-aware selectors while version-16 menu definitions remain valid.
