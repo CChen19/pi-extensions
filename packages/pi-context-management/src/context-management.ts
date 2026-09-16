@@ -41,7 +41,9 @@ import type { ContextManagementSettingsRuntime } from "./settings.js";
 import { terminalText } from "./terminal.js";
 
 const CONTINUATION_MESSAGE_TYPE = "pi-context-management-continuation";
+const ROLLOVER_STATE_ENTRY_TYPE = "pi-context-management-rollover";
 const START_NEW_CONTEXT_TOOL_NAME = "context_management_start_new_context";
+const MAX_ROLLOVER_RECOVERY_ENTRY_VISITS = 100_000;
 const EXTENSION_ENTRY_PATH = realpathSync(join(fileURLToPath(new URL(".", import.meta.url)), "index.ts"));
 
 type PendingRollover = {
@@ -138,60 +140,80 @@ function latestAssistantStopReason(messages: readonly AgentMessage[]): string | 
   return undefined;
 }
 
+function terminalRolloverRequestId(entry: SessionEntry): string | undefined {
+  if (entry.type === "custom" && entry.customType === ROLLOVER_STATE_ENTRY_TYPE) {
+    const data = entry.data;
+    return isRecord(data) &&
+      data.kind === CONTEXT_DETAILS_KIND &&
+      data.version === CONTEXT_VERSION &&
+      data.status === "cancelled" &&
+      isIdentifier(data.requestId)
+      ? data.requestId
+      : undefined;
+  }
+  const message = entry.type === "message" && entry.message.role === "custom" ? entry.message : undefined;
+  const customMessage = entry.type === "custom_message" ? entry : message;
+  if (
+    customMessage?.customType === CONTINUATION_MESSAGE_TYPE &&
+    isRecord(customMessage.details) &&
+    customMessage.details.kind === CONTEXT_DETAILS_KIND &&
+    customMessage.details.version === CONTEXT_VERSION &&
+    isIdentifier(customMessage.details.requestId)
+  ) {
+    return customMessage.details.requestId;
+  }
+  return undefined;
+}
+
 function restoredRollover(
   entries: readonly SessionEntry[],
   sessionId: string,
   generation: number,
 ): PendingRollover | undefined {
-  const continuedRequests = new Set<string>();
+  const terminalRequests = new Set<string>();
   const completedRequests = new Map<string, string>();
+  let remainingVisits = MAX_ROLLOVER_RECOVERY_ENTRY_VISITS;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (remainingVisits <= 0) {
+      throw new Error("context_management rollover recovery exceeded its entry limit");
+    }
+    remainingVisits -= 1;
     const entry = entries[index];
+    const terminalRequestId = terminalRolloverRequestId(entry);
+    if (terminalRequestId) terminalRequests.add(terminalRequestId);
     if (entry.type === "compaction") {
       const details = parseContextManagementCompaction(entry);
       if (details?.requestId) completedRequests.set(details.requestId, details.currentWindowId);
+      continue;
     }
-    const messages = sessionEntryToContextMessages(entry);
-    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-      const message = messages[messageIndex];
-      if (
-        message.role === "custom" &&
-        message.customType === CONTINUATION_MESSAGE_TYPE &&
-        isRecord(message.details) &&
-        message.details.kind === CONTEXT_DETAILS_KIND &&
-        message.details.version === CONTEXT_VERSION &&
-        isIdentifier(message.details.requestId)
-      ) {
-        continuedRequests.add(message.details.requestId);
-        continue;
-      }
-      if (message.role !== "toolResult" || message.toolName !== START_NEW_CONTEXT_TOOL_NAME) continue;
-      const details = message.details;
-      if (
-        !isRecord(details) ||
-        details.kind !== CONTEXT_DETAILS_KIND ||
-        details.version !== CONTEXT_VERSION ||
-        details.status !== "scheduled" ||
-        !isIdentifier(details.requestId) ||
-        !isIdentifier(details.currentWindowId) ||
-        !isIdentifier(details.nextWindowId) ||
-        (details.reason !== undefined && (typeof details.reason !== "string" || details.reason.length > 512))
-      ) {
-        continue;
-      }
-      if (continuedRequests.has(details.requestId)) return undefined;
-      const completedWindowId = completedRequests.get(details.requestId);
-      return {
-        requestId: details.requestId,
-        nextWindowId: completedWindowId ?? details.nextWindowId,
-        sessionId,
-        generation,
-        status: completedWindowId ? "completed" : "requested",
-        turnStartedAfterRequest: false,
-        successfulTurnAfterRequest: false,
-        ...(typeof details.reason === "string" ? { reason: details.reason } : {}),
-      };
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role !== "toolResult" || message.toolName !== START_NEW_CONTEXT_TOOL_NAME) continue;
+    const details = message.details;
+    if (
+      !isRecord(details) ||
+      details.kind !== CONTEXT_DETAILS_KIND ||
+      details.version !== CONTEXT_VERSION ||
+      details.status !== "scheduled" ||
+      !isIdentifier(details.requestId) ||
+      !isIdentifier(details.currentWindowId) ||
+      !isIdentifier(details.nextWindowId) ||
+      (details.reason !== undefined && (typeof details.reason !== "string" || details.reason.length > 512))
+    ) {
+      continue;
     }
+    if (terminalRequests.has(details.requestId)) return undefined;
+    const completedWindowId = completedRequests.get(details.requestId);
+    return {
+      requestId: details.requestId,
+      nextWindowId: completedWindowId ?? details.nextWindowId,
+      sessionId,
+      generation,
+      status: completedWindowId ? "completed" : "requested",
+      turnStartedAfterRequest: false,
+      successfulTurnAfterRequest: false,
+      ...(typeof details.reason === "string" ? { reason: details.reason } : {}),
+    };
   }
   return undefined;
 }
@@ -288,15 +310,18 @@ export function createContextManager(
     );
   };
 
-  const reconcileTools = (state: SessionState, configured: boolean, ctx: ExtensionContext): boolean => {
+  const hasDeferredToolRemoval = () => [...states.values()].some((state) => state.removeToolsAtSettlement);
+
+  const reconcileTools = (state: SessionState, activate: boolean, ctx: ExtensionContext): boolean => {
     const inspection = inspectToolUnit();
-    const available = configured && inspection.unavailableNames.length === 0;
+    const available = activate && inspection.unavailableNames.length === 0;
     const current = pi.getActiveTools();
-    const withoutOwned = current.filter((name) => !inspection.ownedNames.has(name));
-    const next = available ? [...withoutOwned, ...CONTEXT_MANAGEMENT_TOOL_NAMES] : withoutOwned;
+    const next = available
+      ? [...current, ...inspection.inactiveNames]
+      : current.filter((name) => !inspection.ownedNames.has(name));
     if (!sameNames(current, next)) pi.setActiveTools(next);
     for (const candidate of states.values()) candidate.toolsAvailable = available;
-    if (configured && !available) {
+    if (activate && !available) {
       warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
     }
     return available;
@@ -346,27 +371,36 @@ export function createContextManager(
     if (!state) return;
     const branch = ctx.sessionManager.getBranch();
     const runIsActive = state.agentRunActive || ctx.signal !== undefined;
+    state.agentRunActive = runIsActive;
     if (!isConfigured()) {
       const inspection = inspectToolUnit();
-      if (runIsActive && state.toolsAvailable && inspection.complete) {
-        state.removeToolsAtSettlement = true;
-        state.fallbackDeactivationPending = false;
-        return;
+      for (const candidate of states.values()) {
+        const candidateRunIsActive = candidate === state ? runIsActive : candidate.agentRunActive;
+        if (candidateRunIsActive && candidate.toolsAvailable && inspection.complete) {
+          candidate.removeToolsAtSettlement = true;
+          candidate.fallbackDeactivationPending = false;
+          continue;
+        }
+        const candidateBranchIsActive = latestContextMode(candidate.key.getBranch()) === "active";
+        candidate.removeToolsAtSettlement = false;
+        candidate.fallbackDeactivationPending =
+          candidate === state ? candidateBranchIsActive && candidateRunIsActive : candidateBranchIsActive;
       }
       const branchIsActive = latestContextMode(branch) === "active";
-      if (branchIsActive && !state.fallbackDeactivationPending) {
+      if (!runIsActive && branchIsActive) {
         pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+        state.fallbackDeactivationPending = false;
       }
-      state.removeToolsAtSettlement = false;
-      state.fallbackDeactivationPending = branchIsActive && runIsActive;
-      reconcileTools(state, false, ctx);
+      reconcileTools(state, hasDeferredToolRemoval(), ctx);
       return;
     }
     const contractAlreadyActiveOrQueued = state.removeToolsAtSettlement && !state.fallbackDeactivationPending;
     const deactivationAlreadyPending = state.fallbackDeactivationPending;
     const toolsWereAvailable = state.toolsAvailable;
-    state.removeToolsAtSettlement = false;
-    state.fallbackDeactivationPending = false;
+    for (const candidate of states.values()) {
+      candidate.removeToolsAtSettlement = false;
+      candidate.fallbackDeactivationPending = false;
+    }
     if (!reconcileTools(state, true, ctx)) {
       if (state.pending?.status === "requested" || state.pending?.status === "compacting") {
         state.pending.status = "failed";
@@ -488,6 +522,17 @@ export function createContextManager(
     );
   };
 
+  const cancelRollover = (state: SessionState, ctx: ExtensionContext, request: PendingRollover) => {
+    if (!isOwned(state, ctx, request)) return;
+    pi.appendEntry(ROLLOVER_STATE_ENTRY_TYPE, {
+      kind: CONTEXT_DETAILS_KIND,
+      version: CONTEXT_VERSION,
+      requestId: request.requestId,
+      status: "cancelled",
+    });
+    if (isOwned(state, ctx, request)) state.pending = undefined;
+  };
+
   const settle = (state: SessionState, ctx: ExtensionContext) => {
     if (!isOwned(state, ctx)) return;
     state.agentRunActive = ctx.signal !== undefined;
@@ -498,7 +543,7 @@ export function createContextManager(
         if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
           pi.sendMessage(deactivationMessage(), { triggerTurn: false });
         }
-        removeOwnedTools(inspectToolUnit().ownedNames);
+        reconcileTools(state, hasDeferredToolRemoval(), ctx);
       }
     }
     const request = state.pending;
@@ -686,7 +731,7 @@ export function createContextManager(
       const request = state?.pending;
       if (!state || request?.status !== "compacting" || !isOwned(state, ctx, request)) return;
       if (event.aborted) {
-        state.pending = undefined;
+        cancelRollover(state, ctx, request);
         return;
       }
       request.status = "failed";
@@ -702,7 +747,7 @@ export function createContextManager(
       if (!state || !request || !isOwned(state, ctx, request)) return;
       const stopReason = latestAssistantStopReason(event.messages);
       if (ctx.signal?.aborted || stopReason === "aborted") {
-        state.pending = undefined;
+        cancelRollover(state, ctx, request);
         return;
       }
       if (request.turnStartedAfterRequest && (stopReason === "stop" || stopReason === "toolUse")) {
@@ -723,6 +768,7 @@ export function createContextManager(
       if (!state) return;
       state.controller.abort();
       states.delete(ctx.sessionManager);
+      if (!isConfigured()) reconcileTools(state, hasDeferredToolRemoval(), ctx);
     },
   };
 }

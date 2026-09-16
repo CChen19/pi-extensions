@@ -320,6 +320,19 @@ test("opt-in activates exactly four context tools after unrelated tools", async 
   assert.match(current.current.notifications[0]?.message ?? "", /Experimental context management/);
 });
 
+test("tool reconciliation preserves unrelated active-tool order", async () => {
+  const current = setup();
+  await start(current);
+  const orderedTools = ["read", ...CONTEXT_MANAGEMENT_TOOL_NAMES, "write"];
+  current.mock.rawPi.setActiveTools(orderedTools);
+  const tree = current.mock.events.get("session_tree")?.[0];
+  assert.ok(tree);
+
+  await tree({ type: "session_tree", oldLeafId: "user", newLeafId: "user" }, current.current.ctx);
+
+  assert.deepEqual(current.mock.rawPi.getActiveTools(), orderedTools);
+});
+
 test("startup activation fails closed when initial lineage persistence fails", async () => {
   const current = setup();
   current.mock.rawPi.appendEntry = () => {
@@ -1596,13 +1609,14 @@ test.each(["signal", "assistant response"] as const)(
     const current = setup(true, undefined, source === "signal" ? { signal: runController.signal } : {});
     await start(current);
     await current.mock.events.get("agent_start")?.[0]({ type: "agent_start" }, current.current.ctx);
-    await tool(current, "context_management_start_new_context").execute(
+    const accepted = await tool(current, "context_management_start_new_context").execute(
       "start",
       {},
       undefined,
       undefined,
       current.current.ctx,
     );
+    persistToolResult(current, "start", accepted);
     if (source === "signal") runController.abort();
     const agentEnd = current.mock.events.get("agent_end")?.[0];
     assert.ok(agentEnd);
@@ -1621,6 +1635,21 @@ test.each(["signal", "assistant response"] as const)(
         .length,
       0,
     );
+    assert.equal(
+      current.entries.some(
+        (entry) =>
+          entry.type === "custom" &&
+          entry.customType === "pi-context-management-rollover" &&
+          (entry.data as { status?: string }).status === "cancelled",
+      ),
+      true,
+    );
+    await current.mock.events.get("session_shutdown")?.[0](
+      { type: "session_shutdown", reason: "reload" },
+      current.current.ctx,
+    );
+    await start(current);
+    assert.equal(current.compactOptions, undefined);
     await tool(current, "context_management_start_new_context").execute(
       "retry",
       {},
@@ -1708,13 +1737,14 @@ test("context_management_start_new_context compacts after settlement and continu
 test("a cancelled manual compaction releases the rollover without continuing", async () => {
   const current = setup();
   await start(current);
-  await tool(current, "context_management_start_new_context").execute(
+  const accepted = await tool(current, "context_management_start_new_context").execute(
     "start",
     {},
     undefined,
     undefined,
     current.current.ctx,
   );
+  persistToolResult(current, "start", accepted);
   await current.mock.events.get("agent_settled")?.[0]({ type: "agent_settled" }, current.current.ctx);
   assert.ok(current.compactOptions);
   const notificationCount = current.current.notifications.length;
@@ -1729,6 +1759,15 @@ test("a cancelled manual compaction releases the rollover without continuing", a
     current.current.ctx,
   );
   current.compactOptions.onError?.(new Error("Compaction cancelled"));
+  assert.equal(
+    current.entries.some(
+      (entry) =>
+        entry.type === "custom" &&
+        entry.customType === "pi-context-management-rollover" &&
+        (entry.data as { status?: string }).status === "cancelled",
+    ),
+    true,
+  );
   assert.equal(current.current.notifications.length, notificationCount);
   assert.equal(
     current.mock.sentMessages.filter((item) => (item.options as { triggerTurn?: boolean } | undefined)?.triggerTurn)
@@ -2277,6 +2316,76 @@ test("concurrent headless session managers keep independent rollover ownership",
   assert.ok(projected);
 });
 
+test("global tool removal waits for every active session to settle", async () => {
+  const current = setup();
+  await start(current);
+  persistLastSentCustomMessage(current);
+  await current.mock.events.get("agent_start")?.[0]({ type: "agent_start" }, current.current.ctx);
+
+  let selection = 0;
+  const secondLineage = createInitialContextState("22222222-2222-4222-8222-222222222222");
+  const secondEntries: SessionEntry[] = [
+    messageEntry(),
+    {
+      type: "custom",
+      customType: CONTEXT_STATE_ENTRY_TYPE,
+      data: secondLineage,
+      id: "second-state",
+      parentId: "user",
+      timestamp: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const second = createMockContext({
+    mode: "tui",
+    hasUI: true,
+    select: async (_title: string, options: string[]) => {
+      selection += 1;
+      if (selection === 1) return options.find((option) => option.startsWith("Settings"));
+      if (selection === 2) return options.find((option) => option.startsWith("Experimental context management"));
+      if (selection === 3) return options.find((option) => option === "Off");
+      return undefined;
+    },
+    sessionManager: {
+      getSessionId: () => "second-context-session",
+      getSessionName: () => undefined,
+      getBranch: () => secondEntries,
+      getEntries: () => secondEntries,
+    },
+  });
+  const sessionStart = current.mock.events.get("session_start")?.[0];
+  assert.ok(sessionStart);
+  await sessionStart({ type: "session_start", reason: "startup" }, second.ctx);
+  const command = current.mock.commands.get("context-management");
+  assert.ok(command);
+
+  await command.handler("", second.ctx);
+
+  assert.equal(current.runtime.get().settings.enabled, false);
+  assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read", ...CONTEXT_MANAGEMENT_TOOL_NAMES]);
+  await assert.doesNotReject(() =>
+    tool(current, "context_management_get_context_remaining").execute(
+      "active-session-call",
+      {},
+      undefined,
+      undefined,
+      current.current.ctx,
+    ),
+  );
+  await assert.rejects(
+    tool(current, "context_management_get_context_remaining").execute(
+      "idle-session-call",
+      {},
+      undefined,
+      undefined,
+      second.ctx,
+    ),
+    /disabled/,
+  );
+
+  await current.mock.events.get("agent_settled")?.[0]({ type: "agent_settled" }, current.current.ctx);
+  assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read"]);
+});
+
 test("restores a persisted accepted rollover and resumes compaction", async () => {
   const current = setup();
   await start(current);
@@ -2361,6 +2470,20 @@ test("restores a completed rollover once and recognizes its persisted continuati
       .length,
     beforeRestart + 1,
   );
+});
+
+test("fails rollover recovery explicitly at its branch-entry limit", async () => {
+  const current = setup();
+  current.setBranch(
+    Array.from({ length: 100_001 }, (_, index) => ({
+      ...messageEntry(),
+      id: `recovery-entry-${index}`,
+      parentId: index === 0 ? null : `recovery-entry-${index - 1}`,
+    })),
+  );
+
+  await assert.rejects(() => start(current), /rollover recovery exceeded its entry limit/);
+  assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read"]);
 });
 
 test("cancels experimental compaction when fingerprint bounds are exceeded", async () => {
