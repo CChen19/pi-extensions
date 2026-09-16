@@ -8,6 +8,7 @@
 - [Complete menu example](#-complete-menu-example)
 - [Standalone interactions](#standalone-tasks)
 - [Searchable default-aware selectors](#searchable-default-aware-selectors)
+- [Mermaid Markdown transformers](#mermaid-markdown-transformers)
 - [Standard screens](#-standard-screens)
 - [Runtime and mode behavior](#-runtime-and-mode-behavior)
 - [Ownership boundary](#-ownership-boundary)
@@ -486,6 +487,47 @@ const result = await runCustomInteraction<{ kind: "back" | "close" }>(ctx, {
 });
 ```
 
+### Mermaid Markdown transformers
+
+Use the focused `/markdown` subpath when a specialized transcript constructs Pi `UserMessageComponent` or `AssistantMessageComponent` instances outside the normal interactive transcript.
+Call `prepareMermaidMarkdownRenderer()` with the display Markdown before creating message components.
+It returns a shared promise only when the sanitized document contains a top-level Mermaid fence and the renderer still needs loading; ordinary Markdown, nested literal fences, an already loaded renderer, an earlier load failure, or a host without Pi's rich-Markdown APIs returns `undefined`.
+An `undefined` result therefore means no wait is required, not necessarily that rendering is unavailable.
+
+After any returned promise settles, revalidate the owning session, generation, signal, and mutable content before creating UI.
+Then call `createMermaidMarkdownTransformer()` with the callback-provided theme.
+It returns `undefined` when preparation did not make a renderer available; omit it from the component transformer array in that case.
+The returned transformer is synchronous, renders user and finalized assistant messages, and leaves streaming assistant content and assistant thinking unchanged.
+
+```ts
+import { AssistantMessageComponent, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import {
+  createMermaidMarkdownTransformer,
+  prepareMermaidMarkdownRenderer,
+} from "@narumitw/pi-tui-kit/markdown";
+
+const preparation = prepareMermaidMarkdownRenderer(answerMarkdown);
+if (preparation) {
+  await preparation;
+  if (signal.aborted || generation !== currentGeneration()) return;
+}
+
+const transformer = createMermaidMarkdownTransformer(theme);
+const component = new AssistantMessageComponent(
+  response,
+  true,
+  getMarkdownTheme(),
+  "",
+  1,
+  transformer ? [transformer] : [],
+);
+```
+
+The transformer sanitizes finalized Markdown at the display boundary, uses Pi's exact available content width, and can switch between Unicode art and fenced source when the terminal resizes.
+Warning-free supported diagrams render as themed Unicode; malformed, unsupported, oversized, unavailable, or throwing renders retain readable fenced source, with a sanitized warning when parsing is partial.
+Preparation is process-local, de-duplicated, and not cancellable because JavaScript module loading is not cancellable; consumers must ignore stale completion after every await.
+The renderer uses no browser, image, SVG, or network, and this API is independent of Pi's normal-transcript Mermaid setting.
+
 ## 🖥️ Standard screens
 
 `defineMenu()` supports eight standard screen kinds:
@@ -926,6 +968,7 @@ Consumer fixtures continue to own domain state, persistence, generation checks, 
 - `runTask()` — runs typed abort-aware work with a cancellable TUI loader and direct non-TUI fallback.
 - `runConfirmation()` — preserves Confirmed, Back, Close, Stale, Unsupported, and Error for one standalone confirmation without owning the confirmed side effect.
 - `runLiveChoice()` — adapts live-preview choice to TUI and RPC while preserving typed selection, gating, shortcuts, and lifecycle outcomes.
+- `prepareMermaidMarkdownRenderer()` and `createMermaidMarkdownTransformer()` — lazily prepare and synchronously transform finalized Pi message Markdown; the root and `@narumitw/pi-tui-kit/markdown` both export them plus `MermaidMarkdownTheme`.
 - `runModelSelector()` and `runThinkingSelector()` — provide searchable TUI selectors with current/default markers and typed save-default intent.
 - `runQuestionnaire()` — adapts choices, free-form answers, optional TUI notes, direct single-question submission, multi-question review, and sequential RPC.
 - `runSecretInput()` — collects one masked TUI secret with typed cancellation and lifecycle outcomes and explicit unsupported results elsewhere.
@@ -941,7 +984,8 @@ Consumer fixtures continue to own domain state, persistence, generation checks, 
 - `createMenuNavigator()` — lower-level stack and selection state helper.
 - exported screen, item, action, transition, runtime option, `BrowseDetailDocument`, `MenuCloseReason`, and result types.
 - `@narumitw/pi-tui-kit/testing` — test-only subpath for `createTuiHarness()`, `createRpcHarness()`, strict scripts, and their types; the production root does not re-export it.
-- `PI_EXTENSION_MENU_API_VERSION` — current API version (`18`).
+- `PI_EXTENSION_MENU_API_VERSION` — current API version (`19`).
+Version 19 adds public lazy Mermaid Markdown transformer preparation and the focused `/markdown` subpath while version-18 definitions remain valid.
 Version 18 adds standard-screen mouse routing, intraline diff emphasis, searchable live choices, input prefill, and masked secret input while version-17 definitions remain valid.
 Version 17 adds searchable default-aware selectors while version-16 menu definitions remain valid.
 Version 16 adds the stateless bounded-frame helper while version-15 menu definitions remain valid.

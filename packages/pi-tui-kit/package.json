@@ -34,6 +34,10 @@
       "types": "./dist/interaction-hints.d.ts",
       "import": "./dist/interaction-hints.js"
     },
+    "./markdown": {
+      "types": "./dist/markdown.d.ts",
+      "import": "./dist/markdown.js"
+    },
     "./terminal-document": {
       "types": "./dist/terminal-document.d.ts",
       "import": "./dist/terminal-document.js"

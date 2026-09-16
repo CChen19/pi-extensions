@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { test, vi } from "vitest";
 import { createMockContext } from "../../../test/support.js";
-import { defineMenu, runMenu } from "../src/index.js";
+import { createMermaidMarkdownTransformer, defineMenu, runMenu } from "../src/index.js";
 import { createTuiHarness } from "../src/testing/index.js";
 
 const mermaid = vi.hoisted(() => ({ renderCalls: 0 }));
@@ -35,7 +35,17 @@ test("a Mermaid render failure preserves the fenced source", async () => {
   const rendered = stripVTControlCharacters(tui.render().join("\n"));
   assert.match(rendered, /```mermaid/u);
   assert.match(rendered, /flowchart LR/u);
-  assert.equal(mermaid.renderCalls, 1);
+  const transform = createMermaidMarkdownTransformer({
+    fg: (_role, text) => text,
+    bold: (text) => text,
+  });
+  assert.ok(transform);
+  const source = "```mermaid\nflowchart LR\n A --> B\n```";
+  assert.match(
+    transform(source, { messageType: "assistant", isStreaming: false, availableWidth: 80 }),
+    /flowchart LR/u,
+  );
+  assert.equal(mermaid.renderCalls, 2);
   tui.press("tui.select.cancel");
   assert.deepEqual(await running, { kind: "closed", reason: "back" });
 });
