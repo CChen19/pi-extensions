@@ -31,6 +31,7 @@ export function prepareMermaidRenderer(): Promise<void> | undefined {
 
 /** Load the Mermaid renderer only when the Markdown contains a top-level Mermaid fence. */
 export function prepareMermaidMarkdownRenderer(markdown: string): Promise<void> | undefined {
+  if (!supportsRichMarkdown()) return undefined;
   return markdownNeedsMermaid(sanitizeDocumentText(markdown)) ? prepareMermaidRenderer() : undefined;
 }
 
