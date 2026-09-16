@@ -1,5 +1,16 @@
 # @narumitw/pi-btw
 
+## 0.59.0
+
+### Minor Changes
+
+- 022ba82: Render supported Mermaid fences as width-safe, themed Unicode diagrams in side-thread transcripts, with readable source fallbacks for malformed, unsupported, or oversized diagrams.
+
+### Patch Changes
+
+- Updated dependencies [9ad07cf]
+  - @narumitw/pi-tui-kit@0.65.0
+
 ## 0.58.1
 
 ### Patch Changes
