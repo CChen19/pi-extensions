@@ -206,6 +206,28 @@ function persistLastSentCustomMessage(setupResult: ReturnType<typeof setup>) {
   });
 }
 
+function persistToolResult(
+  setupResult: ReturnType<typeof setup>,
+  id: string,
+  result: { content: unknown; details?: unknown },
+) {
+  setupResult.entries.push({
+    type: "message",
+    id,
+    parentId: setupResult.entries.at(-1)?.id ?? null,
+    timestamp: new Date(setupResult.entries.length).toISOString(),
+    message: {
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "context_management_start_new_context",
+      content: result.content as never,
+      details: result.details,
+      isError: false,
+      timestamp: setupResult.entries.length,
+    },
+  });
+}
+
 function tool(setupResult: ReturnType<typeof setup>, name: string) {
   const found = setupResult.mock.tools.find((candidate) => candidate.name === name);
   assert.ok(found);
@@ -2203,6 +2225,183 @@ test("a cancelled automatic rollover releases the request without continuing", a
     undefined,
     current.current.ctx,
   );
+});
+
+test("concurrent headless session managers keep independent rollover ownership", async () => {
+  const current = setup();
+  await start(current);
+  await tool(current, "context_management_start_new_context").execute(
+    "first-rollover",
+    {},
+    undefined,
+    undefined,
+    current.current.ctx,
+  );
+
+  const secondLineage = createInitialContextState("22222222-2222-4222-8222-222222222222");
+  const secondEntries: SessionEntry[] = [
+    messageEntry(),
+    {
+      type: "custom",
+      customType: CONTEXT_STATE_ENTRY_TYPE,
+      data: secondLineage,
+      id: "second-state",
+      parentId: "user",
+      timestamp: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const second = createMockContext({
+    mode: "print",
+    hasUI: false,
+    sessionManager: {
+      getSessionId: () => "second-context-session",
+      getSessionName: () => undefined,
+      getBranch: () => secondEntries,
+      getEntries: () => secondEntries,
+    },
+    compact: () => assert.fail("The second session must not receive the first session's rollover"),
+  });
+  const sessionStart = current.mock.events.get("session_start")?.[0];
+  assert.ok(sessionStart);
+  await sessionStart({ type: "session_start", reason: "startup" }, second.ctx);
+
+  await current.mock.events.get("agent_settled")?.[0]({ type: "agent_settled" }, current.current.ctx);
+  assert.ok(current.compactOptions);
+  await current.mock.events.get("session_shutdown")?.[0]({ type: "session_shutdown", reason: "quit" }, second.ctx);
+  const context = current.mock.events.get("context")?.[0];
+  assert.ok(context);
+  const projected = await context(
+    { type: "context", messages: current.entries.flatMap(sessionEntryToContextMessages) },
+    current.current.ctx,
+  );
+  assert.ok(projected);
+});
+
+test("restores a persisted accepted rollover and resumes compaction", async () => {
+  const current = setup();
+  await start(current);
+  const accepted = await tool(current, "context_management_start_new_context").execute(
+    "persisted-request",
+    { reason: "restart recovery" },
+    undefined,
+    undefined,
+    current.current.ctx,
+  );
+  persistToolResult(current, "persisted-request", accepted);
+  await current.mock.events.get("session_shutdown")?.[0](
+    { type: "session_shutdown", reason: "reload" },
+    current.current.ctx,
+  );
+
+  await start(current);
+  assert.ok(current.compactOptions);
+  const details = accepted.details as { nextWindowId?: string; reason?: string };
+  assert.match(details.nextWindowId ?? "", /^[0-9a-f-]{36}$/);
+  assert.equal(details.reason, "restart recovery");
+});
+
+test("restores a completed rollover once and recognizes its persisted continuation", async () => {
+  const current = setup();
+  await start(current);
+  const accepted = await tool(current, "context_management_start_new_context").execute(
+    "completed-request",
+    { reason: "resume continuation" },
+    undefined,
+    undefined,
+    current.current.ctx,
+  );
+  persistToolResult(current, "completed-request", accepted);
+  const request = accepted.details as {
+    requestId: string;
+    nextWindowId: string;
+  };
+  const initial = current.entries.find(
+    (entry) => entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE,
+  );
+  assert.ok(initial?.type === "custom");
+  const details = createContextManagementDetails({
+    lineage: initial.data as ReturnType<typeof createInitialContextState>,
+    keptMessages: [],
+    reason: "manual",
+    requestId: request.requestId,
+    windowId: request.nextWindowId,
+  });
+  current.entries.push({
+    type: "compaction",
+    id: "persisted-request-compaction",
+    parentId: current.entries.at(-1)?.id ?? null,
+    timestamp: "2026-01-01T00:00:04.000Z",
+    summary: contextContract(details),
+    firstKeptEntryId: "user",
+    tokensBefore: 90,
+    details,
+  });
+  await current.mock.events.get("session_shutdown")?.[0](
+    { type: "session_shutdown", reason: "reload" },
+    current.current.ctx,
+  );
+
+  const beforeRestart = current.mock.sentMessages.filter(
+    (item) => (item.options as { triggerTurn?: boolean } | undefined)?.triggerTurn,
+  ).length;
+  await start(current);
+  const afterRestart = current.mock.sentMessages.filter(
+    (item) => (item.options as { triggerTurn?: boolean } | undefined)?.triggerTurn,
+  );
+  assert.equal(afterRestart.length, beforeRestart + 1);
+  assert.match(JSON.stringify(afterRestart.at(-1)), /resume continuation/);
+  persistLastSentCustomMessage(current);
+  await current.mock.events.get("session_shutdown")?.[0](
+    { type: "session_shutdown", reason: "reload" },
+    current.current.ctx,
+  );
+  await start(current);
+  assert.equal(
+    current.mock.sentMessages.filter((item) => (item.options as { triggerTurn?: boolean } | undefined)?.triggerTurn)
+      .length,
+    beforeRestart + 1,
+  );
+});
+
+test("cancels experimental compaction when fingerprint bounds are exceeded", async () => {
+  const current = setup();
+  await start(current);
+  let nested: unknown = "deep";
+  for (let index = 0; index < 20_000; index += 1) nested = [nested];
+  const deepEntry: SessionEntry = {
+    type: "message",
+    id: "deep-tool-call",
+    parentId: current.entries.at(-1)?.id ?? null,
+    timestamp: "2026-01-01T00:00:03.000Z",
+    message: {
+      ...assistantMessage("toolUse"),
+      content: [{ type: "toolCall", id: "deep", name: "foreign_tool", arguments: nested }],
+    } as AgentMessage,
+  };
+  current.entries.push(deepEntry);
+  const before = current.mock.events.get("session_before_compact")?.[0];
+  assert.ok(before);
+  const result = await before(
+    {
+      type: "session_before_compact",
+      preparation: {
+        firstKeptEntryId: deepEntry.id,
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 90,
+        fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+        settings: { enabled: true, reserveTokens: 10, keepRecentTokens: 10 },
+      },
+      branchEntries: current.entries,
+      reason: "threshold",
+      willRetry: false,
+      signal: new AbortController().signal,
+    },
+    current.current.ctx,
+  );
+  assert.deepEqual(result, { cancel: true });
+  assert.match(current.current.notifications.at(-1)?.message ?? "", /fingerprint exceeded its traversal limit/);
 });
 
 test("session shutdown invalidates pending compaction callbacks", async () => {

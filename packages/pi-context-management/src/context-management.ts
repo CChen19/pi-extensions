@@ -9,6 +9,7 @@ import {
   type ExtensionContext,
   type SessionBeforeCompactEvent,
   type SessionCompactEvent,
+  type SessionEntry,
   sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -40,6 +41,7 @@ import type { ContextManagementSettingsRuntime } from "./settings.js";
 import { terminalText } from "./terminal.js";
 
 const CONTINUATION_MESSAGE_TYPE = "pi-context-management-continuation";
+const START_NEW_CONTEXT_TOOL_NAME = "context_management_start_new_context";
 const EXTENSION_ENTRY_PATH = realpathSync(join(fileURLToPath(new URL(".", import.meta.url)), "index.ts"));
 
 type PendingRollover = {
@@ -54,6 +56,24 @@ type PendingRollover = {
   errorMessage?: string;
 };
 
+type SessionKey = ExtensionContext["sessionManager"];
+
+interface SessionState {
+  key: SessionKey;
+  generation: number;
+  sessionId: string;
+  lineage?: ContextLineage;
+  pending?: PendingRollover;
+  warned: boolean;
+  warnedUnavailableTools: boolean;
+  warnedProjectionFailure: boolean;
+  toolsAvailable: boolean;
+  removeToolsAtSettlement: boolean;
+  fallbackDeactivationPending: boolean;
+  agentRunActive: boolean;
+  controller: AbortController;
+}
+
 function sameNames(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((name, index) => name === right[index]);
 }
@@ -65,6 +85,14 @@ function isOwnedToolSource(tool: { sourceInfo: { path: string } } | undefined): 
   } catch {
     return false;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isIdentifier(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 8 && value.length <= 128;
 }
 
 function contractMessage(lineage: ContextLineage) {
@@ -110,25 +138,81 @@ function latestAssistantStopReason(messages: readonly AgentMessage[]): string | 
   return undefined;
 }
 
+function restoredRollover(
+  entries: readonly SessionEntry[],
+  sessionId: string,
+  generation: number,
+): PendingRollover | undefined {
+  const continuedRequests = new Set<string>();
+  const completedRequests = new Map<string, string>();
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type === "compaction") {
+      const details = parseContextManagementCompaction(entry);
+      if (details?.requestId) completedRequests.set(details.requestId, details.currentWindowId);
+    }
+    const messages = sessionEntryToContextMessages(entry);
+    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const message = messages[messageIndex];
+      if (
+        message.role === "custom" &&
+        message.customType === CONTINUATION_MESSAGE_TYPE &&
+        isRecord(message.details) &&
+        message.details.kind === CONTEXT_DETAILS_KIND &&
+        message.details.version === CONTEXT_VERSION &&
+        isIdentifier(message.details.requestId)
+      ) {
+        continuedRequests.add(message.details.requestId);
+        continue;
+      }
+      if (message.role !== "toolResult" || message.toolName !== START_NEW_CONTEXT_TOOL_NAME) continue;
+      const details = message.details;
+      if (
+        !isRecord(details) ||
+        details.kind !== CONTEXT_DETAILS_KIND ||
+        details.version !== CONTEXT_VERSION ||
+        details.status !== "scheduled" ||
+        !isIdentifier(details.requestId) ||
+        !isIdentifier(details.currentWindowId) ||
+        !isIdentifier(details.nextWindowId) ||
+        (details.reason !== undefined && (typeof details.reason !== "string" || details.reason.length > 512))
+      ) {
+        continue;
+      }
+      if (continuedRequests.has(details.requestId)) return undefined;
+      const completedWindowId = completedRequests.get(details.requestId);
+      return {
+        requestId: details.requestId,
+        nextWindowId: completedWindowId ?? details.nextWindowId,
+        sessionId,
+        generation,
+        status: completedWindowId ? "completed" : "requested",
+        turnStartedAfterRequest: false,
+        successfulTurnAfterRequest: false,
+        ...(typeof details.reason === "string" ? { reason: details.reason } : {}),
+      };
+    }
+  }
+  return undefined;
+}
+
+type BeforeCompactResult =
+  | { cancel: true }
+  | {
+      compaction: {
+        summary: string;
+        firstKeptEntryId: string;
+        tokensBefore: number;
+        details: unknown;
+      };
+    };
+
 export interface ContextManager {
-  isEnabled(): boolean;
-  isRouting(): boolean;
+  isEnabled(ctx: ExtensionContext): boolean;
   startSession(ctx: ExtensionContext): void;
   onSessionTree(ctx: ExtensionContext): void;
   applySettings(ctx: ExtensionContext): void;
-  beforeCompact(
-    event: SessionBeforeCompactEvent,
-    ctx: ExtensionContext,
-  ):
-    | {
-        compaction: {
-          summary: string;
-          firstKeptEntryId: string;
-          tokensBefore: number;
-          details: unknown;
-        };
-      }
-    | undefined;
+  beforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext): BeforeCompactResult | undefined;
   projectContext(messages: readonly AgentMessage[], ctx: ExtensionContext): AgentMessage[] | undefined;
   onCompact(event: SessionCompactEvent, ctx: ExtensionContext): void;
   onCompactFailed(event: CompactFailedEvent, ctx: ExtensionContext): void;
@@ -136,26 +220,23 @@ export interface ContextManager {
   onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext): void;
   onTurnStart(ctx: ExtensionContext): void;
   onAgentSettled(ctx: ExtensionContext): void;
-  shutdown(): void;
+  shutdown(ctx: ExtensionContext): void;
 }
 
 export function createContextManager(
   pi: ExtensionAPI,
   settingsRuntime: ContextManagementSettingsRuntime,
 ): ContextManager {
-  let generation = 0;
-  let ownerSessionId: string | undefined;
-  let lineage: ContextLineage | undefined;
-  let pending: PendingRollover | undefined;
-  let warned = false;
-  let warnedUnavailableTools = false;
-  let toolsAvailable = false;
-  let removeToolsAtSettlement = false;
-  let fallbackDeactivationPending = false;
-  let agentRunActive = false;
-  let controller = new AbortController();
-
+  const states = new Map<SessionKey, SessionState>();
+  let nextGeneration = 0;
   const isConfigured = () => settingsRuntime.get().settings.enabled;
+
+  const stateFor = (ctx: ExtensionContext): SessionState | undefined => {
+    const state = states.get(ctx.sessionManager);
+    return state && !state.controller.signal.aborted && state.sessionId === ctx.sessionManager.getSessionId()
+      ? state
+      : undefined;
+  };
 
   const inspectToolUnit = () => {
     const available = new Map(pi.getAllTools().map((tool) => [tool.name, tool]));
@@ -175,31 +256,31 @@ export function createContextManager(
     };
   };
 
-  const isEnabled = () => (isConfigured() || removeToolsAtSettlement) && toolsAvailable && inspectToolUnit().complete;
+  const enabledFor = (state: SessionState) =>
+    (isConfigured() || state.removeToolsAtSettlement) && state.toolsAvailable && inspectToolUnit().complete;
 
-  const isRouting = () => isConfigured() || removeToolsAtSettlement || fallbackDeactivationPending;
-
-  const isOwned = (ctx: ExtensionContext, request?: PendingRollover) =>
-    !controller.signal.aborted &&
-    ownerSessionId === ctx.sessionManager.getSessionId() &&
+  const isOwned = (state: SessionState, ctx: ExtensionContext, request?: PendingRollover) =>
+    stateFor(ctx) === state &&
     (!request ||
-      (request.sessionId === ownerSessionId &&
-        request.generation === generation &&
-        pending?.requestId === request.requestId));
+      (request.sessionId === state.sessionId &&
+        request.generation === state.generation &&
+        state.pending?.requestId === request.requestId));
 
   const removeOwnedTools = (ownedNames: ReadonlySet<string>) => {
     const current = pi.getActiveTools();
     const next = current.filter((name) => !ownedNames.has(name));
     if (!sameNames(current, next)) pi.setActiveTools(next);
+    for (const state of states.values()) state.toolsAvailable = false;
   };
 
   const warnToolUnitUnavailable = (
+    state: SessionState,
     ctx: ExtensionContext,
     unavailableNames: readonly string[],
     inactiveNames: readonly string[],
   ) => {
-    if (warnedUnavailableTools || !ctx.hasUI) return;
-    warnedUnavailableTools = true;
+    if (state.warnedUnavailableTools || !ctx.hasUI) return;
+    state.warnedUnavailableTools = true;
     const names = [...unavailableNames, ...inactiveNames];
     ctx.ui.notify(
       `Experimental context management could not activate because these tool names are unavailable, inactive, or owned by another extension: ${names.join(", ")}. Pi-native compaction remains active.`,
@@ -207,53 +288,53 @@ export function createContextManager(
     );
   };
 
-  const reconcileTools = (configured: boolean, ctx: ExtensionContext): boolean => {
+  const reconcileTools = (state: SessionState, configured: boolean, ctx: ExtensionContext): boolean => {
     const inspection = inspectToolUnit();
-    toolsAvailable = configured && inspection.unavailableNames.length === 0;
+    const available = configured && inspection.unavailableNames.length === 0;
     const current = pi.getActiveTools();
     const withoutOwned = current.filter((name) => !inspection.ownedNames.has(name));
-    const next = toolsAvailable ? [...withoutOwned, ...CONTEXT_MANAGEMENT_TOOL_NAMES] : withoutOwned;
+    const next = available ? [...withoutOwned, ...CONTEXT_MANAGEMENT_TOOL_NAMES] : withoutOwned;
     if (!sameNames(current, next)) pi.setActiveTools(next);
-    if (configured && !toolsAvailable) {
-      warnToolUnitUnavailable(ctx, inspection.unavailableNames, inspection.inactiveNames);
+    for (const candidate of states.values()) candidate.toolsAvailable = available;
+    if (configured && !available) {
+      warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
     }
-    return toolsAvailable;
+    return available;
   };
 
-  const deactivateIncompleteToolUnit = (ctx: ExtensionContext): boolean => {
+  const deactivateIncompleteToolUnit = (state: SessionState, ctx: ExtensionContext): boolean => {
     const inspection = inspectToolUnit();
     if (inspection.complete) return false;
     const branchIsActive = latestContextMode(ctx.sessionManager.getBranch()) === "active";
-    if (branchIsActive && !fallbackDeactivationPending) {
+    if (branchIsActive && !state.fallbackDeactivationPending) {
       pi.sendMessage(deactivationMessage(), { triggerTurn: false });
     }
-    fallbackDeactivationPending = branchIsActive;
-    if (pending?.status === "requested" || pending?.status === "compacting") {
-      pending.status = "failed";
-      pending.errorMessage = "Experimental context management tool unit became incomplete during rollover.";
+    state.fallbackDeactivationPending = branchIsActive;
+    if (state.pending?.status === "requested" || state.pending?.status === "compacting") {
+      state.pending.status = "failed";
+      state.pending.errorMessage = "Experimental context management tool unit became incomplete during rollover.";
     }
-    removeToolsAtSettlement = false;
-    toolsAvailable = false;
+    state.removeToolsAtSettlement = false;
     removeOwnedTools(inspection.ownedNames);
-    warnToolUnitUnavailable(ctx, inspection.unavailableNames, inspection.inactiveNames);
+    warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
     return branchIsActive;
   };
 
-  const ensureLineage = (ctx: ExtensionContext): ContextLineage => {
-    const persisted = lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
+  const ensureLineage = (state: SessionState, ctx: ExtensionContext): ContextLineage => {
+    const persisted = state.lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
     if (persisted) {
-      lineage = persisted;
+      state.lineage = persisted;
       return persisted;
     }
-    const state = createInitialContextState();
-    pi.appendEntry(CONTEXT_STATE_ENTRY_TYPE, state);
-    lineage = state;
-    return state;
+    const initial = createInitialContextState();
+    pi.appendEntry(CONTEXT_STATE_ENTRY_TYPE, initial);
+    state.lineage = initial;
+    return initial;
   };
 
-  const warnEnabled = (ctx: ExtensionContext) => {
-    if (warned || !ctx.hasUI) return;
-    warned = true;
+  const warnEnabled = (state: SessionState, ctx: ExtensionContext) => {
+    if (state.warned || !ctx.hasUI) return;
+    state.warned = true;
     ctx.ui.notify(
       "Experimental context management is active. Context rollover does not create a summary; preserve important information with context_management_update_notes.",
       "warning",
@@ -261,45 +342,50 @@ export function createContextManager(
   };
 
   const applySettings = (ctx: ExtensionContext) => {
-    if (!isOwned(ctx)) return;
+    const state = stateFor(ctx);
+    if (!state) return;
     const branch = ctx.sessionManager.getBranch();
-    const runIsActive = agentRunActive || ctx.signal !== undefined;
+    const runIsActive = state.agentRunActive || ctx.signal !== undefined;
     if (!isConfigured()) {
       const inspection = inspectToolUnit();
-      if (runIsActive && toolsAvailable && inspection.complete) {
-        removeToolsAtSettlement = true;
-        fallbackDeactivationPending = false;
+      if (runIsActive && state.toolsAvailable && inspection.complete) {
+        state.removeToolsAtSettlement = true;
+        state.fallbackDeactivationPending = false;
         return;
       }
       const branchIsActive = latestContextMode(branch) === "active";
-      if (branchIsActive && !fallbackDeactivationPending) {
+      if (branchIsActive && !state.fallbackDeactivationPending) {
         pi.sendMessage(deactivationMessage(), { triggerTurn: false });
       }
-      removeToolsAtSettlement = false;
-      fallbackDeactivationPending = branchIsActive && runIsActive;
-      reconcileTools(false, ctx);
+      state.removeToolsAtSettlement = false;
+      state.fallbackDeactivationPending = branchIsActive && runIsActive;
+      reconcileTools(state, false, ctx);
       return;
     }
-    const contractAlreadyActiveOrQueued = removeToolsAtSettlement && !fallbackDeactivationPending;
-    const deactivationAlreadyPending = fallbackDeactivationPending;
-    const toolsWereAvailable = toolsAvailable;
-    removeToolsAtSettlement = false;
-    fallbackDeactivationPending = false;
-    if (!reconcileTools(true, ctx)) {
+    const contractAlreadyActiveOrQueued = state.removeToolsAtSettlement && !state.fallbackDeactivationPending;
+    const deactivationAlreadyPending = state.fallbackDeactivationPending;
+    const toolsWereAvailable = state.toolsAvailable;
+    state.removeToolsAtSettlement = false;
+    state.fallbackDeactivationPending = false;
+    if (!reconcileTools(state, true, ctx)) {
+      if (state.pending?.status === "requested" || state.pending?.status === "compacting") {
+        state.pending.status = "failed";
+        state.pending.errorMessage = "Experimental context management tools were unavailable after session restore.";
+      }
       const contractMayBeActive =
         latestContextMode(branch) === "active" ||
         (runIsActive && (toolsWereAvailable || contractAlreadyActiveOrQueued));
       if (contractMayBeActive && !deactivationAlreadyPending) {
         pi.sendMessage(deactivationMessage(), { triggerTurn: false });
       }
-      fallbackDeactivationPending = runIsActive && (contractMayBeActive || deactivationAlreadyPending);
+      state.fallbackDeactivationPending = runIsActive && (contractMayBeActive || deactivationAlreadyPending);
       return;
     }
     let activeLineage: ContextLineage;
     try {
-      activeLineage = ensureLineage(ctx);
+      activeLineage = ensureLineage(state, ctx);
     } catch (error) {
-      reconcileTools(false, ctx);
+      reconcileTools(state, false, ctx);
       throw error;
     }
     const messages = branch.flatMap(sessionEntryToContextMessages);
@@ -310,36 +396,48 @@ export function createContextManager(
     ) {
       pi.sendMessage(contractMessage(activeLineage), { triggerTurn: false });
     }
-    warnEnabled(ctx);
+    warnEnabled(state, ctx);
   };
 
   const requestNewContext: ContextToolRuntime["requestNewContext"] = (ctx, input) => {
-    if (!isOwned(ctx)) throw new Error("The context session was replaced; retry in the active session");
+    const state = stateFor(ctx);
+    if (!state) throw new Error("The context session was replaced; retry in the active session");
     if (!isConfigured()) {
       throw new Error("Experimental context management is deactivating; retry after enabling it");
     }
-    if (pending) throw new Error("A context rollover is already pending");
-    const activeLineage = ensureLineage(ctx);
-    pending = {
+    if (state.pending) throw new Error("A context rollover is already pending");
+    const activeLineage = ensureLineage(state, ctx);
+    state.pending = {
       requestId: randomUUID(),
       nextWindowId: randomUUID(),
-      sessionId: ctx.sessionManager.getSessionId(),
-      generation,
+      sessionId: state.sessionId,
+      generation: state.generation,
       status: "requested",
       turnStartedAfterRequest: false,
       successfulTurnAfterRequest: false,
       ...(input.reason ? { reason: input.reason } : {}),
     };
-    return { requestId: pending.requestId, currentWindowId: activeLineage.currentWindowId };
+    return {
+      requestId: state.pending.requestId,
+      currentWindowId: activeLineage.currentWindowId,
+      nextWindowId: state.pending.nextWindowId,
+      ...(state.pending.reason ? { reason: state.pending.reason } : {}),
+    };
   };
 
-  registerContextManagementTools(pi, { isEnabled, requestNewContext });
+  registerContextManagementTools(pi, {
+    isEnabled(ctx) {
+      const state = stateFor(ctx);
+      return state ? enabledFor(state) : false;
+    },
+    requestNewContext,
+  });
 
-  const continueAfterRollover = (ctx: ExtensionContext, request: PendingRollover) => {
-    if (!isOwned(ctx, request) || request.status !== "completed") return;
-    const current = lineage;
-    const contextToolsAvailable = isEnabled();
-    pending = undefined;
+  const continueAfterRollover = (state: SessionState, ctx: ExtensionContext, request: PendingRollover) => {
+    if (!isOwned(state, ctx, request) || request.status !== "completed") return;
+    const current = state.lineage;
+    const contextToolsAvailable = enabledFor(state);
+    state.pending = undefined;
     if (!current) return;
     pi.sendMessage(
       {
@@ -365,9 +463,9 @@ export function createContextManager(
     );
   };
 
-  const failRollover = (ctx: ExtensionContext, request: PendingRollover, message: string) => {
-    if (!isOwned(ctx, request)) return;
-    pending = undefined;
+  const failRollover = (state: SessionState, ctx: ExtensionContext, request: PendingRollover, message: string) => {
+    if (!isOwned(state, ctx, request)) return;
+    state.pending = undefined;
     const safeMessage = terminalText(message).slice(0, 2_000);
     if (ctx.hasUI) ctx.ui.notify(safeMessage, "warning");
     pi.sendMessage(
@@ -390,89 +488,189 @@ export function createContextManager(
     );
   };
 
+  const settle = (state: SessionState, ctx: ExtensionContext) => {
+    if (!isOwned(state, ctx)) return;
+    state.agentRunActive = ctx.signal !== undefined;
+    if (state.agentRunActive) return;
+    if (state.removeToolsAtSettlement) {
+      state.removeToolsAtSettlement = false;
+      if (!isConfigured()) {
+        if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
+          pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+        }
+        removeOwnedTools(inspectToolUnit().ownedNames);
+      }
+    }
+    const request = state.pending;
+    if (!request || !isOwned(state, ctx, request)) return;
+    if (!isConfigured() && (request.status === "requested" || request.status === "compacting")) {
+      request.status = "failed";
+      request.errorMessage = "Experimental context management was disabled before rollover completed.";
+    }
+    if (request.status === "completed") {
+      if (request.successfulTurnAfterRequest) state.pending = undefined;
+      else continueAfterRollover(state, ctx, request);
+      return;
+    }
+    if (request.status === "failed") {
+      failRollover(state, ctx, request, request.errorMessage ?? "Compaction failed.");
+      return;
+    }
+    if (request.status !== "requested") return;
+    request.status = "compacting";
+    ctx.compact({
+      onComplete: (result) => {
+        if (!isOwned(state, ctx, request)) return;
+        if (request.status === "failed") {
+          failRollover(
+            state,
+            ctx,
+            request,
+            request.errorMessage ?? "Compaction completed without the requested context marker.",
+          );
+          return;
+        }
+        const details = parseContextManagementCompaction(result);
+        if (request.status !== "completed" || !details || details.requestId !== request.requestId) {
+          failRollover(state, ctx, request, "Compaction completed without the requested context marker.");
+          return;
+        }
+        state.lineage = details;
+        if (request.successfulTurnAfterRequest) state.pending = undefined;
+        else continueAfterRollover(state, ctx, request);
+      },
+      onError: (error) => failRollover(state, ctx, request, error.message),
+    });
+  };
+
   return {
-    isEnabled,
-    isRouting,
+    isEnabled(ctx) {
+      const state = stateFor(ctx);
+      return state ? enabledFor(state) : false;
+    },
     startSession(ctx) {
-      controller.abort();
-      controller = new AbortController();
-      generation += 1;
-      ownerSessionId = ctx.sessionManager.getSessionId();
-      lineage = loadContextLineage(ctx.sessionManager.getBranch());
-      pending = undefined;
-      warned = false;
-      warnedUnavailableTools = false;
-      toolsAvailable = false;
-      removeToolsAtSettlement = false;
-      fallbackDeactivationPending = false;
-      agentRunActive = false;
+      const previous = states.get(ctx.sessionManager);
+      previous?.controller.abort();
+      const generation = ++nextGeneration;
+      const branch = ctx.sessionManager.getBranch();
+      const state: SessionState = {
+        key: ctx.sessionManager,
+        generation,
+        sessionId: ctx.sessionManager.getSessionId(),
+        lineage: loadContextLineage(branch),
+        pending: restoredRollover(branch, ctx.sessionManager.getSessionId(), generation),
+        warned: false,
+        warnedUnavailableTools: false,
+        warnedProjectionFailure: false,
+        toolsAvailable: false,
+        removeToolsAtSettlement: false,
+        fallbackDeactivationPending: false,
+        agentRunActive: false,
+        controller: new AbortController(),
+      };
+      states.set(ctx.sessionManager, state);
       applySettings(ctx);
+      if (state.pending && ctx.isIdle()) settle(state, ctx);
     },
     onSessionTree(ctx) {
-      if (!isOwned(ctx)) return;
-      generation += 1;
-      lineage = loadContextLineage(ctx.sessionManager.getBranch());
-      pending = undefined;
-      removeToolsAtSettlement = false;
-      fallbackDeactivationPending = false;
-      agentRunActive = false;
+      const previous = stateFor(ctx);
+      if (!previous) return;
+      previous.controller.abort();
+      const generation = ++nextGeneration;
+      const branch = ctx.sessionManager.getBranch();
+      const state: SessionState = {
+        ...previous,
+        generation,
+        lineage: loadContextLineage(branch),
+        pending: restoredRollover(branch, previous.sessionId, generation),
+        removeToolsAtSettlement: false,
+        fallbackDeactivationPending: false,
+        agentRunActive: false,
+        controller: new AbortController(),
+      };
+      states.set(ctx.sessionManager, state);
       applySettings(ctx);
+      if (state.pending && ctx.isIdle()) settle(state, ctx);
     },
     applySettings,
     beforeCompact(event, ctx) {
-      if (!isOwned(ctx) || event.signal.aborted) return undefined;
-      if (toolsAvailable && !inspectToolUnit().complete) deactivateIncompleteToolUnit(ctx);
-      if (!isEnabled()) return undefined;
-      const activeLineage = ensureLineage(ctx);
-      const request = pending?.status === "requested" || pending?.status === "compacting" ? pending : undefined;
-      // Completed and failed requests still owe their terminal outcome at the idle boundary.
-      const details = createContextManagementDetails({
-        lineage: activeLineage,
-        ...compactionRetainedContext(event),
-        reason: event.reason,
-        ...(request ? { requestId: request.requestId, windowId: request.nextWindowId } : {}),
-      });
-      if (request) request.status = "compacting";
-      return {
-        compaction: {
-          summary: contextContract(details),
-          firstKeptEntryId: event.preparation.firstKeptEntryId,
-          tokensBefore: event.preparation.tokensBefore,
-          details,
-        },
-      };
+      const state = stateFor(ctx);
+      if (!state || event.signal.aborted) return undefined;
+      if (state.toolsAvailable && !inspectToolUnit().complete) deactivateIncompleteToolUnit(state, ctx);
+      if (!enabledFor(state)) return undefined;
+      const request =
+        state.pending?.status === "requested" || state.pending?.status === "compacting" ? state.pending : undefined;
+      try {
+        const activeLineage = ensureLineage(state, ctx);
+        const details = createContextManagementDetails({
+          lineage: activeLineage,
+          ...compactionRetainedContext(event),
+          reason: event.reason,
+          ...(request ? { requestId: request.requestId, windowId: request.nextWindowId } : {}),
+        });
+        if (request) request.status = "compacting";
+        return {
+          compaction: {
+            summary: contextContract(details),
+            firstKeptEntryId: event.preparation.firstKeptEntryId,
+            tokensBefore: event.preparation.tokensBefore,
+            details,
+          },
+        };
+      } catch (error) {
+        const message = terminalText(error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+        if (request && isOwned(state, ctx, request)) {
+          request.status = "failed";
+          request.errorMessage = message;
+        }
+        if (ctx.hasUI) ctx.ui.notify(`Experimental context compaction was cancelled. ${message}`, "warning");
+        return { cancel: true };
+      }
     },
     projectContext(messages, ctx) {
-      if (!isOwned(ctx)) return undefined;
-      if (toolsAvailable && !inspectToolUnit().complete) deactivateIncompleteToolUnit(ctx);
-      if (!isEnabled()) {
-        if (fallbackDeactivationPending) {
+      const state = stateFor(ctx);
+      if (!state) return undefined;
+      if (state.toolsAvailable && !inspectToolUnit().complete) deactivateIncompleteToolUnit(state, ctx);
+      if (!enabledFor(state)) {
+        if (state.fallbackDeactivationPending) {
           if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
             return [...messages, deactivationAgentMessage()];
           }
-          fallbackDeactivationPending = false;
+          state.fallbackDeactivationPending = false;
         }
         return undefined;
       }
-      const activeLineage = lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
+      const activeLineage = state.lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
       if (!activeLineage) return undefined;
-      const compaction = activeContextManagementCompaction(ctx.sessionManager.getBranch());
-      if (compaction) {
-        const projected = projectContextManagementContext(messages, compaction.entry, compaction.details);
-        return projected ? reconcileContextContract(projected, compaction.details) : undefined;
+      try {
+        const compaction = activeContextManagementCompaction(ctx.sessionManager.getBranch());
+        if (compaction) {
+          const projected = projectContextManagementContext(messages, compaction.entry, compaction.details);
+          return projected ? reconcileContextContract(projected, compaction.details) : undefined;
+        }
+        return hasContextContract(messages, activeLineage)
+          ? undefined
+          : reconcileContextContract(messages, activeLineage);
+      } catch (error) {
+        if (!state.warnedProjectionFailure && ctx.hasUI) {
+          state.warnedProjectionFailure = true;
+          ctx.ui.notify(
+            `Experimental context projection kept Pi's persisted context unchanged. ${terminalText(error instanceof Error ? error.message : String(error))}`,
+            "warning",
+          );
+        }
+        return undefined;
       }
-      return hasContextContract(messages, activeLineage)
-        ? undefined
-        : reconcileContextContract(messages, activeLineage);
     },
     onCompact(event, ctx) {
-      if (!isOwned(ctx) || !ctx.sessionManager.getBranch().some((entry) => entry.id === event.compactionEntry.id)) {
+      const state = stateFor(ctx);
+      if (!state || !ctx.sessionManager.getBranch().some((entry) => entry.id === event.compactionEntry.id)) {
         return;
       }
       const details = parseContextManagementCompaction(event.compactionEntry);
-      const request = pending;
-      if (request?.status !== "compacting" || !isOwned(ctx, request)) {
-        if (details) lineage = details;
+      const request = state.pending;
+      if (request?.status !== "compacting" || !isOwned(state, ctx, request)) {
+        if (details) state.lineage = details;
         return;
       }
       if (!details || details.requestId !== request.requestId) {
@@ -480,28 +678,31 @@ export function createContextManager(
         request.errorMessage = "Compaction completed without the requested context marker.";
         return;
       }
-      lineage = details;
+      state.lineage = details;
       request.status = "completed";
     },
     onCompactFailed(event, ctx) {
-      const request = pending;
-      if (request?.status !== "compacting" || !isOwned(ctx, request)) return;
+      const state = stateFor(ctx);
+      const request = state?.pending;
+      if (!state || request?.status !== "compacting" || !isOwned(state, ctx, request)) return;
       if (event.aborted) {
-        pending = undefined;
+        state.pending = undefined;
         return;
       }
       request.status = "failed";
       request.errorMessage = event.errorMessage ?? "Compaction failed.";
     },
     onAgentStart(ctx) {
-      if (isOwned(ctx)) agentRunActive = true;
+      const state = stateFor(ctx);
+      if (state) state.agentRunActive = true;
     },
     onAgentEnd(event, ctx) {
-      const request = pending;
-      if (!request || !isOwned(ctx, request)) return;
+      const state = stateFor(ctx);
+      const request = state?.pending;
+      if (!state || !request || !isOwned(state, ctx, request)) return;
       const stopReason = latestAssistantStopReason(event.messages);
       if (ctx.signal?.aborted || stopReason === "aborted") {
-        pending = undefined;
+        state.pending = undefined;
         return;
       }
       if (request.turnStartedAfterRequest && (stopReason === "stop" || stopReason === "toolUse")) {
@@ -509,75 +710,19 @@ export function createContextManager(
       }
     },
     onTurnStart(ctx) {
-      const request = pending;
-      if (request && isOwned(ctx, request)) request.turnStartedAfterRequest = true;
+      const state = stateFor(ctx);
+      const request = state?.pending;
+      if (state && request && isOwned(state, ctx, request)) request.turnStartedAfterRequest = true;
     },
     onAgentSettled(ctx) {
-      if (!isOwned(ctx)) return;
-      agentRunActive = ctx.signal !== undefined;
-      if (agentRunActive) return;
-      if (removeToolsAtSettlement) {
-        removeToolsAtSettlement = false;
-        if (!isConfigured()) {
-          if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
-            pi.sendMessage(deactivationMessage(), { triggerTurn: false });
-          }
-          toolsAvailable = false;
-          removeOwnedTools(inspectToolUnit().ownedNames);
-        }
-      }
-      const request = pending;
-      if (!request || !isOwned(ctx, request)) return;
-      if (!isConfigured() && (request.status === "requested" || request.status === "compacting")) {
-        request.status = "failed";
-        request.errorMessage = "Experimental context management was disabled before rollover completed.";
-      }
-      if (request.status === "completed") {
-        if (request.successfulTurnAfterRequest) pending = undefined;
-        else continueAfterRollover(ctx, request);
-        return;
-      }
-      if (request.status === "failed") {
-        failRollover(ctx, request, request.errorMessage ?? "Compaction failed.");
-        return;
-      }
-      if (request.status !== "requested") return;
-      request.status = "compacting";
-      ctx.compact({
-        onComplete: (result) => {
-          if (!isOwned(ctx, request)) return;
-          if (request.status === "failed") {
-            failRollover(
-              ctx,
-              request,
-              request.errorMessage ?? "Compaction completed without the requested context marker.",
-            );
-            return;
-          }
-          const details = parseContextManagementCompaction(result);
-          if (request.status !== "completed" || !details || details.requestId !== request.requestId) {
-            failRollover(ctx, request, "Compaction completed without the requested context marker.");
-            return;
-          }
-          lineage = details;
-          if (request.successfulTurnAfterRequest) pending = undefined;
-          else continueAfterRollover(ctx, request);
-        },
-        onError: (error) => failRollover(ctx, request, error.message),
-      });
+      const state = stateFor(ctx);
+      if (state) settle(state, ctx);
     },
-    shutdown() {
-      generation += 1;
-      controller.abort();
-      ownerSessionId = undefined;
-      lineage = undefined;
-      pending = undefined;
-      warned = false;
-      warnedUnavailableTools = false;
-      toolsAvailable = false;
-      removeToolsAtSettlement = false;
-      fallbackDeactivationPending = false;
-      agentRunActive = false;
+    shutdown(ctx) {
+      const state = states.get(ctx.sessionManager);
+      if (!state) return;
+      state.controller.abort();
+      states.delete(ctx.sessionManager);
     },
   };
 }

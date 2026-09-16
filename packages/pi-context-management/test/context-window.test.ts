@@ -111,6 +111,59 @@ test("rejects malformed and unsupported context details", () => {
   );
 });
 
+test("rejects foreign compaction details before serialization", () => {
+  let serializations = 0;
+  const foreign = {
+    kind: "foreign-compaction",
+    version: 1,
+    toJSON() {
+      serializations += 1;
+      throw new Error("foreign details should not be serialized");
+    },
+  };
+  assert.equal(parseContextManagementDetails(foreign), undefined);
+  assert.equal(serializations, 0);
+  const entry: SessionEntry = {
+    type: "compaction",
+    id: "foreign",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    summary: "foreign summary",
+    firstKeptEntryId: "foreign",
+    tokensBefore: 1,
+    details: foreign,
+  };
+  assert.equal(loadContextLineage([entry]), undefined);
+  assert.equal(serializations, 0);
+});
+
+test("loads the newest owned lineage without replaying older entries", () => {
+  const state = createInitialContextState(first);
+  const details = createContextManagementDetails({
+    lineage: state,
+    keptMessages: [],
+    reason: "manual",
+    windowId: second,
+  });
+  const newest: SessionEntry = {
+    type: "compaction",
+    id: "newest",
+    parentId: "older",
+    timestamp: "2026-01-01T00:00:01.000Z",
+    summary: contextContract(details),
+    firstKeptEntryId: "older",
+    tokensBefore: 100,
+    details,
+  };
+  const entries = new Proxy([customState(state), newest], {
+    get(target, property, receiver) {
+      if (property === "0") throw new Error("older lineage entry was replayed");
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  assert.deepEqual(loadContextLineage(entries), details);
+});
+
 test("accepts persisted context details only with their canonical summary", () => {
   const state = createInitialContextState(first);
   const details = createContextManagementDetails({

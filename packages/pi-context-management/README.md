@@ -14,7 +14,7 @@ The extension keeps Pi's append-only session while presenting a smaller current 
 - Exposes four bounded `context_management_*` tools for rollover, capacity, recall, and notes.
 - Recalls older plaintext branch history without copying it into separate extension state.
 - Stores versioned notes and window lineage on the active branch so forks diverge naturally.
-- Fails closed when persisted fingerprints do not match the current context.
+- Fails closed when persisted fingerprints do not match or fingerprint traversal exceeds its limits.
 - Provides `/context-management` for status, help, and immediate settings changes.
 
 ## 📦 Install

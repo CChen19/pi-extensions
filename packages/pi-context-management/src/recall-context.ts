@@ -106,33 +106,45 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function indexContent(content: unknown): unknown {
-  if (!Array.isArray(content)) return content;
-  return content.map((block) => {
-    if (!isRecord(block)) return block;
-    switch (block.type) {
-      case "text":
-        return { type: block.type, text: block.text };
-      case "image":
-        return { type: block.type, mimeType: block.mimeType };
-      case "thinking":
-        return {
-          type: block.type,
-          thinking: block.thinking,
-          ...(typeof block.redacted === "boolean" ? { redacted: block.redacted } : {}),
-        };
-      case "toolCall":
-        return {
-          type: block.type,
-          id: block.id,
-          name: block.name,
-          ...(block.name === "context_management_recall_context" ? {} : { arguments: block.arguments }),
-          ...(typeof block.namespace === "string" ? { namespace: block.namespace } : {}),
-        };
-      default:
-        return block;
-    }
-  });
+const INDEXED_CONTENT = Symbol("pi-context-management-indexed-content");
+
+interface IndexedContent {
+  [INDEXED_CONTENT]: true;
+  value: unknown;
+}
+
+function indexedContent(value: unknown): IndexedContent {
+  return { [INDEXED_CONTENT]: true, value };
+}
+
+function isIndexedContent(value: unknown): value is IndexedContent {
+  return typeof value === "object" && value !== null && (value as IndexedContent)[INDEXED_CONTENT] === true;
+}
+
+function indexedBlock(block: unknown): unknown {
+  if (!isRecord(block)) return block;
+  switch (block.type) {
+    case "text":
+      return { type: block.type, text: block.text };
+    case "image":
+      return { type: block.type, mimeType: block.mimeType };
+    case "thinking":
+      return {
+        type: block.type,
+        thinking: block.thinking,
+        ...(typeof block.redacted === "boolean" ? { redacted: block.redacted } : {}),
+      };
+    case "toolCall":
+      return {
+        type: block.type,
+        id: block.id,
+        name: block.name,
+        ...(block.name === "context_management_recall_context" ? {} : { arguments: block.arguments }),
+        ...(typeof block.namespace === "string" ? { namespace: block.namespace } : {}),
+      };
+    default:
+      return block;
+  }
 }
 
 function messageIndexPayload(message: AgentMessage): unknown {
@@ -145,7 +157,7 @@ function messageIndexPayload(message: AgentMessage): unknown {
   }
   const payload = messagePayload(message);
   if (!isRecord(payload) || !Object.hasOwn(payload, "content")) return payload;
-  return { ...payload, content: indexContent(payload.content) };
+  return { ...payload, content: indexedContent(payload.content) };
 }
 
 function firstWindowId(entries: readonly SessionEntry[], budget: HistoryTraversalBudget): string | undefined {
@@ -233,6 +245,7 @@ interface SearchScanBudget {
 type PayloadFrame =
   | { kind: "value"; value: unknown }
   | { kind: "array"; value: unknown[]; index: number }
+  | { kind: "indexed-content"; value: unknown[]; index: number }
   | { kind: "object"; entries: Iterator<[string, unknown]> }
   | { kind: "text"; value: string };
 
@@ -281,6 +294,15 @@ function boundedPayloadText(value: unknown, searchBudget?: SearchScanBudget): st
       }
       continue;
     }
+    if (frame.kind === "indexed-content") {
+      if (frame.index < frame.value.length && consume(1) === 1) {
+        frames.push(
+          { kind: "indexed-content", value: frame.value, index: frame.index + 1 },
+          { kind: "value", value: indexedBlock(frame.value[frame.index]) },
+        );
+      }
+      continue;
+    }
     if (frame.kind === "object") {
       const next = frame.entries.next();
       if (!next.done) {
@@ -302,6 +324,9 @@ function boundedPayloadText(value: unknown, searchBudget?: SearchScanBudget): st
       if (item !== undefined && typeof item !== "function" && typeof item !== "symbol") {
         append(String(item));
       }
+    } else if (isIndexedContent(item)) {
+      if (Array.isArray(item.value)) frames.push({ kind: "indexed-content", value: item.value, index: 0 });
+      else frames.push({ kind: "value", value: item.value });
     } else if (Array.isArray(item)) {
       frames.push({ kind: "array", value: item, index: 0 });
     } else {

@@ -71,7 +71,7 @@ export function parseContextState(value: unknown): ContextStateEntryData | undef
 }
 
 export function parseContextManagementDetails(value: unknown): ContextManagementDetails | undefined {
-  if (!isRecord(value)) return undefined;
+  if (!isRecord(value) || value.kind !== CONTEXT_DETAILS_KIND || value.version !== CONTEXT_VERSION) return undefined;
   try {
     if (serializedBytes(value) > MAX_DETAILS_BYTES) return undefined;
   } catch {
@@ -81,8 +81,6 @@ export function parseContextManagementDetails(value: unknown): ContextManagement
   if (
     !lineage?.previousWindowId ||
     lineage.currentWindowId === lineage.previousWindowId ||
-    value.kind !== CONTEXT_DETAILS_KIND ||
-    value.version !== CONTEXT_VERSION ||
     (value.reason !== "manual" && value.reason !== "threshold" && value.reason !== "overflow") ||
     (value.requestId !== undefined && !isIdentifier(value.requestId)) ||
     !Array.isArray(value.keptMessageFingerprints) ||
@@ -128,16 +126,19 @@ export function createInitialContextState(windowId = randomUUID()): ContextState
 }
 
 export function loadContextLineage(entries: readonly SessionEntry[]): ContextLineage | undefined {
-  let lineage: ContextLineage | undefined;
-  for (const entry of entries) {
-    if (entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE) {
-      lineage = parseContextState(entry.data) ?? lineage;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type === "compaction") {
+      const details = parseContextManagementCompaction(entry);
+      if (details) return details;
       continue;
     }
-    if (entry.type !== "compaction") continue;
-    lineage = parseContextManagementCompaction(entry) ?? lineage;
+    if (entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE) {
+      const state = parseContextState(entry.data);
+      if (state) return state;
+    }
   }
-  return lineage;
+  return undefined;
 }
 
 export function activeContextManagementCompaction(entries: readonly SessionEntry[]):

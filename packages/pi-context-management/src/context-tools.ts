@@ -1,7 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadContextLineage } from "./context-window.js";
+import { CONTEXT_DETAILS_KIND, CONTEXT_VERSION, loadContextLineage } from "./context-window.js";
 import { createNoteMutation, NOTES_ENTRY_TYPE } from "./notes-state.js";
 import { recallContext } from "./recall-context.js";
 import { terminalText } from "./terminal.js";
@@ -29,15 +29,15 @@ const RECALL_ACTIONS = ["list", "read", "search"] as const;
 const NOTE_ACTIONS = ["write", "append"] as const;
 
 export interface ContextToolRuntime {
-  isEnabled(): boolean;
+  isEnabled(ctx: ExtensionContext): boolean;
   requestNewContext(
     ctx: ExtensionContext,
     input: { toolCallId: string; reason?: string },
-  ): { requestId: string; currentWindowId: string };
+  ): { requestId: string; currentWindowId: string; nextWindowId: string; reason?: string };
 }
 
-function requireEnabled(runtime: ContextToolRuntime): void {
-  if (!runtime.isEnabled()) {
+function requireEnabled(runtime: ContextToolRuntime, ctx: ExtensionContext): void {
+  if (!runtime.isEnabled(ctx)) {
     throw new Error("Experimental context management is disabled; enable it in pi-context-management settings first");
   }
 }
@@ -71,7 +71,7 @@ export function registerContextManagementTools(pi: ExtensionAPI, runtime: Contex
     ),
     executionMode: "sequential",
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      requireEnabled(runtime);
+      requireEnabled(runtime, ctx);
       throwIfAborted(signal);
       const requested = runtime.requestNewContext(ctx, {
         toolCallId,
@@ -87,7 +87,12 @@ export function registerContextManagementTools(pi: ExtensionAPI, runtime: Contex
             message:
               "The current run will end before rollover. A hidden continuation follows the compaction attempt unless a later successful turn already continued the work.",
           },
-          { ...requested, status: "scheduled" },
+          {
+            kind: CONTEXT_DETAILS_KIND,
+            version: CONTEXT_VERSION,
+            ...requested,
+            status: "scheduled",
+          },
         ),
         terminate: true,
       };
@@ -100,7 +105,7 @@ export function registerContextManagementTools(pi: ExtensionAPI, runtime: Contex
     description: CONTEXT_MANAGEMENT_TOOL_DESCRIPTIONS.context_management_get_context_remaining,
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
-      requireEnabled(runtime);
+      requireEnabled(runtime, ctx);
       throwIfAborted(signal);
       const usage = ctx.getContextUsage();
       const lineage = loadContextLineage(ctx.sessionManager.getBranch());
@@ -141,7 +146,7 @@ export function registerContextManagementTools(pi: ExtensionAPI, runtime: Contex
       { additionalProperties: false },
     ),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      requireEnabled(runtime);
+      requireEnabled(runtime, ctx);
       throwIfAborted(signal);
       const recalled = recallContext(ctx.sessionManager.getBranch(), params, toolCallId);
       throwIfAborted(signal);
@@ -172,7 +177,7 @@ export function registerContextManagementTools(pi: ExtensionAPI, runtime: Contex
     ),
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      requireEnabled(runtime);
+      requireEnabled(runtime, ctx);
       throwIfAborted(signal);
       const updated = createNoteMutation(ctx.sessionManager.getBranch(), params);
       throwIfAborted(signal);

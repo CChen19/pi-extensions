@@ -59,6 +59,9 @@ termination. If another model turn runs first, the extension still compacts afte
 successful post-request turn suppresses the duplicate hidden next turn; a turn ending in an error or
 output-length cutoff remains eligible for one. If Pi already starts automatic compaction, that
 compaction consumes the request; otherwise the extension calls `ctx.compact()` at `agent_settled`.
+The scheduled tool result persists the request and target-window identifiers. On session restart or
+reload, the extension resumes an unresolved request, completes a persisted compaction's missing
+continuation once, and does not repeat work after its continuation marker is present.
 
 Successful compaction moves to the new window and sends a hidden next-turn message asking the model
 to continue. Failed compaction keeps the old context, reports one warning, and sends a hidden failure
@@ -197,11 +200,13 @@ Limits are fixed to keep session growth and tool responses bounded:
 | History branch traversal | 100,000 entry visits per request |
 | History read scan | 4,194,304 scan units per selected item |
 | History search scan | 4,194,304 scan units across indexed characters and visited values per request |
+| Retained-message fingerprint | 512 levels, 4,194,304 scan units, and 8 MiB serialized per message |
 | Recall response | 32 KiB and 1,000 lines |
 
 Long reads and additional list or search matches use cursors. History actions fail explicitly when
 an applicable entry-visit, read-scan, search-scan, or response limit is reached instead of continuing
-unbounded work. Malformed or unsupported persisted versions are ignored individually.
+unbounded work. Fingerprint-limit failures cancel experimental compaction rather than falling through
+to Pi's summarizer. Malformed or unsupported persisted versions are ignored individually.
 
 ## Compatibility transitions
 

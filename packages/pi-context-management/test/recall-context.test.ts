@@ -509,6 +509,26 @@ test("completed recall calls do not consume history search cursors", () => {
   assert.equal(searched.details.nextCursor, undefined);
 });
 
+test("projects wide content lazily within the scan budget", () => {
+  let highestIndex = 0;
+  const wideContent = new Proxy([], {
+    get(target, property, receiver) {
+      if (property === "length") return 10_000_000;
+      if (typeof property === "string" && /^\d+$/.test(property)) {
+        highestIndex = Math.max(highestIndex, Number(property));
+        if (highestIndex > 1_100_000) throw new Error("content projection traversed eagerly");
+        return { type: "text", text: "" };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const entries = branch();
+  entries.push(historyEntry("wide-content", assistantMessage(wideContent)));
+
+  assert.doesNotThrow(() => recallContext(entries, { source: "history", action: "list" }));
+  assert.ok(highestIndex < 1_100_000);
+});
+
 test("bounds aggregate work across a history search", () => {
   const entries = branch();
   for (let index = 0; index < 5; index += 1) {

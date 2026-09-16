@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createContextManager } from "./context-management.js";
 import {
   type ContextManagementSettingsRuntime,
@@ -7,43 +7,53 @@ import {
 } from "./settings.js";
 import { terminalText } from "./terminal.js";
 
+interface SessionRuntime {
+  controller: AbortController;
+  generation: number;
+}
+
 export function createContextManagementExtension(
   options: { settingsRuntime?: ContextManagementSettingsRuntime } = {},
 ): (pi: ExtensionAPI) => void {
   return (pi) => {
     const settingsRuntime = options.settingsRuntime ?? createContextManagementSettingsRuntime();
     const manager = createContextManager(pi, settingsRuntime);
-    let sessionController = new AbortController();
-    let generation = 0;
+    const sessions = new Map<ExtensionContext["sessionManager"], SessionRuntime>();
+    let nextGeneration = 0;
 
     pi.registerCommand("context-management", {
       description: "Configure experimental summary-free context management",
       handler: async (args, ctx) => {
         if (args.trim()) throw new Error("Usage: /context-management");
-        const ownerGeneration = generation;
-        const controller = sessionController;
+        const owner = sessions.get(ctx.sessionManager);
+        const controller = owner?.controller ?? new AbortController();
         const { showContextManagementMenu } = await import("./settings-menu.js");
-        if (ownerGeneration !== generation || controller.signal.aborted) return;
+        if (owner && (sessions.get(ctx.sessionManager) !== owner || controller.signal.aborted)) return;
         await showContextManagementMenu(settingsRuntime, ctx, {
           signal: controller.signal,
-          isCurrent: () => ownerGeneration === generation && !controller.signal.aborted,
-          isActive: () => manager.isEnabled(),
+          isCurrent: () =>
+            owner
+              ? sessions.get(ctx.sessionManager) === owner && !controller.signal.aborted
+              : !controller.signal.aborted,
+          isActive: () => manager.isEnabled(ctx),
           onSettingsChanged: () => manager.applySettings(ctx),
         });
       },
     });
 
     pi.on("session_start", async (_event, ctx) => {
-      sessionController.abort();
-      sessionController = new AbortController();
-      generation += 1;
-      const ownerGeneration = generation;
+      sessions.get(ctx.sessionManager)?.controller.abort();
+      const owner: SessionRuntime = {
+        controller: new AbortController(),
+        generation: ++nextGeneration,
+      };
+      sessions.set(ctx.sessionManager, owner);
       const sessionId = ctx.sessionManager.getSessionId();
       let state: Readonly<ContextManagementSettingsState>;
       try {
-        state = await settingsRuntime.reload(sessionController.signal);
+        state = await settingsRuntime.reload(owner.controller.signal);
       } catch (error) {
-        if (sessionController.signal.aborted || ownerGeneration !== generation) return;
+        if (owner.controller.signal.aborted || sessions.get(ctx.sessionManager) !== owner) return;
         state = settingsRuntime.get();
         if (ctx.hasUI) {
           ctx.ui.notify(
@@ -53,8 +63,8 @@ export function createContextManagementExtension(
         }
       }
       if (
-        sessionController.signal.aborted ||
-        ownerGeneration !== generation ||
+        owner.controller.signal.aborted ||
+        sessions.get(ctx.sessionManager) !== owner ||
         ctx.sessionManager.getSessionId() !== sessionId
       ) {
         return;
@@ -81,10 +91,11 @@ export function createContextManagementExtension(
     pi.on("turn_start", (_event, ctx) => manager.onTurnStart(ctx));
     pi.on("agent_settled", (_event, ctx) => manager.onAgentSettled(ctx));
 
-    pi.on("session_shutdown", async () => {
-      generation += 1;
-      sessionController.abort();
-      manager.shutdown();
+    pi.on("session_shutdown", async (_event, ctx) => {
+      const owner = sessions.get(ctx.sessionManager);
+      owner?.controller.abort();
+      if (sessions.get(ctx.sessionManager) === owner) sessions.delete(ctx.sessionManager);
+      manager.shutdown(ctx);
       await settingsRuntime.flush();
     });
   };
