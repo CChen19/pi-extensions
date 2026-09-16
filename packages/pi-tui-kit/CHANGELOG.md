@@ -1,5 +1,11 @@
 # @narumitw/pi-tui-kit
 
+## 0.64.0
+
+### Minor Changes
+
+- 9df8964: Expose lazy Mermaid Markdown renderer preparation and a synchronous final-message transformer from the package root and the focused `/markdown` subpath.
+
 ## 0.63.1
 
 ### Patch Changes
