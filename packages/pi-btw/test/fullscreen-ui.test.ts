@@ -708,6 +708,63 @@ test("native terminal smoke: split pasted exit bytes do not cancel streaming; ex
   }
 });
 
+test("Ctrl+C aborts fullscreen-owned preparation before it can open stale UI", async () => {
+  const harness = createHarness();
+  let releasePreparation: (() => void) | undefined;
+  let observedAbort = false;
+  const running = runBtwFullscreen(
+    harness.ctx,
+    async (ctx) => {
+      await new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      observedAbort = ctx.signal?.aborted === true;
+      return "closed";
+    },
+    {},
+    { createTui: harness.createTui },
+  );
+  await flushAsyncWork();
+  assert.ok(releasePreparation);
+
+  harness.input("\u0003");
+  releasePreparation();
+
+  assert.equal(await running, "closed");
+  assert.equal(observedAbort, true);
+  assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
+  assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
+});
+
+test("fullscreen disposal aborts owned preparation and restores the parent", async () => {
+  const harness = createHarness();
+  let releasePreparation: (() => void) | undefined;
+  let observedAbort = false;
+  const running = runBtwFullscreen(
+    harness.ctx,
+    async (ctx) => {
+      await new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      observedAbort = ctx.signal?.aborted === true;
+      return "closed";
+    },
+    {},
+    { createTui: harness.createTui },
+  );
+  await flushAsyncWork();
+  assert.ok(releasePreparation);
+  assert.ok(harness.outerComponent);
+
+  harness.outerComponent.dispose();
+  releasePreparation();
+
+  assert.equal(await running, "closed");
+  assert.equal(observedAbort, true);
+  assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
+  assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
+});
+
 test("Ctrl+C waits for terminal input drain before restoring the parent", async () => {
   const harness = createInputHandoffHarness();
   harness.terminal.deferDrain();

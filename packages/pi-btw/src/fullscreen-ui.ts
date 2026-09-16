@@ -418,6 +418,7 @@ class BtwFullscreenHost<T> implements Component {
   private parentRestoreQueued = false;
   private parentRestorePromise: Promise<void> | undefined;
   private cleanupError: unknown;
+  private readonly lifetimeController = new AbortController();
 
   constructor(
     private readonly parent: TUI,
@@ -445,6 +446,7 @@ class BtwFullscreenHost<T> implements Component {
   dispose(): void {
     if (this.disposed || this.finished) return;
     this.disposed = true;
+    this.lifetimeController.abort();
     this.cancelActiveCustom?.();
   }
 
@@ -491,6 +493,7 @@ class BtwFullscreenHost<T> implements Component {
         reportWarnings();
         if (pasteGuard.consume(data) || !shortcuts.matches(data, "exit")) return undefined;
         this.disposed = true;
+        this.lifetimeController.abort();
         try {
           this.hardCancelActiveCustom?.();
         } finally {
@@ -585,7 +588,11 @@ class BtwFullscreenHost<T> implements Component {
       },
     });
     return new Proxy(this.ctx, {
-      get: (target, property) => (property === "ui" ? ui : Reflect.get(target, property, target)),
+      get: (target, property) => {
+        if (property === "ui") return ui;
+        if (property === "signal") return this.lifetimeController.signal;
+        return Reflect.get(target, property, target);
+      },
     });
   }
 

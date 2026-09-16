@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
@@ -24,6 +25,7 @@ import {
   extractAssistantText,
   type SideThread,
 } from "../src/side-thread.js";
+import { prepareBtwTranscriptMarkdown } from "../src/transcript-markdown.js";
 import { BtwAnsweringView, BtwTranscriptPager, formatSideTranscript } from "../src/transcript-pager.js";
 
 function response(text: string): AssistantMessage {
@@ -2520,6 +2522,60 @@ test("transcript renders like a plain conversation without role labels", () => {
   assert.match(rendered, /It uses the current context\./);
   assert.doesNotMatch(rendered, /Q1|You:|Assistant:|turns|%/);
   assert.equal(rendered.includes("\u001b]133;"), false);
+});
+
+test("side transcript renders prepared Mermaid diagrams and keeps narrow source readable", async () => {
+  initTheme("dark");
+  const tui = { terminal: { rows: 80 }, requestRender() {} };
+  const theme = {
+    fg(_color: string, text: string) {
+      return text;
+    },
+    bold(text: string) {
+      return text;
+    },
+  };
+  const source = "Before\n\n```mermaid\nflowchart LR\n A --> B\n```\n\nAfter";
+  const turns = [{ question: "Show the flow", answer: source, kind: "answered" as const, response: response(source) }];
+  const createMarkdownTransformers = await prepareBtwTranscriptMarkdown(turns);
+  const composer = new BtwTranscriptPager(tui as never, theme as never, turns, () => undefined, {
+    markdownTransformers: createMarkdownTransformers(theme as never),
+  });
+
+  const wide = stripVTControlCharacters(composer.render(80).join("\n"));
+  assert.match(wide, /[┌╭].*[┐╮]/u);
+  assert.doesNotMatch(wide, /flowchart LR/u);
+  assert.match(wide, /Before/u);
+  assert.match(wide, /After/u);
+
+  const narrowLines = composer.render(8);
+  const narrow = stripVTControlCharacters(narrowLines.join("\n"));
+  assert.ok(narrowLines.every((line) => visibleWidth(line) <= 8));
+  assert.match(narrow, /flowch[\s\S]*art LR/u);
+});
+
+test("side transcript preserves malformed Mermaid source with a safe warning", async () => {
+  initTheme("dark");
+  const tui = { terminal: { rows: 40 }, requestRender() {} };
+  const theme = {
+    fg(_color: string, text: string) {
+      return text;
+    },
+    bold(text: string) {
+      return text;
+    },
+  };
+  const source = "```mermaid\nflowchart LR\n A[unsafe\u001b]8;;https://unsafe.example\u0007text --> B\n```";
+  const turns = [{ question: "Q", answer: source, kind: "answered" as const, response: response(source) }];
+  const createMarkdownTransformers = await prepareBtwTranscriptMarkdown(turns);
+  const composer = new BtwTranscriptPager(tui as never, theme as never, turns, () => undefined, {
+    markdownTransformers: createMarkdownTransformers(theme as never),
+  });
+  const rendered = composer.render(80).join("\n");
+
+  assert.equal(rendered.includes("\u001b]8;;https://unsafe.example\u0007"), false);
+  assert.match(stripVTControlCharacters(rendered), /flowchart LR/u);
+  assert.match(stripVTControlCharacters(rendered), /Mermaid diagram not rendered:/u);
 });
 
 test("side transcript escapes executable terminal controls", () => {

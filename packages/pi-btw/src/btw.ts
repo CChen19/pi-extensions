@@ -45,6 +45,7 @@ import {
   type SideThread,
 } from "./side-thread.js";
 import { sanitizeSingleLine } from "./text.js";
+import { type BtwMarkdownTransformers, prepareBtwTranscriptMarkdown } from "./transcript-markdown.js";
 import {
   BtwAnsweringView,
   type BtwThinkingControl,
@@ -821,6 +822,19 @@ function truncatePreview(text: string): string {
   return text.length <= 72 ? text : `${text.slice(0, 69)}…`;
 }
 
+async function prepareCurrentTranscriptMarkdown(
+  thread: SideThread,
+  pendingQuestion: string | undefined,
+  ctx: ExtensionCommandContext,
+): Promise<BtwMarkdownTransformers | undefined> {
+  while (true) {
+    const turnCount = thread.turns.length;
+    const createMarkdownTransformers = await prepareBtwTranscriptMarkdown(thread.turns, pendingQuestion);
+    if (ctx.signal?.aborted) return undefined;
+    if (thread.turns.length === turnCount) return createMarkdownTransformers;
+  }
+}
+
 async function askThreadQuestion(
   thread: SideThread,
   question: string,
@@ -829,6 +843,8 @@ async function askThreadQuestion(
   ctx: ExtensionCommandContext,
   steering: BtwThreadSteeringControl,
 ) {
+  const createMarkdownTransformers = await prepareCurrentTranscriptMarkdown(thread, question, ctx);
+  if (!createMarkdownTransformers) return { kind: "aborted" as const };
   return ctx.ui.custom<Awaited<ReturnType<typeof completeSideThreadTurn>>>((tui, theme, keybindings, done) => {
     let settled = false;
     const view = new BtwAnsweringView(
@@ -843,6 +859,7 @@ async function askThreadQuestion(
       },
       thinkingLevel,
       {
+        markdownTransformers: createMarkdownTransformers(theme),
         steering: {
           questions: steering.questions,
           onSubmit: steering.submit,
@@ -876,11 +893,14 @@ async function showThreadComposer(
   initialQuestion: string | undefined,
   thinking: BtwThreadThinkingControl,
 ): Promise<TranscriptPagerAction> {
+  const createMarkdownTransformers = await prepareCurrentTranscriptMarkdown(thread, initialQuestion, ctx);
+  if (!createMarkdownTransformers) return { kind: "close" };
   return ctx.ui.custom<TranscriptPagerAction>(
     (tui, theme, keybindings, done) =>
       new BtwTranscriptPager(tui, theme, thread.turns, done, {
         startAtBottom,
         initialQuestion,
+        markdownTransformers: createMarkdownTransformers(theme),
         thinking: { ...thinking, keybindings },
       }),
   );
