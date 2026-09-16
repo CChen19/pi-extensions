@@ -1,5 +1,15 @@
 # @narumitw/pi-btw
 
+## 0.59.0
+
+### Minor Changes
+
+- 022ba82: Render supported Mermaid fences as width-safe, themed Unicode diagrams in side-thread transcripts, with readable source fallbacks for malformed, unsupported, or oversized diagrams.
+
+### Patch Changes
+
+- ddaccd2: Complete `/btw` fullscreen cancellation by forwarding upstream aborts, closing mounted composers, restoring the parent TUI, and stopping lazy Mermaid transcript preparation when cancelled.
+
 ## 0.58.1
 
 ### Patch Changes

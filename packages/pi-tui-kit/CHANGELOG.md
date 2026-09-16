@@ -1,5 +1,11 @@
 # @narumitw/pi-tui-kit
 
+## 0.65.0
+
+### Minor Changes
+
+- 9ad07cf: Add focused interaction subpaths and standalone document-review and multi-select runners with lifecycle-safe TUI and RPC adaptation.
+
 ## 0.64.0
 
 ### Minor Changes
