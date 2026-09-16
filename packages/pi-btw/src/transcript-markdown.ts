@@ -33,7 +33,7 @@ export async function prepareBtwTranscriptMarkdown(
     import(MERMAID_MARKDOWN_MODULE) as Promise<MermaidMarkdownModule>,
     signal,
   );
-  if (!markdownModule) return undefined;
+  if (!markdownModule || signal?.aborted) return undefined;
   const { createMermaidMarkdownTransformer, prepareMermaidMarkdownRenderer } = markdownModule;
   const preparations = new Set<Promise<void>>();
   for (const document of documents) {
@@ -41,6 +41,7 @@ export async function prepareBtwTranscriptMarkdown(
     if (preparation) preparations.add(preparation);
   }
   if (preparations.size > 0 && !(await settleUnlessAborted(Promise.all(preparations), signal))) return undefined;
+  if (signal?.aborted) return undefined;
 
   return (theme) => {
     const transformer = createMermaidMarkdownTransformer(theme);

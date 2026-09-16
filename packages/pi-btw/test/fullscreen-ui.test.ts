@@ -767,31 +767,28 @@ test("fullscreen disposal aborts owned preparation and restores the parent", asy
   assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
 });
 
-test("upstream cancellation reaches fullscreen-owned work and restores the parent", async () => {
+test("upstream cancellation closes a mounted composer and restores the parent", async () => {
   const controller = new AbortController();
   const harness = createHarness({ signal: controller.signal });
   let fullscreenSignal: AbortSignal | undefined;
   const running = runBtwFullscreen(
     harness.ctx,
-    async (ctx) => {
-      fullscreenSignal = ctx.signal;
-      assert.ok(fullscreenSignal);
-      await new Promise<void>((resolve) => {
-        fullscreenSignal?.addEventListener("abort", () => resolve(), { once: true });
-        if (fullscreenSignal?.aborted) resolve();
-      });
-      return "closed";
-    },
+    (ctx) =>
+      ctx.ui.custom<TranscriptPagerAction>((tui, theme, _keybindings, done) => {
+        fullscreenSignal = ctx.signal;
+        return new BtwTranscriptPager(tui, theme, [], done);
+      }),
     {},
     { createTui: harness.createTui },
   );
   await flushAsyncWork();
   assert.ok(fullscreenSignal);
   assert.notEqual(fullscreenSignal, controller.signal);
+  assert.equal(harness.events.includes("fullscreen.layout"), true);
 
   controller.abort();
 
-  assert.equal(await running, "closed");
+  assert.deepEqual(await running, { kind: "close" });
   assert.equal(fullscreenSignal.aborted, true);
   assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
   assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
