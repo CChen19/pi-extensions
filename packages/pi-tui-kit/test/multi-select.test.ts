@@ -150,14 +150,20 @@ test("runMultiSelect returns typed RPC cancellation, unsupported, validation, an
     kind: "unsupported",
     mode: "json",
   });
-  const invalid = await runMultiSelect(jsonCtx, {
-    title: "Tools",
-    items: [
-      { id: "duplicate", label: "One" },
-      { id: "duplicate", label: "Two" },
-    ],
-  });
-  assert.equal(invalid.kind, "error");
+  for (const invalidOptions of [
+    { title: "\u0001", items },
+    { title: "Tools", items: [{ id: "hidden", label: "\u0001" }] },
+    {
+      title: "Tools",
+      items: [
+        { id: "duplicate", label: "One" },
+        { id: "duplicate", label: "Two" },
+      ],
+    },
+  ]) {
+    const invalid = await runMultiSelect(jsonCtx, invalidOptions);
+    assert.equal(invalid.kind, "error");
+  }
 
   let current = true;
   const staleCtx = createMockContext({

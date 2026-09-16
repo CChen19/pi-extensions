@@ -43,7 +43,7 @@ Add focused interaction subpaths plus standalone document-review and multi-selec
 - [x] Implement `runDocumentReview()` with existing review formatting, search, optional confirmation, exact-width TUI rendering, RPC pages, lifecycle-safe Mermaid preparation, and typed lifecycle results; focused tests passed.
 - [x] Implement `runMultiSelect()` with disabled items, optional TUI fuzzy search, completion, keyboard/mouse behavior, RPC adaptation, interaction-local state, and typed lifecycle results; focused tests passed.
 - [x] Update root exports, README, API reference, API version, and a minor Changeset without consumer changes; implementation review and the fenced-code-aware heading audit preserve required README sections.
-- [ ] Run semantic lifecycle and touched-area audits, the full Kit test suite, benchmark, `npm run check`, `npm test`, Changesets status, and package pack inspection; the 37-file, 426-test Kit suite and every other gate passed, while `npm test` timed out at 300 seconds after 37 unrelated failures in Pi Sync (31), Pi Starship (2), Pi Subagents (2), Pi GitHub PR (1), and Pi Fleet (1).
+- [ ] Run semantic lifecycle and touched-area audits, the full Kit test suite, benchmark, `npm run check`, `npm test`, Changesets status, and package pack inspection; the 37-file, 426-test Kit suite and every other gate passed, while the latest `npm test` attempt timed out at 300 seconds after 42 unrelated failures in Pi Sync (31), Pi LSP (6), Pi Subagents (2), Pi GitHub PR (1), Pi Fleet (1), and Pi Starship (1).
 
 ## Completion Checklist
 

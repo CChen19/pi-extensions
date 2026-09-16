@@ -193,7 +193,7 @@ function internalDoneId(items: readonly MultiSelectItem[]): string {
 function validateOptions<Item extends MultiSelectItem, Context extends MenuContext>(
   options: RunMultiSelectOptions<Item, Context>,
 ): Error | undefined {
-  if (!options.title.trim()) return new Error("Multi-select title must not be empty");
+  if (!safeMenuText(options.title)) return new Error("Multi-select title must be displayable");
   if (options.viewportSize !== undefined && (!Number.isInteger(options.viewportSize) || options.viewportSize <= 0)) {
     return new Error("Multi-select viewportSize must be a positive integer");
   }
@@ -205,6 +205,7 @@ function validateOptions<Item extends MultiSelectItem, Context extends MenuConte
     if (!item.id.trim()) return new Error("Multi-select item ids must not be blank");
     if (ids.has(item.id)) return new Error(`Duplicate multi-select item id: ${item.id}`);
     ids.add(item.id);
+    if (!safeMenuText(item.label)) return new Error(`Multi-select item ${item.id} requires a displayable label`);
   }
   return undefined;
 }

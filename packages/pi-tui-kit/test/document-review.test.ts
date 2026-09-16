@@ -133,13 +133,23 @@ test("runDocumentReview returns typed RPC cancellation, unsupported, validation,
     reason: "close",
   });
 
+  const unexpectedCtx = createMockContext({ mode: "rpc", hasUI: true, select: async () => "not offered" }).ctx;
+  const unexpected = await runDocumentReview(unexpectedCtx, { title: "Review", content: "body" });
+  assert.equal(unexpected.kind, "error");
+  assert.match(unexpected.kind === "error" ? String(unexpected.error) : "", /option that was not offered/u);
+
   const printCtx = createMockContext({ mode: "print", hasUI: false }).ctx;
   assert.deepEqual(await runDocumentReview(printCtx, { title: "Review", content: "body" }), {
     kind: "unsupported",
     mode: "print",
   });
-  const invalid = await runDocumentReview(printCtx, { title: "", content: "body" });
-  assert.equal(invalid.kind, "error");
+  for (const invalidOptions of [
+    { title: "\u0001", content: "body" },
+    { title: "Review", content: "body", confirmation: { label: "\u0001" } },
+  ]) {
+    const invalid = await runDocumentReview(printCtx, invalidOptions);
+    assert.equal(invalid.kind, "error");
+  }
 
   let current = true;
   const staleRpc = createRpcHarness([{ kind: "select", response: "Back" }]);

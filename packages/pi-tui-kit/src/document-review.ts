@@ -127,10 +127,16 @@ async function runRpcDocumentReview<Context extends MenuContext>(
       return documentReviewError(ctx, options, error);
     }
     if (!isCurrent(options) || options.signal?.aborted) return { kind: "stale" };
+    if (selectedLabel === undefined) return { kind: "cancelled", reason: screen.hint ?? "back" };
     const selected = choices.find((choice) => choice.label === selectedLabel);
-    if (!selected || selected.kind === "cancel") {
-      return { kind: "cancelled", reason: screen.hint ?? "back" };
+    if (!selected) {
+      return documentReviewError(
+        ctx,
+        options,
+        new Error("Document review dialog returned an option that was not offered"),
+      );
     }
+    if (selected.kind === "cancel") return { kind: "cancelled", reason: screen.hint ?? "back" };
     if (selected.kind === "confirm") return { kind: "confirmed" };
     if (selected.kind === "previous") pageIndex = Math.max(0, pageIndex - 1);
     else pageIndex = Math.min(pages.length - 1, pageIndex + 1);
@@ -176,7 +182,7 @@ function uniqueLabel(label: string, used: Set<string>): string {
 }
 
 function validateOptions<Context extends MenuContext>(options: RunDocumentReviewOptions<Context>): Error | undefined {
-  if (!options.title.trim()) return new Error("Document review title must not be empty");
+  if (!safeMenuText(options.title)) return new Error("Document review title must be displayable");
   if (
     options.viewportSize !== undefined &&
     options.viewportSize !== "adaptive" &&
@@ -188,8 +194,8 @@ function validateOptions<Context extends MenuContext>(options: RunDocumentReview
       `Document review viewportSize must be "adaptive" or a positive integer no greater than ${MAX_REVIEW_VIEWPORT_SIZE}`,
     );
   }
-  if (options.confirmation && !options.confirmation.label.trim()) {
-    return new Error("Document review confirmation label must not be empty");
+  if (options.confirmation && !safeMenuText(options.confirmation.label)) {
+    return new Error("Document review confirmation label must be displayable");
   }
   return undefined;
 }
