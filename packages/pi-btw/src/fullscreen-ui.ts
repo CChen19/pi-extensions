@@ -408,6 +408,7 @@ class BtwFullscreenHost<T> implements Component {
   private cancelActiveCustom: (() => void) | undefined;
   private hardCancelActiveCustom: (() => void) | undefined;
   private removeHardCancelListener: (() => void) | undefined;
+  private removeUpstreamAbortListener: (() => void) | undefined;
   private started = false;
   private disposed = false;
   private finished = false;
@@ -453,6 +454,7 @@ class BtwFullscreenHost<T> implements Component {
   private async start(): Promise<void> {
     if (this.started || this.finished) return;
     this.started = true;
+    this.watchUpstreamCancellation();
     let outcome: FullscreenOutcome<T>;
     try {
       if (this.disposed) throw new FullscreenUiDisposedError();
@@ -522,6 +524,15 @@ class BtwFullscreenHost<T> implements Component {
     this.done(outcome);
   }
 
+  private watchUpstreamCancellation(): void {
+    const signal = this.ctx.signal;
+    if (!signal) return;
+    const onAbort = () => this.dispose();
+    signal.addEventListener("abort", onAbort, { once: true });
+    this.removeUpstreamAbortListener = () => signal.removeEventListener("abort", onAbort);
+    if (signal.aborted) onAbort();
+  }
+
   private queueParentRestore(): void {
     if (this.parentRestoreQueued || this.parentRestoreAttempted) return;
     this.parentRestoreQueued = true;
@@ -537,6 +548,13 @@ class BtwFullscreenHost<T> implements Component {
   }
 
   private restoreParent(): void {
+    const removeUpstreamAbortListener = this.removeUpstreamAbortListener;
+    this.removeUpstreamAbortListener = undefined;
+    try {
+      removeUpstreamAbortListener?.();
+    } catch (error) {
+      this.cleanupError ??= error;
+    }
     const removeHardCancelListener = this.removeHardCancelListener;
     this.removeHardCancelListener = undefined;
     try {
@@ -587,10 +605,13 @@ class BtwFullscreenHost<T> implements Component {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    const signal = this.ctx.signal
+      ? AbortSignal.any([this.ctx.signal, this.lifetimeController.signal])
+      : this.lifetimeController.signal;
     return new Proxy(this.ctx, {
       get: (target, property) => {
         if (property === "ui") return ui;
-        if (property === "signal") return this.lifetimeController.signal;
+        if (property === "signal") return signal;
         return Reflect.get(target, property, target);
       },
     });
