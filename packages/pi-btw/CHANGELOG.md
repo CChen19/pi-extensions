@@ -8,8 +8,7 @@
 
 ### Patch Changes
 
-- Updated dependencies [9ad07cf]
-  - @narumitw/pi-tui-kit@0.65.0
+- ddaccd2: Complete `/btw` fullscreen cancellation by forwarding upstream aborts, closing mounted composers, restoring the parent TUI, and stopping lazy Mermaid transcript preparation when cancelled.
 
 ## 0.58.1
 
