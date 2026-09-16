@@ -14,7 +14,7 @@ Consumers reuse its navigation, rendering, cancellation, and mode adaptation ins
 - Adds opt-in live-choice search, editable input prefill, one-for-one intraline diff emphasis, and masked TUI secret entry.
 - Adapts shared menu and interaction flows across Pi TUI and RPC modes without using plaintext fallback for secrets.
 - Handles interaction navigation, cancellation, disposal, horizontal framing, and width-safe rendering.
-- Provides task, confirmation, questionnaire, live-choice, secret-input, custom-interaction, terminal-document, terminal-text, interaction-hint, editor-status-widget, horizontal-rule, and testing helpers.
+- Provides task, confirmation, questionnaire, live-choice, secret-input, custom-interaction, Mermaid Markdown, terminal-document, terminal-text, interaction-hint, editor-status-widget, horizontal-rule, and testing helpers.
 - Publishes built ESM and TypeScript declarations for independently installable extensions.
 
 ## 📦 Install
@@ -27,8 +27,8 @@ npm install @narumitw/pi-tui-kit
 
 The published package contains built ESM and declarations in `dist/`; consumers do not need a TypeScript loader for dependencies.
 The package root remains the supported entrypoint for menus and interaction runners.
-When startup does not need the full Kit runtime, import a lightweight display-helper subpath.
-The available subpaths are `editor-status-widget`, `terminal-document`, `terminal-text`, and `interaction-hints` under `@narumitw/pi-tui-kit`.
+When startup does not need the full Kit runtime, import a focused subpath.
+The available subpaths are `editor-status-widget`, `interaction-hints`, `markdown`, `terminal-document`, and `terminal-text` under `@narumitw/pi-tui-kit`.
 
 ## 🚀 Quick start
 
@@ -80,6 +80,9 @@ The shared API owns only a masked TUI draft and typed lifecycle result; credenti
 RPC has no masked input field, so `runSecretInput()` returns `unsupported` without opening `ctx.ui.input()`.
 This release leaves both consumers unchanged until the Kit API is published, and a later Langfuse migration must explicitly resolve its existing plaintext RPC setup behavior.
 
+The public Mermaid Markdown transformer uses the same pre-adoption rule for `pi-btw` side-thread transcripts.
+This release exposes and verifies the Kit API without changing that extension; `pi-btw` can raise its Kit floor only after this API is published.
+
 ## ⚡ Runtime performance
 
 The production JavaScript imports Pi TUI at runtime and keeps Pi Coding Agent imports type-only.
@@ -87,12 +90,13 @@ This avoids evaluating a second coding-agent runtime when a source-loaded extens
 Borders and task loaders use public Pi TUI primitives with the theme and keybindings from the active UI callback.
 Code review loads the complete declared syntax highlighter synchronously on first use and applies that callback theme.
 Root imports, ordinary menus, task frames, and Markdown-only reviews do not load the highlighter.
-Mermaid rendering loads its declared renderer only before the first screen with an enabled Mermaid fence.
+Mermaid rendering loads its declared renderer only before the first screen or public transformer preparation with an enabled top-level Mermaid fence.
+The `/markdown` module itself does not load `grok-mermaid`; consumers await preparation, revalidate ownership, and then create a synchronous transformer.
 
-The `editor-status-widget`, `terminal-document`, `terminal-text`, and `interaction-hints` subpaths expose focused ESM and declaration graphs.
+The `editor-status-widget`, `interaction-hints`, `markdown`, `terminal-document`, and `terminal-text` subpaths expose focused ESM and declaration graphs.
 The package root retains every existing export for compatibility.
 
-Repository maintainers can benchmark cold root and lightweight-subpath imports plus first action, code-review, Mermaid, and task frames in fresh serial processes:
+Repository maintainers can benchmark cold root and focused-subpath imports plus first action, code-review, Mermaid, and task frames in fresh serial processes:
 
 ```bash
 npm run build --workspace @narumitw/pi-tui-kit
@@ -112,7 +116,8 @@ The [API reference](./docs/api.md) contains the complete examples and contracts:
 - [Runtime and modes](./docs/api.md#-runtime-and-mode-behavior) — TUI/RPC adaptation, result types, cancellation, and session ownership.
 - [Ownership boundary](./docs/api.md#-ownership-boundary) — what Kit owns and what each extension must keep local.
 - [Testing](./docs/api.md#-supported-testing-entrypoint) — the public `/testing` subpath and TUI/RPC harnesses.
-- [Public exports and compatibility history](./docs/api.md#-public-api) — helpers, types, lightweight subpaths, and API-version changes.
+- [Mermaid Markdown transformers](./docs/api.md#mermaid-markdown-transformers) — lazy preparation, final-message transformation, fallback behavior, and lifecycle ownership.
+- [Public exports and compatibility history](./docs/api.md#-public-api) — helpers, types, focused subpaths, and API-version changes.
 - [Horizontal rules](./docs/api.md#-horizontal-rules) and [editor status widgets](./docs/api.md#-editor-status-widgets) — passive, width-safe presentation components.
 
 The consuming extension owns domain state, persistence, confirmations, and session signals.

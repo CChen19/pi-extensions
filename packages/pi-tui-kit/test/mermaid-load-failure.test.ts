@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { test, vi } from "vitest";
 import { createMockContext } from "../../../test/support.js";
-import { defineMenu, runMenu } from "../src/index.js";
+import { createMermaidMarkdownTransformer, defineMenu, prepareMermaidMarkdownRenderer, runMenu } from "../src/index.js";
 import { createTuiHarness } from "../src/testing/index.js";
 
 vi.mock("grok-mermaid", () => {
@@ -32,6 +32,14 @@ test("a Mermaid module load failure degrades to sanitized fenced source", async 
   assert.match(rendered, /flowchart LR/u);
   assert.match(rendered, /unsafetext/u);
   assert.doesNotMatch(rendered, /https:\/\/unsafe\.example/u);
+  assert.equal(
+    createMermaidMarkdownTransformer({
+      fg: (_role, text) => text,
+      bold: (text) => text,
+    }),
+    undefined,
+  );
+  assert.equal(prepareMermaidMarkdownRenderer("```mermaid\nflowchart LR\n A --> B\n```"), undefined);
   tui.press("tui.select.cancel");
   assert.deepEqual(await running, { kind: "closed", reason: "back" });
 });

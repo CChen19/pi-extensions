@@ -34,6 +34,11 @@ export {
   type RunLiveChoiceResult,
   runLiveChoice,
 } from "./live-choice.js";
+export {
+  createMermaidMarkdownTransformer,
+  type MermaidMarkdownTheme,
+  prepareMermaidMarkdownRenderer,
+} from "./markdown.js";
 export { defineMenu, resolveMenuScreen } from "./model.js";
 export { createMenuNavigator, type MenuNavigator } from "./navigator.js";
 export {
@@ -96,4 +101,4 @@ export type {
   SettingsScreen,
 } from "./types.js";
 
-export const PI_EXTENSION_MENU_API_VERSION = 18;
+export const PI_EXTENSION_MENU_API_VERSION = 19;
