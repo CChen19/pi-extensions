@@ -829,8 +829,10 @@ async function prepareCurrentTranscriptMarkdown(
 ): Promise<BtwMarkdownTransformers | undefined> {
   while (true) {
     const turnCount = thread.turns.length;
-    const createMarkdownTransformers = await prepareBtwTranscriptMarkdown(thread.turns, pendingQuestion);
-    if (ctx.signal?.aborted) return undefined;
+    const createMarkdownTransformers = ctx.signal
+      ? await prepareBtwTranscriptMarkdown(thread.turns, pendingQuestion, ctx.signal)
+      : await prepareBtwTranscriptMarkdown(thread.turns, pendingQuestion);
+    if (!createMarkdownTransformers || ctx.signal?.aborted) return undefined;
     if (thread.turns.length === turnCount) return createMarkdownTransformers;
   }
 }

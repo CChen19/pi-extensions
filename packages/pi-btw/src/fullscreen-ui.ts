@@ -587,10 +587,13 @@ class BtwFullscreenHost<T> implements Component {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    const signal = this.ctx.signal
+      ? AbortSignal.any([this.ctx.signal, this.lifetimeController.signal])
+      : this.lifetimeController.signal;
     return new Proxy(this.ctx, {
       get: (target, property) => {
         if (property === "ui") return ui;
-        if (property === "signal") return this.lifetimeController.signal;
+        if (property === "signal") return signal;
         return Reflect.get(target, property, target);
       },
     });

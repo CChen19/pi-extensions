@@ -59,6 +59,7 @@ function createHarness(
     layoutMountError?: Error;
     parentOverlayHideError?: Error;
     parentStartError?: Error;
+    signal?: AbortSignal;
   } = {},
 ) {
   const events: string[] = [];
@@ -132,6 +133,7 @@ function createHarness(
   const createTui: BtwFullscreenTuiFactory = () => fullscreen;
   const notifications: string[] = [];
   const ctx = {
+    signal: options.signal,
     ui: {
       custom: async (
         factory: (...args: never[]) => FakeComponent,
@@ -761,6 +763,36 @@ test("fullscreen disposal aborts owned preparation and restores the parent", asy
 
   assert.equal(await running, "closed");
   assert.equal(observedAbort, true);
+  assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
+  assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
+});
+
+test("upstream cancellation reaches fullscreen-owned work and restores the parent", async () => {
+  const controller = new AbortController();
+  const harness = createHarness({ signal: controller.signal });
+  let fullscreenSignal: AbortSignal | undefined;
+  const running = runBtwFullscreen(
+    harness.ctx,
+    async (ctx) => {
+      fullscreenSignal = ctx.signal;
+      assert.ok(fullscreenSignal);
+      await new Promise<void>((resolve) => {
+        fullscreenSignal?.addEventListener("abort", () => resolve(), { once: true });
+        if (fullscreenSignal?.aborted) resolve();
+      });
+      return "closed";
+    },
+    {},
+    { createTui: harness.createTui },
+  );
+  await flushAsyncWork();
+  assert.ok(fullscreenSignal);
+  assert.notEqual(fullscreenSignal, controller.signal);
+
+  controller.abort();
+
+  assert.equal(await running, "closed");
+  assert.equal(fullscreenSignal.aborted, true);
   assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
   assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
 });

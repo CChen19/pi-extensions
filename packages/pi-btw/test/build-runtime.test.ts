@@ -143,7 +143,7 @@ test("runtime builds are deterministic, mapped, external, and remove stale outpu
     }
     const entrySource = await readFile(join(first, "index.ts"), "utf8");
     assert.match(entrySource, /@narumitw\/pi-tui-kit\/markdown/u);
-    assert.match(entrySource, /await import\(MERMAID_MARKDOWN_MODULE\)/u);
+    assert.match(entrySource, /settleUnlessAborted\(\s*import\(MERMAID_MARKDOWN_MODULE\)/u);
     assert.doesNotMatch(entrySource, /from ["']@narumitw\/pi-tui-kit\/markdown["']/u);
     for (const output of Object.values(firstMetadata.outputs ?? {})) {
       for (const input of Object.keys(output.inputs ?? {})) {
