@@ -26,6 +26,18 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./confirmation": {
+      "types": "./dist/confirmation.d.ts",
+      "import": "./dist/confirmation.js"
+    },
+    "./custom-interaction": {
+      "types": "./dist/custom-interaction.d.ts",
+      "import": "./dist/custom-interaction.js"
+    },
+    "./document-review": {
+      "types": "./dist/document-review.d.ts",
+      "import": "./dist/document-review.js"
+    },
     "./editor-status-widget": {
       "types": "./dist/editor-status-widget.d.ts",
       "import": "./dist/editor-status-widget.js"
@@ -34,9 +46,29 @@
       "types": "./dist/interaction-hints.d.ts",
       "import": "./dist/interaction-hints.js"
     },
+    "./live-choice": {
+      "types": "./dist/live-choice.d.ts",
+      "import": "./dist/live-choice.js"
+    },
     "./markdown": {
       "types": "./dist/markdown.d.ts",
       "import": "./dist/markdown.js"
+    },
+    "./multi-select": {
+      "types": "./dist/multi-select.d.ts",
+      "import": "./dist/multi-select.js"
+    },
+    "./questionnaire": {
+      "types": "./dist/questionnaire.d.ts",
+      "import": "./dist/questionnaire.js"
+    },
+    "./selectors": {
+      "types": "./dist/pi-selectors.d.ts",
+      "import": "./dist/pi-selectors.js"
+    },
+    "./task": {
+      "types": "./dist/task.d.ts",
+      "import": "./dist/task.js"
     },
     "./terminal-document": {
       "types": "./dist/terminal-document.d.ts",
