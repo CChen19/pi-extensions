@@ -26,6 +26,7 @@ export type BtwSettingsLoadResult =
 
 export interface BtwSettingsPatch {
   keybindings?: BtwKeybindingOverrides;
+  model?: string;
   thinkingLevel?: BtwThinkingLevel;
   rememberThinkingLevelChanges?: boolean;
   fullscreenCopyOnSelect?: boolean;
@@ -253,6 +254,10 @@ function applyBtwSettingsPatch(current: SettingsDocument, patch: BtwSettingsPatc
     }
     if (Object.keys(keys).length) updated.keybindings = keys;
     else delete updated.keybindings;
+  }
+  if (Object.hasOwn(patch, "model")) {
+    if (patch.model === undefined) delete updated.model;
+    else updated.model = patch.model;
   }
   if (Object.hasOwn(patch, "thinkingLevel")) {
     if (patch.thinkingLevel === undefined) delete updated.thinkingLevel;

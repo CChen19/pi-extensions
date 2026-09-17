@@ -357,19 +357,8 @@ async function showCommandMenuForBtw(
   ctx: ExtensionCommandContext,
   resumeThreads: readonly BtwResumeThreadSummary[],
 ): Promise<BtwCommandMenuResult> {
-  const currentModel = ctx.model;
-  const availableModels = ctx.modelRegistry.getAll();
-  const currentThinkingLevel = pi.getThinkingLevel();
-  const loaded = await readBtwSettings();
-  const settings = loaded.kind === "loaded" ? loaded.settings : {};
-  const configured = settings.model ? parseBtwModelReference(settings.model) : undefined;
-  const configuredModel = configured
-    ? availableModels.find((model) => model.provider === configured.provider && model.id === configured.modelId)
-    : undefined;
-  const model = configuredModel ?? currentModel;
   return showBtwCommandMenu(ctx, {
-    currentThinkingLevel,
-    availableThinkingLevels: model ? getSupportedThinkingLevels(model) : BTW_THINKING_LEVELS,
+    currentThinkingLevel: pi.getThinkingLevel(),
     resumeThreads,
   });
 }

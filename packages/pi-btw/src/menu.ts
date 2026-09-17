@@ -1,4 +1,10 @@
-import type { ExtensionCommandContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { type Api, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
+import {
+  BorderedLoader,
+  type ExtensionCommandContext,
+  type KeybindingsManager,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { MenuContext, RunMenuResult } from "@narumitw/pi-tui-kit";
 import {
@@ -14,6 +20,7 @@ import {
   btwSettingsPath,
   effectiveFullscreenCopyOnSelect,
   effectiveRememberThinkingLevelChanges,
+  parseBtwModelReference,
   readBtwSettings,
   type UpdateBtwSettingsOptions,
   updateBtwSettings,
@@ -35,7 +42,11 @@ export interface BtwResumeThreadSummary {
 
 export interface ShowBtwCommandMenuOptions {
   currentThinkingLevel: BtwThinkingLevel;
-  availableThinkingLevels: readonly BtwThinkingLevel[];
+  /** Deterministic test override; production derives levels from each selected model. */
+  availableThinkingLevels?: readonly BtwThinkingLevel[];
+  availableModels?: readonly Model<Api>[];
+  currentModel?: Model<Api>;
+  scopedModels?: ExtensionCommandContext["scopedModels"];
   resumeThreads?: readonly BtwResumeThreadSummary[];
   settingsPath?: string;
   readSettings?: typeof readBtwSettings;
@@ -44,11 +55,13 @@ export interface ShowBtwCommandMenuOptions {
 
 export type BtwCommandMenuResult = "start" | "tree" | "closed" | { kind: "resume"; threadId: string };
 
-type BtwMenuScreen = "main" | "resume" | "settings" | "invalid" | "shortcut" | "shortcut-input";
+type BtwMenuScreen = "main" | "resume" | "settings" | "model" | "invalid" | "shortcut" | "shortcut-input";
 type BtwMenuAction =
   | "start"
   | "start-tree"
   | "resume"
+  | "open-model"
+  | "set-model"
   | "set-thinking"
   | "set-remember"
   | "set-fullscreen-copy"
@@ -70,15 +83,32 @@ export async function showBtwCommandMenu(
   options: ShowBtwCommandMenuOptions,
 ): Promise<BtwCommandMenuResult> {
   if (ctx.mode !== "tui") return "closed";
-  const { defineMenu, runMenu } = await import("@narumitw/pi-tui-kit");
+  const { defineMenu, runMenu, sanitizeTerminalText } = await import("@narumitw/pi-tui-kit");
   if (ctx.signal?.aborted) return "closed";
   const settingsPath = options.settingsPath ?? btwSettingsPath();
   const readSettings = options.readSettings ?? readBtwSettings;
   const updateSettings = options.updateSettings ?? updateBtwSettings;
-  const levels =
-    options.availableThinkingLevels.length > 0
-      ? [...options.availableThinkingLevels]
-      : (["off"] satisfies BtwThinkingLevel[]);
+  const getAvailable = ctx.modelRegistry.getAvailable;
+  const allAvailableModels = deduplicateModels(
+    options.availableModels ??
+      (typeof getAvailable === "function" ? getAvailable.call(ctx.modelRegistry) : ctx.modelRegistry.getAll()),
+  );
+  const currentModel = options.currentModel ?? ctx.model;
+  const scopedModels = options.scopedModels ?? ctx.scopedModels ?? [];
+  const selectableModels = availableModelsInScope(allAvailableModels, scopedModels);
+  const modelItemIds = new Map(selectableModels.map((model, index) => [model, `btw-settings-model:${index}`]));
+  const modelsByItemId = new Map(selectableModels.map((model) => [modelItemIds.get(model) as string, model]));
+  const safeModelMetadata = (value: string, fallback: string): string => {
+    const safe = sanitizeTerminalText(value).trim() || fallback;
+    return [...safe].slice(0, 512).join("");
+  };
+  const displayModelReference = (model: Pick<Model<Api>, "provider" | "id">): string =>
+    `${safeModelMetadata(model.id, "unknown model")} [${safeModelMetadata(model.provider, "unknown provider")}]`;
+  const rawModelReference = (model: Pick<Model<Api>, "provider" | "id">): string | undefined => {
+    const reference = `${model.provider}/${model.id}`;
+    const parsed = parseBtwModelReference(reference);
+    return parsed?.provider === model.provider && parsed.modelId === model.id ? reference : undefined;
+  };
   const displaySettingsPath = sanitizeSingleLine(settingsPath);
   const resumeThreads = options.resumeThreads ?? [];
   let startSelected = false;
@@ -139,6 +169,53 @@ export async function showBtwCommandMenu(
     }
   };
 
+  const saveModel = async (
+    model: Model<Api> | undefined,
+    signal: AbortSignal,
+  ): Promise<{ kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown }> => {
+    const modelReference = model ? rawModelReference(model) : undefined;
+    if (model && !modelReference) return { kind: "cancelled" };
+    const result = await ctx.ui.custom<{ kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown }>(
+      (tui, theme, _keybindings, done) => {
+        const loader = new BorderedLoader(tui, theme, "Saving Pi BTW model...");
+        const ownerController = new AbortController();
+        const saveSignal = AbortSignal.any([signal, loader.signal, ownerController.signal]);
+        let settled = false;
+        const finish = (value: { kind: "saved" } | { kind: "cancelled" } | { kind: "failed"; error: unknown }) => {
+          if (settled) return;
+          settled = true;
+          done(value);
+        };
+        const cancel = () => finish({ kind: "cancelled" });
+        loader.onAbort = cancel;
+        saveSignal.addEventListener("abort", cancel, { once: true });
+        queueMicrotask(() => {
+          void (async () => {
+            // Let the host mount the loader before a synchronous test double or cached write can settle it.
+            await Promise.resolve();
+            if (saveSignal.aborted) return;
+            try {
+              await updateSettings({ model: modelReference }, { settingsPath, signal: saveSignal });
+              finish({ kind: "saved" });
+            } catch (error) {
+              finish(saveSignal.aborted ? { kind: "cancelled" } : { kind: "failed", error });
+            }
+          })();
+        });
+        return {
+          render: (width: number) => loader.render(width),
+          invalidate: () => loader.invalidate(),
+          handleInput: (data: string) => loader.handleInput(data),
+          dispose() {
+            ownerController.abort(new DOMException("Pi BTW model save disposed", "AbortError"));
+            loader.dispose();
+          },
+        };
+      },
+    );
+    return result ?? { kind: "cancelled" };
+  };
+
   const loadState = async (): Promise<BtwMenuState> => {
     const loaded = await readSettings(settingsPath);
     if (loaded.kind === "invalid") {
@@ -146,19 +223,104 @@ export async function showBtwCommandMenu(
     }
     return { kind: "valid", settings: loaded.kind === "loaded" ? loaded.settings : {} };
   };
-  const currentMainThinkingLevel = clampToAvailableThinkingLevel(options.currentThinkingLevel, levels);
+  const configuredModel = (settings: BtwSettings): Model<Api> | undefined => {
+    if (!settings.model) return undefined;
+    const reference = parseBtwModelReference(settings.model);
+    return reference
+      ? allAvailableModels.find((model) => model.provider === reference.provider && model.id === reference.modelId)
+      : undefined;
+  };
+  const selectableConfiguredModel = (settings: BtwSettings): Model<Api> | undefined => {
+    const configured = configuredModel(settings);
+    return configured ? selectableModels.find((model) => sameModel(model, configured)) : undefined;
+  };
+  const thinkingLevels = (settings: BtwSettings): BtwThinkingLevel[] => {
+    const overridden = options.availableThinkingLevels;
+    const effectiveModel = configuredModel(settings) ?? currentModel;
+    const available =
+      overridden && overridden.length > 0
+        ? overridden
+        : effectiveModel
+          ? getSupportedThinkingLevels(effectiveModel)
+          : BTW_THINKING_LEVELS;
+    return available.length > 0 ? [...available] : ["off"];
+  };
+  const currentMainThinkingLevel = (settings: BtwSettings): BtwThinkingLevel =>
+    clampToAvailableThinkingLevel(options.currentThinkingLevel, thinkingLevels(settings));
   const displayThinkingLevel = (settings: BtwSettings): string =>
     settings.thinkingLevel === undefined
       ? SAME_AS_MAIN_THREAD
-      : clampToAvailableThinkingLevel(settings.thinkingLevel, levels);
+      : clampToAvailableThinkingLevel(settings.thinkingLevel, thinkingLevels(settings));
   const displayThinkingSummary = (settings: BtwSettings): string =>
     settings.thinkingLevel === undefined
-      ? `${SAME_AS_MAIN_THREAD} (currently ${currentMainThinkingLevel})`
+      ? `${SAME_AS_MAIN_THREAD} (currently ${currentMainThinkingLevel(settings)})`
       : displayThinkingLevel(settings);
   const displayRememberSummary = (settings: BtwSettings): string => {
     const value = effectiveRememberThinkingLevelChanges(settings) ? "On" : "Off";
     return settings.thinkingLevel === undefined ? `${value} (fixed levels only)` : value;
   };
+  const displayModelValue = (settings: BtwSettings): string => {
+    if (!settings.model) {
+      return currentModel ? `${SAME_AS_MAIN_THREAD} (${displayModelReference(currentModel)})` : SAME_AS_MAIN_THREAD;
+    }
+    const available = configuredModel(settings);
+    if (!available) return `${SAME_AS_MAIN_THREAD} · ${safeModelMetadata(settings.model, "unknown model")} unavailable`;
+    const reference = displayModelReference(available);
+    return selectableConfiguredModel(settings) ? reference : `${reference} · outside current scope`;
+  };
+  const modelItems = (settings: BtwSettings) => {
+    const configured = configuredModel(settings);
+    const selectable = selectableConfiguredModel(settings);
+    const retained = settings.model && !selectable;
+    return [
+      {
+        id: "same-as-main",
+        label: SAME_AS_MAIN_THREAD,
+        description: currentModel
+          ? `Currently ${displayModelReference(currentModel)}`
+          : "Use the main thread model when /btw starts.",
+      },
+      ...selectableModels.map((model) => {
+        const reference = displayModelReference(model);
+        const name = safeModelMetadata(model.name ?? "", "");
+        const validReference = rawModelReference(model);
+        return {
+          id: modelItemIds.get(model) as string,
+          label: reference,
+          ...(name ? { details: [`Model Name: ${name}`] } : {}),
+          searchText: [reference, name].filter(Boolean).join(" "),
+          ...(!validReference
+            ? {
+                disabled: true,
+                disabledReason: "This model identity cannot be stored in pi-btw.json.",
+              }
+            : {}),
+        };
+      }),
+      ...(retained
+        ? [
+            {
+              id: "configured-model",
+              label: configured
+                ? displayModelReference(configured)
+                : safeModelMetadata(settings.model as string, "unknown model"),
+              ...(configured
+                ? { description: "Configured outside the current model scope; retained until changed." }
+                : {
+                    disabled: true,
+                    disabledReason: "Configured model is unavailable; /btw falls back to the main model.",
+                  }),
+            },
+          ]
+        : []),
+    ];
+  };
+  const selectedModelItemId = (settings: BtwSettings): string => {
+    const selected = selectableConfiguredModel(settings);
+    return selected ? (modelItemIds.get(selected) as string) : settings.model ? "configured-model" : "same-as-main";
+  };
+  const currentModelItemId = (settings: BtwSettings): string =>
+    settings.model && configuredModel(settings) ? selectedModelItemId(settings) : "same-as-main";
 
   const menu = defineMenu<BtwMenuState, BtwMenuScreen, BtwMenuAction, MenuContext>({
     start: "main",
@@ -167,6 +329,7 @@ export async function showBtwCommandMenu(
         kind: "actions",
         title: "Pi BTW",
         lines: [
+          `Model: ${displayModelValue(state.settings)}`,
           `Thinking: ${displayThinkingSummary(state.settings)} · Remember changes: ${displayRememberSummary(state.settings)}`,
           `Copy on select: ${effectiveFullscreenCopyOnSelect(state.settings) ? "On" : "Off"}`,
         ],
@@ -196,7 +359,7 @@ export async function showBtwCommandMenu(
           {
             id: "settings",
             label: "Settings",
-            description: "Choose thinking, keybindings, and selection copying",
+            description: "Choose model, thinking, keybindings, and selection copying",
             to: state.kind === "invalid" ? "invalid" : "settings",
           },
         ],
@@ -221,11 +384,18 @@ export async function showBtwCommandMenu(
         lines: [`User settings · ${displaySettingsPath}`],
         items: [
           {
+            id: "model",
+            label: "Model",
+            description: "Choose the model for future pi-btw side threads without changing the main session.",
+            currentValue: displayModelValue(state.settings),
+            action: "open-model",
+          },
+          {
             id: "thinkingLevel",
             label: "Thinking level",
-            description: `Set the starting level for future pi-btw side threads. Currently ${currentMainThinkingLevel}.`,
+            description: `Set the starting level for future pi-btw side threads. Currently ${currentMainThinkingLevel(state.settings)}.`,
             currentValue: displayThinkingLevel(state.settings),
-            values: [SAME_AS_MAIN_THREAD, ...levels],
+            values: [SAME_AS_MAIN_THREAD, ...thinkingLevels(state.settings)],
             action: "set-thinking",
           },
           {
@@ -252,6 +422,23 @@ export async function showBtwCommandMenu(
             action: "edit-shortcut" as const,
           })),
         ],
+      }),
+      model: ({ state }) => ({
+        kind: "choice",
+        title: "Pi BTW Model",
+        lines: [
+          "Same as main thread is the default and fallback when a configured model is unavailable.",
+          ...(state.settings.model && !selectableConfiguredModel(state.settings)
+            ? [`Configured: ${displayModelValue(state.settings)}`]
+            : []),
+        ],
+        items: modelItems(state.settings),
+        action: "set-model",
+        currentItemId: currentModelItemId(state.settings),
+        initialItemId: selectedModelItemId(state.settings),
+        enableSearch: true,
+        viewportSize: 10,
+        hint: "back",
       }),
       shortcut: ({ state }) => ({
         kind: "actions",
@@ -289,6 +476,26 @@ export async function showBtwCommandMenu(
       },
       "save-shortcut": ({ state, value, signal }) => saveShortcut(state, value?.trim() ?? "", signal),
       "reset-shortcut": ({ state, signal }) => saveShortcut(state, undefined, signal),
+      "open-model": async () => ({ kind: "to", screen: "model" }),
+      "set-model": async ({ state, itemId, signal }) => {
+        if (itemId === "configured-model" && configuredModel(state.settings)) {
+          return { kind: "back" };
+        }
+        const model = itemId ? modelsByItemId.get(itemId) : undefined;
+        if (itemId !== "same-as-main" && (!model || !rawModelReference(model))) return { kind: "rejected" };
+        const result = await saveModel(model, signal);
+        if (result.kind === "failed") {
+          notifySaveFailure(ctx, result.error);
+          return { kind: "rejected" };
+        }
+        if (result.kind === "cancelled" || signal.aborted) return { kind: "close" };
+        notifySafely(
+          ctx,
+          model ? `Pi BTW model: ${displayModelReference(model)}.` : `Pi BTW model: ${SAME_AS_MAIN_THREAD}.`,
+          "info",
+        );
+        return { kind: "back" };
+      },
       start: async () => {
         startSelected = true;
         return { kind: "close" };
@@ -304,8 +511,9 @@ export async function showBtwCommandMenu(
         resumedThreadId = itemId;
         return { kind: "close" } as const;
       },
-      "set-thinking": async ({ value, signal }) => {
+      "set-thinking": async ({ state, value, signal }) => {
         if (!value) return { kind: "rejected" };
+        const levels = thinkingLevels(state.settings);
         const patch =
           value === SAME_AS_MAIN_THREAD
             ? ({ thinkingLevel: undefined } satisfies BtwSettingsPatch)
@@ -427,6 +635,27 @@ export async function runBtwMenuPreservingEditor(
     }
   }
   return result;
+}
+
+function deduplicateModels(models: readonly Model<Api>[]): Model<Api>[] {
+  return models.filter((model, index) => models.findIndex((candidate) => sameModel(candidate, model)) === index);
+}
+
+function availableModelsInScope(
+  availableModels: readonly Model<Api>[],
+  scopedModels: ExtensionCommandContext["scopedModels"],
+): Model<Api>[] {
+  if (scopedModels.length === 0) return [...availableModels];
+  return deduplicateModels(
+    scopedModels.flatMap((entry) => {
+      const available = availableModels.find((model) => sameModel(model, entry.model));
+      return available ? [available] : [];
+    }),
+  );
+}
+
+function sameModel(left: Pick<Model<Api>, "provider" | "id">, right: Pick<Model<Api>, "provider" | "id">): boolean {
+  return left.provider === right.provider && left.id === right.id;
 }
 
 function clampToAvailableThinkingLevel(

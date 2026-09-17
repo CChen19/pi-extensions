@@ -59,7 +59,11 @@ Read the [workflow guide](./docs/workflows.md) for context selection, copying, s
 ## ⚙️ Settings
 
 By default, `/btw` uses the current session model.
-To use an independent model for side questions, create:
+Open `/btw` → **Settings** → **Model** to choose an available model or **Same as main thread** to remove the override.
+The searchable picker follows the current Pi model scope and saves immediately without changing the main session model.
+A manually configured available model outside that scope remains active and visible until you explicitly choose another option.
+
+You can also edit the user settings file directly:
 
 ```text
 $PI_CODING_AGENT_DIR/pi-btw.json
@@ -83,6 +87,7 @@ The configured model must exist in Pi's model registry and have usable credentia
 If it is missing or unauthenticated, pi-btw warns and falls back to the current session model.
 If neither model is available, `/btw` reports an error and stops.
 This selection affects only `/btw`; it does not change the main session model.
+Model changes apply when the next new or resumed side thread starts.
 
 Pi calls its reasoning setting the **thinking level**.
 In Settings, choose **Same as main thread** to start each new side thread from the main thread's current thinking level.
