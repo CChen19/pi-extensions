@@ -118,7 +118,8 @@ test("btw menu falls back when model availability and scope APIs are absent", as
   await withMenu(async ({ settingsPath, tui, ctx }) => {
     const legacyModel = { provider: "legacy", id: "side", name: "Legacy side model" } as Model<Api>;
     let allModelReads = 0;
-    const legacyRegistry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+    const legacyRegistry = ctx.modelRegistry as unknown as {
+      getAll: typeof ctx.modelRegistry.getAll;
       getAvailable?: typeof ctx.modelRegistry.getAvailable;
     };
     legacyRegistry.getAll = () => {
