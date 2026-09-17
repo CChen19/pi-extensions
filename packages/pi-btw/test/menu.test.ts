@@ -492,6 +492,12 @@ test("btw settings select and reset a model while refreshing effective thinking 
     });
     assert.match(tui.render(160).join("\n"), /Model\s+Same as main thread \(main \[anthropic\]\)/u);
     assert.match(tui.render(160).join("\n"), /Thinking level\s+high/u);
+    tui.press("tui.select.cancel");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    const mainMenu = tui.render(160).join("\n");
+    assert.match(mainMenu, /Start side thread/u);
+    assert.doesNotMatch(mainMenu, /Pi BTW Model/u);
     tui.press("ctrl+c");
     assert.equal(await running, "closed");
     assert.equal(ctx.ui.getEditorText(), "draft");
@@ -540,6 +546,22 @@ test("btw model settings honor scope and preserve an out-of-scope configured mod
     assert.doesNotMatch(selector, /hidden|payload/u);
     assert.equal(selector.includes("\u001b"), false);
     assert.equal(selector.includes("\u202e"), false);
+
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(tui.render(160).join("\n"), /Pi BTW Settings/u));
+    tui.press("tui.select.cancel");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    const mainMenu = tui.render(160).join("\n");
+    assert.match(mainMenu, /Start side thread/u);
+    assert.doesNotMatch(mainMenu, /Pi BTW Model/u);
+
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
     tui.type("specialist");
     const filtered = stripVTControlCharacters(tui.render(160).join("\n"));
     assert.match(filtered, /side \[inside\]/u);

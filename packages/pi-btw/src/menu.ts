@@ -479,7 +479,7 @@ export async function showBtwCommandMenu(
       "open-model": async () => ({ kind: "to", screen: "model" }),
       "set-model": async ({ state, itemId, signal }) => {
         if (itemId === "configured-model" && configuredModel(state.settings)) {
-          return { kind: "to", screen: "settings" };
+          return { kind: "back" };
         }
         const model = itemId ? modelsByItemId.get(itemId) : undefined;
         if (itemId !== "same-as-main" && (!model || !rawModelReference(model))) return { kind: "rejected" };
@@ -494,7 +494,7 @@ export async function showBtwCommandMenu(
           model ? `Pi BTW model: ${displayModelReference(model)}.` : `Pi BTW model: ${SAME_AS_MAIN_THREAD}.`,
           "info",
         );
-        return { kind: "to", screen: "settings" };
+        return { kind: "back" };
       },
       start: async () => {
         startSelected = true;
