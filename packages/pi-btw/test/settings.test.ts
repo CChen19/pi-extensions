@@ -64,6 +64,24 @@ test("btw settings preserve omitted thinking levels for backward compatibility",
   });
 });
 
+test("btw settings can set, replace, and clear a model while preserving unknown fields", async () => {
+  await withTempSettings(async (settingsPath) => {
+    await updateBtwSettings({ model: "anthropic/main" }, { settingsPath });
+    await writeFile(settingsPath, '{"model":"anthropic/main","future":{"kept":true}}\n', "utf8");
+
+    await updateBtwSettings({ model: "openrouter/anthropic/side" }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      model: "openrouter/anthropic/side",
+      future: { kept: true },
+    });
+
+    await updateBtwSettings({ model: undefined }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      future: { kept: true },
+    });
+  });
+});
+
 test("btw settings can clear thinking level while preserving other fields", async () => {
   await withTempSettings(async (settingsPath) => {
     await updateBtwSettings({ thinkingLevel: "low", rememberThinkingLevelChanges: false }, { settingsPath });
