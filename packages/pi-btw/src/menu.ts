@@ -88,9 +88,13 @@ export async function showBtwCommandMenu(
   const settingsPath = options.settingsPath ?? btwSettingsPath();
   const readSettings = options.readSettings ?? readBtwSettings;
   const updateSettings = options.updateSettings ?? updateBtwSettings;
-  const allAvailableModels = deduplicateModels(options.availableModels ?? ctx.modelRegistry.getAvailable());
+  const getAvailable = ctx.modelRegistry.getAvailable;
+  const allAvailableModels = deduplicateModels(
+    options.availableModels ??
+      (typeof getAvailable === "function" ? getAvailable.call(ctx.modelRegistry) : ctx.modelRegistry.getAll()),
+  );
   const currentModel = options.currentModel ?? ctx.model;
-  const scopedModels = options.scopedModels ?? ctx.scopedModels;
+  const scopedModels = options.scopedModels ?? ctx.scopedModels ?? [];
   const selectableModels = availableModelsInScope(allAvailableModels, scopedModels);
   const modelItemIds = new Map(selectableModels.map((model, index) => [model, `btw-settings-model:${index}`]));
   const modelsByItemId = new Map(selectableModels.map((model) => [modelItemIds.get(model) as string, model]));

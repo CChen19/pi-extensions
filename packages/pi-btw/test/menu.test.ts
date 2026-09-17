@@ -114,6 +114,39 @@ test("btw no-argument menu selects Start side thread first and preserves the edi
   });
 });
 
+test("btw menu falls back when model availability and scope APIs are absent", async () => {
+  await withMenu(async ({ settingsPath, tui, ctx }) => {
+    const legacyModel = { provider: "legacy", id: "side", name: "Legacy side model" } as Model<Api>;
+    let allModelReads = 0;
+    const legacyRegistry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+      getAvailable?: typeof ctx.modelRegistry.getAvailable;
+    };
+    legacyRegistry.getAll = () => {
+      allModelReads += 1;
+      return [legacyModel];
+    };
+    delete legacyRegistry.getAvailable;
+    delete (ctx as Partial<{ scopedModels: ExtensionCommandContext["scopedModels"] }>).scopedModels;
+
+    const running = showBtwCommandMenu(ctx, {
+      settingsPath,
+      currentThinkingLevel: "off",
+      currentModel: legacyModel,
+      availableThinkingLevels: ["off"],
+    });
+    await openSettings(tui);
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+
+    assert.equal(allModelReads, 1);
+    assert.match(tui.render(120).join("\n"), /side \[legacy\]/u);
+    tui.press("ctrl+c");
+    assert.equal(await running, "closed");
+    await assert.rejects(readFile(settingsPath, "utf8"), { code: "ENOENT" });
+  });
+});
+
 test("btw menu returns the main-thread tree action without changing settings or the editor", async () => {
   await withMenu(async ({ settingsPath, tui, ctx }) => {
     let settingsReads = 0;
