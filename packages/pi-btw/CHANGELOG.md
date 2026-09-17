@@ -1,5 +1,11 @@
 # @narumitw/pi-btw
 
+## 0.60.0
+
+### Minor Changes
+
+- c4d403b: Add a searchable model picker to `/btw` Settings with scoped available models, Same as main thread reset, and model-aware thinking choices.
+
 ## 0.59.0
 
 ### Minor Changes
