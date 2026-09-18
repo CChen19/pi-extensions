@@ -381,23 +381,25 @@ export function createContextManager(
   };
 
   const ensureLineage = (state: SessionState, ctx: ExtensionContext): ContextLineage => {
+    let lineage: ContextLineage;
     try {
       const persisted = state.lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
       if (persisted) {
-        state.lineage = persisted;
-        state.lineageFailed = false;
-        return persisted;
+        lineage = persisted;
+      } else {
+        const initial = createInitialContextState();
+        pi.appendEntry(CONTEXT_STATE_ENTRY_TYPE, initial);
+        lineage = initial;
       }
-      const initial = createInitialContextState();
-      pi.appendEntry(CONTEXT_STATE_ENTRY_TYPE, initial);
-      state.lineage = initial;
-      state.lineageFailed = false;
-      return initial;
     } catch (error) {
       state.lineageFailed = true;
       state.toolsAvailable = false;
       throw error;
     }
+    state.lineage = lineage;
+    state.lineageFailed = false;
+    state.toolsAvailable = (isConfigured() || state.removeToolsAtSettlement) && inspectToolUnit().complete;
+    return lineage;
   };
 
   const warnEnabled = (state: SessionState, ctx: ExtensionContext) => {

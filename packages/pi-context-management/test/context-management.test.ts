@@ -452,6 +452,15 @@ test("a failed initial lineage write is retried after menu rollback", async () =
     current.entries.filter((entry) => entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE).length,
     1,
   );
+  await assert.doesNotReject(() =>
+    tool(current, "context_management_get_context_remaining").execute(
+      "call-after-retry",
+      {},
+      undefined,
+      undefined,
+      current.current.ctx,
+    ),
+  );
 });
 
 test("a synthesized context contract stays at the durable conversation tail", async () => {
