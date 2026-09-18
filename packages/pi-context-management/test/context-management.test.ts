@@ -2667,7 +2667,7 @@ test("global re-enable restores activation in every deactivated session", async 
   assert.equal(current.mock.sentMessages.length, sentAfterActivation);
 });
 
-test("global re-enable activates a live session that started without lineage", async () => {
+test("global re-enable leaves a foreign no-lineage session inactive without scoped persistence", async () => {
   let selection = 0;
   const current = setup(false, undefined, {
     select: async (_title: string, options: string[]) => {
@@ -2704,27 +2704,40 @@ test("global re-enable activates a live session that started without lineage", a
 
   const context = current.mock.events.get("context")?.[0];
   assert.ok(context);
-  const sentBeforeActivation = current.mock.sentMessages.length;
-  const projected = (await context(
-    { type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) },
-    second.ctx,
-  )) as { messages: AgentMessage[] } | undefined;
-  const activation = projected?.messages.at(-1);
-  assert.ok(activation?.role === "custom");
-  assert.equal(activation.customType, CONTEXT_CONTRACT_MESSAGE_TYPE);
-  assert.equal(current.mock.sentMessages.length, sentBeforeActivation + 1);
-  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+  const sentBeforeProjection = current.mock.sentMessages.length;
+  const currentLineagesBeforeProjection = current.entries.filter(
+    (entry) => entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE,
+  ).length;
   assert.equal(
     await context({ type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) }, second.ctx),
     undefined,
   );
-  await assert.doesNotReject(() =>
+  assert.equal(current.mock.sentMessages.length, sentBeforeProjection);
+  assert.equal(
+    current.entries.filter((entry) => entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE).length,
+    currentLineagesBeforeProjection,
+  );
+  assert.equal(
+    secondEntries.filter((entry) => entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE).length,
+    0,
+  );
+  await assert.rejects(
     tool(current, "context_management_get_context_remaining").execute(
       "second-session-usage",
       {},
       undefined,
       undefined,
       second.ctx,
+    ),
+    /disabled/,
+  );
+  await assert.doesNotReject(() =>
+    tool(current, "context_management_get_context_remaining").execute(
+      "current-session-usage",
+      {},
+      undefined,
+      undefined,
+      current.current.ctx,
     ),
   );
 });

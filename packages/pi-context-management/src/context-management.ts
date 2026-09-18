@@ -344,7 +344,8 @@ export function createContextManager(
       : current.filter((name) => !inspection.ownedNames.has(name));
     if (!sameNames(current, next)) pi.setActiveTools(next);
     for (const candidate of states.values()) {
-      candidate.toolsAvailable = available && !candidate.lineageFailed;
+      candidate.toolsAvailable =
+        available && !candidate.lineageFailed && (candidate === state || candidate.lineage !== undefined);
     }
     if (activate && !available) {
       warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
@@ -473,6 +474,7 @@ export function createContextManager(
     for (const candidate of states.values()) {
       if (
         candidate !== state &&
+        candidate.lineage !== undefined &&
         !candidate.controller.signal.aborted &&
         candidate.sessionId === candidate.key.getSessionId() &&
         latestContextMode(candidate.key.getBranch()) !== "active"
@@ -794,8 +796,7 @@ export function createContextManager(
       const branch = ctx.sessionManager.getBranch();
       try {
         const activationPending = state.fallbackActivationPending && latestContextMode(branch) !== "active";
-        const activeLineage =
-          state.lineage ?? (activationPending ? ensureLineage(state, ctx) : loadContextLineage(branch));
+        const activeLineage = state.lineage ?? loadContextLineage(branch);
         if (!activeLineage) return undefined;
         const compaction = activeContextManagementCompaction(branch);
         if (compaction) {
