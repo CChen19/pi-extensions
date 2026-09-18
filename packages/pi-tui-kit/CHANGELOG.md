@@ -1,5 +1,17 @@
 # @narumitw/pi-tui-kit
 
+## 0.65.0
+
+### Minor Changes
+
+- 9ad07cf: Add focused interaction subpaths and standalone document-review and multi-select runners with lifecycle-safe TUI and RPC adaptation.
+
+## 0.64.0
+
+### Minor Changes
+
+- 9df8964: Expose lazy Mermaid Markdown renderer preparation and a synchronous final-message transformer from the package root and the focused `/markdown` subpath.
+
 ## 0.63.1
 
 ### Patch Changes

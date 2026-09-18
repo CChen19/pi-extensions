@@ -12,6 +12,12 @@ export {
   runCustomInteraction,
 } from "./custom-interaction.js";
 export {
+  type DocumentReviewConfirmation,
+  type RunDocumentReviewOptions,
+  type RunDocumentReviewResult,
+  runDocumentReview,
+} from "./document-review.js";
+export {
   EditorStatusWidget,
   type EditorStatusWidgetOptions,
 } from "./editor-status-widget.js";
@@ -34,7 +40,18 @@ export {
   type RunLiveChoiceResult,
   runLiveChoice,
 } from "./live-choice.js";
+export {
+  createMermaidMarkdownTransformer,
+  type MermaidMarkdownTheme,
+  prepareMermaidMarkdownRenderer,
+} from "./markdown.js";
 export { defineMenu, resolveMenuScreen } from "./model.js";
+export {
+  type MultiSelectItem,
+  type RunMultiSelectOptions,
+  type RunMultiSelectResult,
+  runMultiSelect,
+} from "./multi-select.js";
 export { createMenuNavigator, type MenuNavigator } from "./navigator.js";
 export {
   type ModelSelectorItem,
@@ -96,4 +113,4 @@ export type {
   SettingsScreen,
 } from "./types.js";
 
-export const PI_EXTENSION_MENU_API_VERSION = 18;
+export const PI_EXTENSION_MENU_API_VERSION = 20;

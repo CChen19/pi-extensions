@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { createMenuScreenComponent, safeMenuText } from "./components/index.js";
+import { safeMenuText } from "./components/rendering.js";
 import { runCustomInteraction } from "./custom-interaction.js";
 import type { MenuCloseReason, MenuContext } from "./types.js";
 
@@ -60,8 +60,11 @@ async function runTuiConfirmation<Context extends MenuContext>(
     signal: options.signal,
     isCurrent: options.isCurrent,
     onError: (currentCtx, error) => reportConfirmationError(currentCtx, options, error),
-    create: ({ tui, theme, keybindings, complete }) =>
-      createMenuScreenComponent<"confirmation", ConfirmationAction>({
+    create: async ({ tui, theme, keybindings, complete, signal }) => {
+      const { createMenuScreenComponent } = await import("./components/index.js");
+      signal.throwIfAborted();
+      if (!isCurrent(options)) throw new DOMException("Confirmation owner became stale", "AbortError");
+      return createMenuScreenComponent<"confirmation", ConfirmationAction>({
         screen: {
           kind: "actions",
           title: prompt.title,
@@ -83,7 +86,8 @@ async function runTuiConfirmation<Context extends MenuContext>(
           }
           complete(event.kind);
         },
-      }),
+      });
+    },
   });
   if (result.kind === "completed") {
     return result.value === "confirmed" ? { kind: "confirmed" } : { kind: "closed", reason: result.value };

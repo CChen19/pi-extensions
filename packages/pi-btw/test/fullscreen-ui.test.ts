@@ -59,6 +59,7 @@ function createHarness(
     layoutMountError?: Error;
     parentOverlayHideError?: Error;
     parentStartError?: Error;
+    signal?: AbortSignal;
   } = {},
 ) {
   const events: string[] = [];
@@ -132,6 +133,7 @@ function createHarness(
   const createTui: BtwFullscreenTuiFactory = () => fullscreen;
   const notifications: string[] = [];
   const ctx = {
+    signal: options.signal,
     ui: {
       custom: async (
         factory: (...args: never[]) => FakeComponent,
@@ -706,6 +708,90 @@ test("native terminal smoke: split pasted exit bytes do not cancel streaming; ex
     harness.parent.stop();
     setKeybindings(previous);
   }
+});
+
+test("Ctrl+C aborts fullscreen-owned preparation before it can open stale UI", async () => {
+  const harness = createHarness();
+  let releasePreparation: (() => void) | undefined;
+  let observedAbort = false;
+  const running = runBtwFullscreen(
+    harness.ctx,
+    async (ctx) => {
+      await new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      observedAbort = ctx.signal?.aborted === true;
+      return "closed";
+    },
+    {},
+    { createTui: harness.createTui },
+  );
+  await flushAsyncWork();
+  assert.ok(releasePreparation);
+
+  harness.input("\u0003");
+  releasePreparation();
+
+  assert.equal(await running, "closed");
+  assert.equal(observedAbort, true);
+  assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
+  assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
+});
+
+test("fullscreen disposal aborts owned preparation and restores the parent", async () => {
+  const harness = createHarness();
+  let releasePreparation: (() => void) | undefined;
+  let observedAbort = false;
+  const running = runBtwFullscreen(
+    harness.ctx,
+    async (ctx) => {
+      await new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      observedAbort = ctx.signal?.aborted === true;
+      return "closed";
+    },
+    {},
+    { createTui: harness.createTui },
+  );
+  await flushAsyncWork();
+  assert.ok(releasePreparation);
+  assert.ok(harness.outerComponent);
+
+  harness.outerComponent.dispose();
+  releasePreparation();
+
+  assert.equal(await running, "closed");
+  assert.equal(observedAbort, true);
+  assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
+  assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
+});
+
+test("upstream cancellation closes a mounted composer and restores the parent", async () => {
+  const controller = new AbortController();
+  const harness = createHarness({ signal: controller.signal });
+  let fullscreenSignal: AbortSignal | undefined;
+  const running = runBtwFullscreen(
+    harness.ctx,
+    (ctx) =>
+      ctx.ui.custom<TranscriptPagerAction>((tui, theme, _keybindings, done) => {
+        fullscreenSignal = ctx.signal;
+        return new BtwTranscriptPager(tui, theme, [], done);
+      }),
+    {},
+    { createTui: harness.createTui },
+  );
+  await flushAsyncWork();
+  assert.ok(fullscreenSignal);
+  assert.notEqual(fullscreenSignal, controller.signal);
+  assert.equal(harness.events.includes("fullscreen.layout"), true);
+
+  controller.abort();
+
+  assert.deepEqual(await running, { kind: "close" });
+  assert.equal(fullscreenSignal.aborted, true);
+  assert.equal(harness.events.filter((event) => event === "fullscreen.stop:true").length, 1);
+  assert.equal(harness.events.filter((event) => event === "parent.start").length, 1);
 });
 
 test("Ctrl+C waits for terminal input drain before restoring the parent", async () => {

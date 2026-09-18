@@ -19,14 +19,14 @@ test("fresh Kit processes load syntax highlighting only for code review", () => 
   const review = runWorker("review");
 
   assert.equal(rootImport.highlightJsLoaded, false);
-  assert.equal(kitHighlighterLoaded(rootImport), false);
+  assert.equal(nodeModuleHighlighterLoaded(rootImport), false);
   assert.equal(actions.highlightJsLoaded, false);
   assert.equal(actions.syntaxHighlighted, false);
-  assert.equal(kitHighlighterLoaded(actions), false);
+  assert.equal(nodeModuleHighlighterLoaded(actions), false);
   assert.equal(typeof actions.firstFrameMs, "number");
   assert.equal(review.highlightJsLoaded, true);
   assert.equal(review.syntaxHighlighted, true);
-  assert.equal(kitHighlighterLoaded(review), true);
+  assert.equal(nodeModuleHighlighterLoaded(review), true);
   assert.equal(typeof review.firstFrameMs, "number");
 });
 
@@ -38,6 +38,6 @@ function runWorker(scenario: "actions" | "import" | "review"): BenchmarkWorkerRe
   ) as BenchmarkWorkerResult;
 }
 
-function kitHighlighterLoaded(result: BenchmarkWorkerResult): boolean {
-  return result.packageUrls.some((url) => url.includes("/pi-tui-kit/node_modules/highlight.js/"));
+function nodeModuleHighlighterLoaded(result: BenchmarkWorkerResult): boolean {
+  return result.packageUrls.some((url) => url.includes("/node_modules/highlight.js/"));
 }

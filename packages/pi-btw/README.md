@@ -10,6 +10,7 @@ Only context you explicitly bring back is loaded into the main editor.
 - Starts a side thread immediately with `/btw <question>` or opens the manager with `/btw`.
 - Uses any persisted main-session branch as context without switching branches.
 - Supports scrollable answers, transcript search, a clickable jump-to-latest control, follow-up questions, queued steering, and in-memory resume.
+- Renders supported Mermaid fences as width-safe, themed Unicode diagrams without a browser or network request.
 - Keeps side questions and answers out of the main conversation by default.
 - Brings back the latest answer, a question suffix, an exact range, or the complete thread only when requested.
 - Uses Pi's current model and thinking level or saved pi-btw choices.
@@ -58,7 +59,11 @@ Read the [workflow guide](./docs/workflows.md) for context selection, copying, s
 ## ⚙️ Settings
 
 By default, `/btw` uses the current session model.
-To use an independent model for side questions, create:
+Open `/btw` → **Settings** → **Model** to choose an available model or **Same as main thread** to remove the override.
+The searchable picker follows the current Pi model scope and saves immediately without changing the main session model.
+A manually configured available model outside that scope remains active and visible until you explicitly choose another option.
+
+You can also edit the user settings file directly:
 
 ```text
 $PI_CODING_AGENT_DIR/pi-btw.json
@@ -82,6 +87,7 @@ The configured model must exist in Pi's model registry and have usable credentia
 If it is missing or unauthenticated, pi-btw warns and falls back to the current session model.
 If neither model is available, `/btw` reports an error and stops.
 This selection affects only `/btw`; it does not change the main session model.
+Model changes apply when the next new or resumed side thread starts.
 
 Pi calls its reasoning setting the **thinking level**.
 In Settings, choose **Same as main thread** to start each new side thread from the main thread's current thinking level.
@@ -157,6 +163,7 @@ The file is read for every `/btw` invocation, so edits apply without `/reload`.
 - Resume state is memory-only and lasts only for the current extension instance.
 - A side thread retains the latest 40,000 characters of main-conversation context and adds a truncation notice when earlier content is omitted.
 - Clipboard access depends on Pi's host helper, the operating system, and the terminal.
+- Malformed, unsupported, or oversized Mermaid diagrams remain readable as fenced source; partial parses also show a warning.
 - Pi versions before 0.85 omit the clickable jump-to-latest control.
 
 ## 🗂️ Package layout

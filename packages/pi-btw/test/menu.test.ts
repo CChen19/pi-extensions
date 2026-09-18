@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { stripVTControlCharacters } from "node:util";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { type ExtensionCommandContext, initTheme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { createTuiHarness } from "@narumitw/pi-tui-kit/testing";
 import { test, vi } from "vitest";
 import { createMockContext } from "../../../test/support.js";
 import { runBtwMenuPreservingEditor, showBtwCommandMenu } from "../src/menu.js";
 import { BTW_SETTINGS_FILE } from "../src/settings.js";
+
+initTheme("dark", false);
 
 async function withMenu(
   run: (host: {
@@ -106,6 +110,40 @@ test("btw no-argument menu selects Start side thread first and preserves the edi
 
     assert.equal(await running, "start");
     assert.equal(ctx.ui.getEditorText(), "draft");
+    await assert.rejects(readFile(settingsPath, "utf8"), { code: "ENOENT" });
+  });
+});
+
+test("btw menu falls back when model availability and scope APIs are absent", async () => {
+  await withMenu(async ({ settingsPath, tui, ctx }) => {
+    const legacyModel = { provider: "legacy", id: "side", name: "Legacy side model" } as Model<Api>;
+    let allModelReads = 0;
+    const legacyRegistry = ctx.modelRegistry as unknown as {
+      getAll: typeof ctx.modelRegistry.getAll;
+      getAvailable?: typeof ctx.modelRegistry.getAvailable;
+    };
+    legacyRegistry.getAll = () => {
+      allModelReads += 1;
+      return [legacyModel];
+    };
+    delete legacyRegistry.getAvailable;
+    delete (ctx as Partial<{ scopedModels: ExtensionCommandContext["scopedModels"] }>).scopedModels;
+
+    const running = showBtwCommandMenu(ctx, {
+      settingsPath,
+      currentThinkingLevel: "off",
+      currentModel: legacyModel,
+      availableThinkingLevels: ["off"],
+    });
+    await openSettings(tui);
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+
+    assert.equal(allModelReads, 1);
+    assert.match(tui.render(120).join("\n"), /side \[legacy\]/u);
+    tui.press("ctrl+c");
+    assert.equal(await running, "closed");
     await assert.rejects(readFile(settingsPath, "utf8"), { code: "ENOENT" });
   });
 });
@@ -382,8 +420,10 @@ test("btw menu opens Pi-style thinking settings and cancellation is read-only", 
     await openSettings(tui);
     const settings = tui.render().join("\n");
     assert.match(settings, /Pi BTW Settings/);
+    assert.match(settings, /Model\s+Same as main thread/);
     assert.match(settings, /Thinking level\s+Same as main thread/);
-    assert.match(settings, /Currently medium/);
+    tui.press("tui.select.down");
+    assert.match(tui.render().join("\n"), /Currently medium/);
     assert.match(settings, /Remember thinking level changes\s+On/);
     assert.match(settings, /Copy selection automatically\s+On/);
     tui.press("ctrl+c");
@@ -391,6 +431,246 @@ test("btw menu opens Pi-style thinking settings and cancellation is read-only", 
     assert.equal(await running, "closed");
     assert.equal(ctx.ui.getEditorText(), "draft");
     await assert.rejects(readFile(settingsPath, "utf8"), { code: "ENOENT" });
+  });
+});
+
+test("btw settings select and reset a model while refreshing effective thinking choices", async () => {
+  await withMenu(async ({ settingsPath, tui, ctx, notifications }) => {
+    const mainModel = {
+      provider: "anthropic",
+      id: "main",
+      name: "Main model",
+      reasoning: true,
+    } as Model<Api>;
+    const sideModel = {
+      provider: "openrouter",
+      id: "anthropic/side",
+      name: "Side specialist",
+      reasoning: false,
+    } as Model<Api>;
+    await writeFile(settingsPath, '{"future":{"kept":true},"thinkingLevel":"high"}\n', "utf8");
+    const running = showBtwCommandMenu(ctx, {
+      settingsPath,
+      currentThinkingLevel: "medium",
+      currentModel: mainModel,
+      availableModels: [mainModel, sideModel],
+    });
+    await openSettings(tui);
+    assert.match(tui.render(160).join("\n"), /Model\s+Same as main thread \(main \[anthropic\]\)/u);
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    const selector = tui.render(160).join("\n");
+    assert.match(selector, /Pi BTW Model/u);
+    assert.match(selector, /Same as main thread.*current/u);
+    assert.match(selector, /anthropic\/side \[openrouter\]/u);
+    tui.type("specialist");
+    assert.match(tui.render(160).join("\n"), /Model Name: Side specialist/u);
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(tui.render(160).join("\n"), /Pi BTW Settings/u));
+
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      future: { kept: true },
+      thinkingLevel: "high",
+      model: "openrouter/anthropic/side",
+    });
+    const selected = tui.render(160).join("\n");
+    assert.match(selected, /Model\s+anthropic\/side \[openrouter\]/u);
+    assert.match(selected, /Thinking level\s+off/u);
+    assert.ok(notifications.some(({ message }) => /Pi BTW model: anthropic\/side \[openrouter\]/u.test(message)));
+    assert.ok(tui.render(34).every((line) => visibleWidth(line) <= 34));
+
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.type("same as main");
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(tui.render(160).join("\n"), /Pi BTW Settings/u));
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      future: { kept: true },
+      thinkingLevel: "high",
+    });
+    assert.match(tui.render(160).join("\n"), /Model\s+Same as main thread \(main \[anthropic\]\)/u);
+    assert.match(tui.render(160).join("\n"), /Thinking level\s+high/u);
+    tui.press("tui.select.cancel");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    const mainMenu = tui.render(160).join("\n");
+    assert.match(mainMenu, /Start side thread/u);
+    assert.doesNotMatch(mainMenu, /Pi BTW Model/u);
+    tui.press("ctrl+c");
+    assert.equal(await running, "closed");
+    assert.equal(ctx.ui.getEditorText(), "draft");
+  });
+});
+
+test("btw model settings honor scope and preserve an out-of-scope configured model on cancellation", async () => {
+  await withMenu(async ({ settingsPath, tui, ctx }) => {
+    const outside = { provider: "outside", id: "legacy", name: "Legacy" } as Model<Api>;
+    const scoped = {
+      provider: "inside",
+      id: "side",
+      name: "Side specialist\u001b]52;c;payload\u0007\u202e",
+    } as Model<Api>;
+    const hidden = { provider: "hidden", id: "other", name: "Hidden" } as Model<Api>;
+    const unsafe = {
+      provider: "unsafe\u001b]52;c;payload\u0007",
+      id: "bad\u202e-model",
+      name: "Unsafe model",
+    } as Model<Api>;
+    const original = '{"model":"outside/legacy","future":{"kept":true}}\n';
+    await writeFile(settingsPath, original, "utf8");
+    const running = showBtwCommandMenu(ctx, {
+      settingsPath,
+      currentThinkingLevel: "low",
+      currentModel: scoped,
+      availableModels: [outside, scoped, hidden, unsafe],
+      scopedModels: [{ model: scoped }, { model: unsafe }],
+      availableThinkingLevels: ["off", "low"],
+    });
+    await openSettings(tui);
+    assert.match(tui.render(160).join("\n"), /Model\s+legacy \[outside\] · outside current scope/u);
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    const selector = stripVTControlCharacters(tui.render(160).join("\n"));
+    const outsideLine =
+      selector
+        .split("\n")
+        .filter((line) => line.includes("legacy [outside]"))
+        .at(-1) ?? "";
+    assert.match(outsideLine, /outside the current model scope/i);
+    assert.doesNotMatch(outsideLine, /unavailable/i);
+    assert.match(selector, /side \[inside\]/u);
+    assert.match(selector, /bad-model \[unsafe\].*cannot be stored/is);
+    assert.doesNotMatch(selector, /hidden|payload/u);
+    assert.equal(selector.includes("\u001b"), false);
+    assert.equal(selector.includes("\u202e"), false);
+
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(tui.render(160).join("\n"), /Pi BTW Settings/u));
+    tui.press("tui.select.cancel");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    const mainMenu = tui.render(160).join("\n");
+    assert.match(mainMenu, /Start side thread/u);
+    assert.doesNotMatch(mainMenu, /Pi BTW Model/u);
+
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.type("specialist");
+    const filtered = stripVTControlCharacters(tui.render(160).join("\n"));
+    assert.match(filtered, /side \[inside\]/u);
+    assert.match(filtered, /Model Name: Side specialist/u);
+    tui.press("ctrl+c");
+
+    assert.equal(await running, "closed");
+    assert.equal(await readFile(settingsPath, "utf8"), original);
+    assert.equal(ctx.ui.getEditorText(), "draft");
+  });
+});
+
+test("btw model settings show an unavailable configured model without rewriting it", async () => {
+  await withMenu(async ({ settingsPath, tui, ctx }) => {
+    const mainModel = { provider: "current", id: "main" } as Model<Api>;
+    const original = '{"model":"missing/side","future":true}\n';
+    await writeFile(settingsPath, original, "utf8");
+    const running = showBtwCommandMenu(ctx, {
+      settingsPath,
+      currentThinkingLevel: "low",
+      currentModel: mainModel,
+      availableModels: [mainModel],
+      availableThinkingLevels: ["off", "low"],
+    });
+    await openSettings(tui);
+    assert.match(tui.render(160).join("\n"), /Model\s+Same as main thread · missing\/side unavailable/u);
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    const selector = tui.render(160).join("\n");
+    assert.match(selector, /Configured: Same as main thread · missing\/side unavailable/u);
+    assert.match(selector, /missing\/side.*unavailable/is);
+    tui.press("tui.select.cancel");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.press("ctrl+c");
+
+    assert.equal(await running, "closed");
+    assert.equal(await readFile(settingsPath, "utf8"), original);
+  });
+});
+
+test("btw model search keeps duplicate names tied to raw model identities", async () => {
+  await withMenu(async ({ settingsPath, tui, ctx }) => {
+    const first = { provider: "first", id: "one", name: "Shared specialist" } as Model<Api>;
+    const second = { provider: "second", id: "two", name: "Shared specialist" } as Model<Api>;
+    const running = showBtwCommandMenu(ctx, {
+      settingsPath,
+      currentThinkingLevel: "off",
+      currentModel: first,
+      availableModels: [first, second],
+      availableThinkingLevels: ["off"],
+    });
+    await openSettings(tui);
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.type("shared specialist");
+    assert.match(tui.render(160).join("\n"), /one \[first\]/u);
+    assert.match(tui.render(160).join("\n"), /two \[second\]/u);
+    tui.press("tui.select.down");
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(tui.render(160).join("\n"), /Pi BTW Settings/u));
+
+    assert.equal((JSON.parse(await readFile(settingsPath, "utf8")) as { model: string }).model, "second/two");
+    tui.press("ctrl+c");
+    assert.equal(await running, "closed");
+  });
+});
+
+test("btw model settings reject failed saves and keep the previous selection", async () => {
+  await withMenu(async ({ settingsPath, tui, ctx, notifications }) => {
+    const mainModel = { provider: "current", id: "main" } as Model<Api>;
+    const sideModel = { provider: "other", id: "side" } as Model<Api>;
+    const running = showBtwCommandMenu(ctx, {
+      settingsPath,
+      currentThinkingLevel: "off",
+      currentModel: mainModel,
+      availableModels: [mainModel, sideModel],
+      availableThinkingLevels: ["off"],
+      updateSettings: async () => {
+        throw new Error("disk full\u001b]52;c;mock-terminal-payload\u0007");
+      },
+    });
+    await openSettings(tui);
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.type("other side");
+    tui.press("tui.select.confirm");
+    await vi.waitFor(() => assert.match(tui.render(160).join("\n"), /Pi BTW Model[\s\S]*→ side \[other\]/u));
+
+    assert.match(tui.render(160).join("\n"), /→ side \[other\]/u);
+    tui.press("tui.select.cancel");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    assert.match(tui.render(160).join("\n"), /Model\s+Same as main thread/u);
+    const failureMessage = notifications.at(-1)?.message ?? "";
+    assert.match(failureMessage, /previous value remains active.*disk full/i);
+    assert.equal(
+      [...failureMessage].some((character) => {
+        const code = character.charCodeAt(0);
+        return code <= 31 || (code >= 127 && code <= 159);
+      }),
+      false,
+    );
+    await assert.rejects(readFile(settingsPath, "utf8"), { code: "ENOENT" });
+    tui.press("ctrl+c");
+    assert.equal(await running, "closed");
   });
 });
 
@@ -408,6 +688,7 @@ test("btw settings can choose Same as main thread and clear a fixed thinking lev
     });
     await openSettings(tui);
     assert.match(tui.render().join("\n"), /Thinking level\s+high/);
+    tui.press("tui.select.down");
     tui.press("tui.select.confirm");
     await tui.waitForPending();
     await tui.waitForOpen();
@@ -434,6 +715,7 @@ test("btw settings save thinking and remembering immediately while preserving un
       availableThinkingLevels: ["off", "low", "medium", "high"],
     });
     await openSettings(tui);
+    tui.press("tui.select.down");
     tui.press("tui.select.confirm");
     await tui.waitForPending();
     await tui.waitForOpen();
@@ -468,6 +750,7 @@ test("btw settings save automatic selection copying immediately and preserve unk
     await openSettings(tui);
     tui.press("tui.select.down");
     tui.press("tui.select.down");
+    tui.press("tui.select.down");
     assert.match(tui.render().join("\n"), /Copy selection automatically\s+On/);
     tui.press("tui.select.confirm");
     await tui.waitForPending();
@@ -495,6 +778,7 @@ test("btw settings reject failed saves and restore the prior displayed value", a
       },
     });
     await openSettings(tui);
+    tui.press("tui.select.down");
     tui.press("tui.select.down");
     tui.press("tui.select.down");
     tui.press("tui.select.confirm");
@@ -530,6 +814,7 @@ test("btw settings retain a completed save when its notification context is stal
       availableThinkingLevels: ["off", "low", "medium"],
     });
     await openSettings(tui);
+    tui.press("tui.select.down");
     tui.press("tui.select.confirm");
     await tui.waitForPending();
     await tui.waitForOpen();
@@ -560,15 +845,19 @@ test("btw menu exposes malformed settings as read-only", async () => {
   });
 });
 
-test("disposing btw settings aborts and drains an in-flight save without notification", async () => {
+test("disposing btw model settings aborts and drains an in-flight save without notification", async () => {
   await withMenu(async ({ settingsPath, tui, ctx, notifications }) => {
     let started!: () => void;
     const saveStarted = new Promise<void>((resolve) => {
       started = resolve;
     });
+    const mainModel = { provider: "current", id: "main" } as Model<Api>;
+    const sideModel = { provider: "other", id: "side" } as Model<Api>;
     const running = showBtwCommandMenu(ctx, {
       settingsPath,
       currentThinkingLevel: "low",
+      currentModel: mainModel,
+      availableModels: [mainModel, sideModel],
       availableThinkingLevels: ["off", "low", "medium"],
       updateSettings: async (_patch, { signal }) => {
         started();
@@ -578,8 +867,10 @@ test("disposing btw settings aborts and drains an in-flight save without notific
       },
     });
     await openSettings(tui);
-    tui.press("tui.select.down");
-    tui.press("tui.select.down");
+    tui.press("tui.select.confirm");
+    await tui.waitForPending();
+    await tui.waitForOpen();
+    tui.type("other side");
     tui.press("tui.select.confirm");
     await saveStarted;
     tui.dispose();

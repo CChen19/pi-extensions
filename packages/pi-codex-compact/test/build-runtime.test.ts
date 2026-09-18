@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
+import { createMockContext } from "../../../test/support.js";
 
 const packageRoot = resolve("packages/pi-codex-compact");
 const builderUrl = pathToFileURL(join(packageRoot, "scripts/build-runtime.mjs")).href;
@@ -44,7 +45,6 @@ async function loadBuilder(): Promise<RuntimeBuilder> {
 function validMetadata(): BuildMetadata {
   const entryImports: Array<{ external?: boolean; kind?: string; path: string }> = [
     { path: "@earendil-works/pi-coding-agent", kind: "import-statement", external: true },
-    { path: "@narumitw/pi-tui-kit", kind: "dynamic-import", external: true },
   ];
   const outputs: NonNullable<BuildMetadata["outputs"]> = {
     "dist/index.ts": {
@@ -56,7 +56,11 @@ function validMetadata(): BuildMetadata {
   for (const [index, input] of forbiddenEagerInputs.entries()) {
     const outputPath = `dist/chunks/lazy-${index}.ts`;
     entryImports.push({ path: outputPath, kind: "dynamic-import" });
-    outputs[outputPath] = { entryPoint: input, imports: [], inputs: { [input]: {} } };
+    outputs[outputPath] = {
+      entryPoint: input,
+      imports: [{ path: "@narumitw/pi-tui-kit", kind: "import-statement", external: true }],
+      inputs: { [input]: {} },
+    };
   }
   return { outputs };
 }
@@ -179,6 +183,48 @@ test("generated runtime is loadable by Pi's Jiti resource loader", async () => {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("managed package layouts load the settings menu without physical Pi peers", async () => {
+  const builder = await loadBuilder();
+  const buildRoot = await mkdtemp(join(packageRoot, ".pi-codex-compact-build-test-"));
+  const isolatedRoot = await mkdtemp(join(tmpdir(), "pi-codex-compact-isolated-"));
+  const agentDir = join(isolatedRoot, "agent");
+  const output = join(buildRoot, "dist");
+  const tuiKitRoot = resolve(fileURLToPath(import.meta.resolve("@narumitw/pi-tui-kit")), "../..");
+  const isolatedTuiKitRoot = join(isolatedRoot, "node_modules", "@narumitw", "pi-tui-kit");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  try {
+    await builder.buildRuntime({ outputDirectory: output });
+    await cp(output, join(isolatedRoot, "dist"), { recursive: true });
+    await cp(join(packageRoot, "package.json"), join(isolatedRoot, "package.json"));
+    await mkdir(isolatedTuiKitRoot, { recursive: true });
+    await cp(join(tuiKitRoot, "package.json"), join(isolatedTuiKitRoot, "package.json"));
+    await cp(join(tuiKitRoot, "dist"), join(isolatedTuiKitRoot, "dist"), { recursive: true });
+    await assert.rejects(access(join(isolatedRoot, "node_modules", "@earendil-works", "pi-tui")));
+    await mkdir(agentDir, { recursive: true });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const loader = new DefaultResourceLoader({
+      cwd: isolatedRoot,
+      agentDir,
+      settingsManager: SettingsManager.inMemory({}),
+      additionalExtensionPaths: [join(isolatedRoot, "dist", "index.ts")],
+    });
+    await loader.reload();
+    const loaded = loader.getExtensions();
+    assert.deepEqual(loaded.errors, []);
+    assert.equal(loaded.extensions.length, 1);
+    const extension = loaded.extensions[0];
+    const command = extension?.commands.get("codex-compact");
+    assert.ok(command);
+    const { ctx } = createMockContext({ cwd: isolatedRoot, mode: "tui" });
+    await assert.doesNotReject(() => command.handler("", ctx));
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(buildRoot, { force: true, recursive: true });
+    await rm(isolatedRoot, { force: true, recursive: true });
   }
 });
 

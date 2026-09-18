@@ -11,6 +11,15 @@ const SCENARIOS = [
   "import",
   "terminal-text-import",
   "interaction-hints-import",
+  "markdown-import",
+  "confirmation-import",
+  "custom-interaction-import",
+  "document-review-import",
+  "live-choice-import",
+  "multi-select-import",
+  "questionnaire-import",
+  "selectors-import",
+  "task-import",
   "actions",
   "review",
   "mermaid",
@@ -20,10 +29,29 @@ const IMPORT_SPECIFIERS = {
   import: "@narumitw/pi-tui-kit",
   "terminal-text-import": "@narumitw/pi-tui-kit/terminal-text",
   "interaction-hints-import": "@narumitw/pi-tui-kit/interaction-hints",
+  "markdown-import": "@narumitw/pi-tui-kit/markdown",
+  "confirmation-import": "@narumitw/pi-tui-kit/confirmation",
+  "custom-interaction-import": "@narumitw/pi-tui-kit/custom-interaction",
+  "document-review-import": "@narumitw/pi-tui-kit/document-review",
+  "live-choice-import": "@narumitw/pi-tui-kit/live-choice",
+  "multi-select-import": "@narumitw/pi-tui-kit/multi-select",
+  "questionnaire-import": "@narumitw/pi-tui-kit/questionnaire",
+  "selectors-import": "@narumitw/pi-tui-kit/selectors",
+  "task-import": "@narumitw/pi-tui-kit/task",
   actions: "@narumitw/pi-tui-kit",
   review: "@narumitw/pi-tui-kit",
   mermaid: "@narumitw/pi-tui-kit",
   task: "@narumitw/pi-tui-kit",
+};
+const FOCUSED_IMPORT_ALLOWED_HEAVY_GRAPHS = {
+  "confirmation-import": [],
+  "custom-interaction-import": [],
+  "document-review-import": ["review", "document-formatting", "document-search", "diff"],
+  "live-choice-import": [],
+  "multi-select-import": ["multi-select"],
+  "questionnaire-import": [],
+  "selectors-import": ["pi-selectors"],
+  "task-import": ["task-loader"],
 };
 
 const options = parseArguments(process.argv.slice(2));
@@ -57,6 +85,9 @@ if (options.worker) {
         highlightJsLoaded: measurements[scenario].some((result) => result.highlightJsLoaded),
         mermaidRendererLoaded: measurements[scenario].some((result) => result.mermaidRendererLoaded),
         syntaxHighlighted: measurements[scenario].some((result) => result.syntaxHighlighted),
+        unrelatedHeavyGraphs: [
+          ...new Set(measurements[scenario].flatMap((result) => result.unrelatedHeavyGraphs)),
+        ].sort(),
       },
     ]),
   );
@@ -146,6 +177,10 @@ async function runWorker(scenario) {
 
   const packageUrls = [...new Set(loadedUrls)].filter((url) => /\/(?:node_modules|packages)\//u.test(url)).sort();
   const kitDistPaths = packageUrls.map(kitDistRelativePath).filter((path) => path !== undefined);
+  const unrelatedHeavyGraphs = focusedImportUnexpectedHeavyGraphs(scenario, packageUrls, kitDistPaths);
+  if (unrelatedHeavyGraphs.length > 0) {
+    throw new Error(`Focused import loaded unrelated heavy graphs: ${unrelatedHeavyGraphs.join(", ")}`);
+  }
   process.stdout.write(
     `${JSON.stringify({
       scenario,
@@ -159,9 +194,34 @@ async function runWorker(scenario) {
       highlightJsLoaded: packageUrls.some((url) => url.includes("/highlight.js/")),
       mermaidRendererLoaded: packageUrls.some((url) => url.includes("/grok-mermaid/")),
       syntaxHighlighted,
+      unrelatedHeavyGraphs,
       packageUrls,
     })}\n`,
   );
+}
+
+function focusedImportUnexpectedHeavyGraphs(scenario, packageUrls, kitDistPaths) {
+  const allowed = FOCUSED_IMPORT_ALLOWED_HEAVY_GRAPHS[scenario];
+  if (!allowed) return [];
+  const loaded = new Set();
+  if (kitDistPaths.includes("index.js")) loaded.add("root");
+  if (kitDistPaths.includes("runtime.js")) loaded.add("runtime");
+  if (kitDistPaths.includes("components/index.js")) loaded.add("component-registry");
+  for (const name of [
+    "review",
+    "document-formatting",
+    "document-search",
+    "multi-select",
+    "pi-selectors",
+    "questionnaire",
+    "task-loader",
+  ]) {
+    if (kitDistPaths.includes(`components/${name}.js`)) loaded.add(name);
+  }
+  if (packageUrls.some((url) => url.includes("/highlight.js/"))) loaded.add("highlight.js");
+  if (packageUrls.some((url) => url.includes("/grok-mermaid/"))) loaded.add("grok-mermaid");
+  if (packageUrls.some((url) => /\/node_modules\/diff\//u.test(url))) loaded.add("diff");
+  return [...loaded].filter((name) => !allowed.includes(name)).sort();
 }
 
 function kitDistRelativePath(url) {

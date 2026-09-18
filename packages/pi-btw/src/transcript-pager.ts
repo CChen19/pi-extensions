@@ -3,6 +3,7 @@ import {
   AssistantMessageComponent,
   getMarkdownTheme,
   type KeybindingsManager,
+  type MarkdownTransformer,
   type Theme,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
@@ -57,6 +58,7 @@ export interface BtwThinkingControl {
 }
 
 export interface BtwAnsweringViewOptions {
+  markdownTransformers?: readonly MarkdownTransformer[];
   steering?: {
     questions: readonly string[];
     onSubmit: (question: string) => void;
@@ -86,11 +88,12 @@ export class BtwTranscriptPager implements BtwFullscreenLayoutComponent, Focusab
     private readonly options: {
       startAtBottom?: boolean;
       initialQuestion?: string;
+      markdownTransformers?: readonly MarkdownTransformer[];
       thinking?: BtwThinkingControl;
     } = {},
   ) {
     this.shortcuts = getBtwShortcuts(tui, options.thinking?.keybindings);
-    this.transcriptComponents = buildTranscriptComponents(turns, this.theme);
+    this.transcriptComponents = buildTranscriptComponents(turns, this.theme, undefined, options.markdownTransformers);
     this.canBringToMain = turns.some((turn) => turn.kind === "answered");
     this.thinkingLevel = options.thinking?.level;
     const editorTheme: EditorTheme = {
@@ -322,7 +325,12 @@ export class BtwAnsweringView implements BtwFullscreenLayoutComponent, Focusable
     private readonly options: BtwAnsweringViewOptions = {},
   ) {
     this.shortcuts = getBtwShortcuts(tui, options.steering?.thinking?.keybindings);
-    this.transcriptComponents = buildTranscriptComponents(turns, this.theme, pendingQuestion);
+    this.transcriptComponents = buildTranscriptComponents(
+      turns,
+      this.theme,
+      pendingQuestion,
+      options.markdownTransformers,
+    );
     this.thinkingLevel = options.steering?.thinking?.level ?? thinkingLevel;
     this.loader = new Loader(
       this.tui,
@@ -556,9 +564,15 @@ function buildTranscriptComponents(
   turns: readonly SideThreadTurn[],
   theme: Theme,
   pendingQuestion?: string,
+  markdownTransformers: readonly MarkdownTransformer[] = [],
 ): Component[] {
   const components = turns.flatMap((turn): Component[] => {
-    const question = new UserMessageComponent(escapeTerminalControls(turn.question), getMarkdownTheme(), 1);
+    const question = new UserMessageComponent(
+      escapeTerminalControls(turn.question),
+      getMarkdownTheme(),
+      1,
+      markdownTransformers,
+    );
     if (turn.kind === "error") {
       const error = new Markdown(`Error: ${escapeTerminalControls(turn.answer)}`, 1, 1, getMarkdownTheme(), {
         color: (text) => theme.fg("error", text),
@@ -571,10 +585,12 @@ function buildTranscriptComponents(
       stopReason: "stop",
       errorMessage: undefined,
     };
-    return [question, new AssistantMessageComponent(response, true, getMarkdownTheme(), "", 1)];
+    return [question, new AssistantMessageComponent(response, true, getMarkdownTheme(), "", 1, markdownTransformers)];
   });
   if (pendingQuestion) {
-    components.push(new UserMessageComponent(escapeTerminalControls(pendingQuestion), getMarkdownTheme(), 1));
+    components.push(
+      new UserMessageComponent(escapeTerminalControls(pendingQuestion), getMarkdownTheme(), 1, markdownTransformers),
+    );
   }
   return components;
 }

@@ -1,5 +1,21 @@
 # @narumitw/pi-btw
 
+## 0.60.0
+
+### Minor Changes
+
+- c4d403b: Add a searchable model picker to `/btw` Settings with scoped available models, same as the main thread reset, and model-aware thinking choices.
+
+## 0.59.0
+
+### Minor Changes
+
+- 022ba82: Render supported Mermaid fences as width-safe, themed Unicode diagrams in side-thread transcripts, with readable source fallbacks for malformed, unsupported, or oversized diagrams.
+
+### Patch Changes
+
+- ddaccd2: Complete `/btw` fullscreen cancellation by forwarding upstream aborts, closing mounted composers, restoring the parent TUI, and stopping lazy Mermaid transcript preparation when cancelled.
+
 ## 0.58.1
 
 ### Patch Changes
