@@ -1,6 +1,6 @@
 import type { Api } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { MenuDefinition } from "@narumitw/pi-tui-kit";
+import { type MenuDefinition, runMenu } from "@narumitw/pi-tui-kit";
 import { resolveCompactionRouteForApi } from "./model-api.js";
 import type { CodexCompactSettings, CodexCompactSettingsRuntime, CodexCompactSettingsState } from "./settings.js";
 import { terminalText as safeText } from "./terminal.js";
@@ -205,7 +205,6 @@ export async function showCodexCompactMenu(
   if (ctx.mode !== "tui") {
     throw new Error("/codex-compact requires TUI or RPC UI support");
   }
-  const { runMenu } = await import("@narumitw/pi-tui-kit");
   if (owner.signal.aborted || !owner.isCurrent()) return;
   let compactRequested = false;
   await runMenu(
