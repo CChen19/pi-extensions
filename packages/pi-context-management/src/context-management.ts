@@ -30,6 +30,7 @@ import {
   contextContract,
   contextDeactivation,
   createContextBranchScanBudget,
+  createContextContractMessage,
   createContextManagementDetails,
   createInitialContextState,
   hasContextContract,
@@ -75,6 +76,7 @@ interface SessionState {
   toolsAvailable: boolean;
   removeToolsAtSettlement: boolean;
   fallbackDeactivationPending: boolean;
+  fallbackActivationPending: boolean;
   agentRunActive: boolean;
   controller: AbortController;
 }
@@ -350,16 +352,20 @@ export function createContextManager(
   const deactivateIncompleteToolUnit = (state: SessionState, ctx: ExtensionContext): boolean => {
     const inspection = inspectToolUnit();
     if (inspection.complete) return false;
-    const branchIsActive = latestContextMode(ctx.sessionManager.getBranch()) === "active";
-    if (branchIsActive && !state.fallbackDeactivationPending) {
-      pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+    let branchIsActive = false;
+    for (const candidate of states.values()) {
+      if (candidate.controller.signal.aborted || candidate.sessionId !== candidate.key.getSessionId()) continue;
+      const candidateBranchIsActive = latestContextMode(candidate.key.getBranch()) === "active";
+      if (candidate === state) branchIsActive = candidateBranchIsActive;
+      candidate.fallbackDeactivationPending = candidateBranchIsActive;
+      candidate.fallbackActivationPending = false;
+      candidate.removeToolsAtSettlement = false;
+      if (candidate.pending?.status === "requested" || candidate.pending?.status === "compacting") {
+        candidate.pending.status = "failed";
+        candidate.pending.errorMessage = "Experimental context management tool unit became incomplete during rollover.";
+      }
     }
-    state.fallbackDeactivationPending = branchIsActive;
-    if (state.pending?.status === "requested" || state.pending?.status === "compacting") {
-      state.pending.status = "failed";
-      state.pending.errorMessage = "Experimental context management tool unit became incomplete during rollover.";
-    }
-    state.removeToolsAtSettlement = false;
+    if (branchIsActive) pi.sendMessage(deactivationMessage(), { triggerTurn: false });
     removeOwnedTools(inspection.ownedNames);
     warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
     return branchIsActive;
@@ -395,6 +401,7 @@ export function createContextManager(
     if (!isConfigured()) {
       const inspection = inspectToolUnit();
       for (const candidate of states.values()) {
+        candidate.fallbackActivationPending = false;
         const candidateRunIsActive = candidate === state ? runIsActive : candidate.agentRunActive;
         if (candidateRunIsActive && candidate.toolsAvailable && inspection.complete) {
           candidate.removeToolsAtSettlement = true;
@@ -420,19 +427,13 @@ export function createContextManager(
     for (const candidate of states.values()) {
       candidate.removeToolsAtSettlement = false;
       candidate.fallbackDeactivationPending = false;
+      candidate.fallbackActivationPending = false;
     }
     if (!reconcileTools(state, true, ctx)) {
-      if (state.pending?.status === "requested" || state.pending?.status === "compacting") {
-        state.pending.status = "failed";
-        state.pending.errorMessage = "Experimental context management tools were unavailable after session restore.";
+      deactivateIncompleteToolUnit(state, ctx);
+      if (runIsActive && (toolsWereAvailable || contractAlreadyActiveOrQueued || deactivationAlreadyPending)) {
+        state.fallbackDeactivationPending = true;
       }
-      const contractMayBeActive =
-        latestContextMode(branch) === "active" ||
-        (runIsActive && (toolsWereAvailable || contractAlreadyActiveOrQueued));
-      if (contractMayBeActive && !deactivationAlreadyPending) {
-        pi.sendMessage(deactivationMessage(), { triggerTurn: false });
-      }
-      state.fallbackDeactivationPending = runIsActive && (contractMayBeActive || deactivationAlreadyPending);
       return;
     }
     let activeLineage: ContextLineage;
@@ -442,6 +443,16 @@ export function createContextManager(
       reconcileTools(state, false, ctx);
       throw error;
     }
+    for (const candidate of states.values()) {
+      if (
+        candidate !== state &&
+        !candidate.controller.signal.aborted &&
+        candidate.sessionId === candidate.key.getSessionId() &&
+        latestContextMode(candidate.key.getBranch()) !== "active"
+      ) {
+        candidate.fallbackActivationPending = true;
+      }
+    }
     const messages = boundedContextMessages(branch);
     if (
       deactivationAlreadyPending ||
@@ -450,6 +461,7 @@ export function createContextManager(
     ) {
       pi.sendMessage(contractMessage(activeLineage), { triggerTurn: false });
     }
+    state.fallbackActivationPending = false;
     warnEnabled(state, ctx);
   };
 
@@ -644,6 +656,7 @@ export function createContextManager(
         toolsAvailable: false,
         removeToolsAtSettlement: false,
         fallbackDeactivationPending: false,
+        fallbackActivationPending: false,
         agentRunActive: false,
         controller: new AbortController(),
       };
@@ -665,6 +678,7 @@ export function createContextManager(
         pending: restoredRollover(branch, previous.sessionId, generation, recoveryBudget),
         removeToolsAtSettlement: false,
         fallbackDeactivationPending: false,
+        fallbackActivationPending: false,
         agentRunActive: false,
         controller: new AbortController(),
       };
@@ -675,7 +689,16 @@ export function createContextManager(
     applySettings,
     onInput(ctx) {
       const state = stateFor(ctx);
-      if (!state || isConfigured() || !state.fallbackDeactivationPending || !ctx.isIdle()) return;
+      if (!state || !ctx.isIdle()) return;
+      if (isConfigured() && state.fallbackActivationPending && enabledFor(state)) {
+        const activeLineage = ensureLineage(state, ctx);
+        if (latestContextMode(ctx.sessionManager.getBranch()) !== "active") {
+          pi.sendMessage(contractMessage(activeLineage), { triggerTurn: false });
+        }
+        state.fallbackActivationPending = false;
+        return;
+      }
+      if (isConfigured() || !state.fallbackDeactivationPending) return;
       if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {
         pi.sendMessage(deactivationMessage(), { triggerTurn: false });
       }
@@ -734,13 +757,26 @@ export function createContextManager(
         }
         return undefined;
       }
-      const activeLineage = state.lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
+      const branch = ctx.sessionManager.getBranch();
+      const activeLineage = state.lineage ?? loadContextLineage(branch);
       if (!activeLineage) return undefined;
       try {
-        const compaction = activeContextManagementCompaction(ctx.sessionManager.getBranch());
+        const activationPending = state.fallbackActivationPending && latestContextMode(branch) !== "active";
+        const compaction = activeContextManagementCompaction(branch);
         if (compaction) {
           const projected = projectContextManagementContext(messages, compaction.entry, compaction.details);
-          return projected ? reconcileContextContract(projected, compaction.details) : undefined;
+          if (!projected) return undefined;
+          state.fallbackActivationPending = false;
+          if (activationPending) {
+            pi.sendMessage(contractMessage(compaction.details), { triggerTurn: false });
+            return [...projected, createContextContractMessage(compaction.details)];
+          }
+          return reconcileContextContract(projected, compaction.details);
+        }
+        state.fallbackActivationPending = false;
+        if (activationPending) {
+          pi.sendMessage(contractMessage(activeLineage), { triggerTurn: false });
+          return [...messages, createContextContractMessage(activeLineage)];
         }
         return hasContextContract(messages, activeLineage)
           ? undefined

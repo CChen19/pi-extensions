@@ -2464,6 +2464,138 @@ test("global tool removal waits for every active session to settle", async () =>
   assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read"]);
 });
 
+test("an incomplete global tool unit deactivates every active session contract", async () => {
+  const current = setup();
+  await start(current);
+  persistLastSentCustomMessage(current);
+
+  const secondLineage = createInitialContextState("22222222-2222-4222-8222-222222222222");
+  const secondEntries: SessionEntry[] = [
+    messageEntry(),
+    {
+      type: "custom",
+      customType: CONTEXT_STATE_ENTRY_TYPE,
+      data: secondLineage,
+      id: "second-state",
+      parentId: "user",
+      timestamp: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const second = createMockContext({
+    mode: "print",
+    hasUI: false,
+    sessionManager: {
+      getSessionId: () => "second-context-session",
+      getSessionName: () => undefined,
+      getBranch: () => secondEntries,
+      getEntries: () => secondEntries,
+    },
+  });
+  const sessionStart = current.mock.events.get("session_start")?.[0];
+  assert.ok(sessionStart);
+  await sessionStart({ type: "session_start", reason: "startup" }, second.ctx);
+  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+
+  current.mock.rawPi.setActiveTools(["read", ...CONTEXT_MANAGEMENT_TOOL_NAMES.slice(0, -1)]);
+  const context = current.mock.events.get("context")?.[0];
+  assert.ok(context);
+  const firstProjection = (await context(
+    { type: "context", messages: current.entries.flatMap(sessionEntryToContextMessages) },
+    current.current.ctx,
+  )) as { messages: AgentMessage[] } | undefined;
+  const secondProjection = (await context(
+    { type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) },
+    second.ctx,
+  )) as { messages: AgentMessage[] } | undefined;
+
+  const firstDeactivation = firstProjection?.messages.at(-1);
+  assert.ok(firstDeactivation?.role === "custom");
+  assert.equal(firstDeactivation.customType, CONTEXT_DEACTIVATION_MESSAGE_TYPE);
+  const secondDeactivation = secondProjection?.messages.at(-1);
+  assert.ok(secondDeactivation?.role === "custom");
+  assert.equal(secondDeactivation.customType, CONTEXT_DEACTIVATION_MESSAGE_TYPE);
+  assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read"]);
+});
+
+test("global re-enable restores activation in every deactivated session", async () => {
+  let requestedValue: "Off" | "On" = "Off";
+  let menuStep = 0;
+  const current = setup(true, undefined, {
+    select: async (_title: string, options: string[]) => {
+      menuStep += 1;
+      if (menuStep % 4 === 1) return options.find((option) => option.startsWith("Settings"));
+      if (menuStep % 4 === 2) {
+        return options.find((option) => option.startsWith("Experimental context management"));
+      }
+      if (menuStep % 4 === 3) return options.find((option) => option === requestedValue);
+      return undefined;
+    },
+  });
+  await start(current);
+  persistLastSentCustomMessage(current);
+
+  const secondLineage = createInitialContextState("22222222-2222-4222-8222-222222222222");
+  const secondEntries: SessionEntry[] = [
+    messageEntry(),
+    {
+      type: "custom",
+      customType: CONTEXT_STATE_ENTRY_TYPE,
+      data: secondLineage,
+      id: "second-state",
+      parentId: "user",
+      timestamp: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const second = createMockContext({
+    mode: "print",
+    hasUI: false,
+    sessionManager: {
+      getSessionId: () => "second-context-session",
+      getSessionName: () => undefined,
+      getBranch: () => secondEntries,
+      getEntries: () => secondEntries,
+    },
+  });
+  const sessionStart = current.mock.events.get("session_start")?.[0];
+  assert.ok(sessionStart);
+  await sessionStart({ type: "session_start", reason: "startup" }, second.ctx);
+  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+
+  const command = current.mock.commands.get("context-management");
+  assert.ok(command);
+  await command.handler("", current.current.ctx);
+  persistLastSentCustomMessage(current);
+  const input = current.mock.events.get("input")?.[0];
+  assert.ok(input);
+  await input({ source: "interactive", text: "persist deactivation" }, second.ctx);
+  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+  const persistedDeactivation = secondEntries.at(-1);
+  assert.ok(persistedDeactivation?.type === "message" && persistedDeactivation.message.role === "custom");
+  assert.equal(persistedDeactivation.message.customType, CONTEXT_DEACTIVATION_MESSAGE_TYPE);
+
+  requestedValue = "On";
+  menuStep = 0;
+  await command.handler("", current.current.ctx);
+  assert.equal(current.runtime.get().settings.enabled, true);
+  persistLastSentCustomMessage(current);
+  const context = current.mock.events.get("context")?.[0];
+  assert.ok(context);
+  const projection = (await context(
+    { type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) },
+    second.ctx,
+  )) as { messages: AgentMessage[] } | undefined;
+  const projectedActivation = projection?.messages.at(-1);
+  assert.ok(projectedActivation?.role === "custom");
+  assert.equal(projectedActivation.customType, CONTEXT_CONTRACT_MESSAGE_TYPE);
+  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+  const sentAfterActivation = current.mock.sentMessages.length;
+  assert.equal(
+    await context({ type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) }, second.ctx),
+    undefined,
+  );
+  assert.equal(current.mock.sentMessages.length, sentAfterActivation);
+});
+
 test("restores a persisted accepted rollover and resumes compaction", async () => {
   const current = setup();
   await start(current);
