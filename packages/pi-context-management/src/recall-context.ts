@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type SessionEntry, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
-import { CONTEXT_STATE_ENTRY_TYPE, parseContextManagementCompaction, parseContextState } from "./context-window.js";
+import { createContextBranchScanBudget, parseContextManagementCompaction } from "./context-window.js";
 import { sortedNotes } from "./notes-state.js";
 
 export const MAX_RECALL_QUERY_LENGTH = 512;
@@ -28,6 +28,8 @@ export interface RecallContextInput {
 }
 
 export interface RecallContextLimits {
+  firstWindowId?: string;
+  historyDetailScanUnits?: number;
   historySearchScanUnits?: number;
 }
 
@@ -164,21 +166,6 @@ function messageIndexPayload(message: AgentMessage): unknown {
   return { ...payload, content: indexedContent(payload.content) };
 }
 
-function firstWindowId(entries: readonly SessionEntry[], budget: HistoryTraversalBudget): string | undefined {
-  for (const entry of entries) {
-    visitHistoryEntry(budget);
-    if (entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE) {
-      const state = parseContextState(entry.data);
-      if (state) return state.firstWindowId;
-    }
-    if (entry.type === "compaction") {
-      const details = parseContextManagementCompaction(entry);
-      if (details) return details.firstWindowId;
-    }
-  }
-  return undefined;
-}
-
 function isExcludedFromModelContext(message: AgentMessage): boolean {
   return message.role === "bashExecution" && message.excludeFromContext === true;
 }
@@ -186,12 +173,14 @@ function isExcludedFromModelContext(message: AgentMessage): boolean {
 function* historyMessageItems(
   entries: readonly SessionEntry[],
   budget: HistoryTraversalBudget,
+  firstWindowId: string | undefined,
+  detailScanBudget: ReturnType<typeof createContextBranchScanBudget>,
 ): Generator<HistoryMessageItem> {
-  let windowId = firstWindowId(entries, budget);
+  let windowId = firstWindowId;
   for (const entry of entries) {
     visitHistoryEntry(budget);
     if (entry.type === "compaction") {
-      const details = parseContextManagementCompaction(entry);
+      const details = parseContextManagementCompaction(entry, detailScanBudget);
       if (details) windowId = details.currentWindowId;
     }
     const messages = sessionEntryToContextMessages(entry);
@@ -463,7 +452,16 @@ export function recallContext(
     return { text: safeJson({ source: "notes", action: "search", ...page }), details: page };
   }
 
-  const history = historyMessageItems(entries, { remainingVisits: MAX_HISTORY_BRANCH_ENTRY_VISITS });
+  const detailScanBudget = createContextBranchScanBudget();
+  if (limits.historyDetailScanUnits !== undefined) {
+    detailScanBudget.remainingScanUnits = limits.historyDetailScanUnits;
+  }
+  const history = historyMessageItems(
+    entries,
+    { remainingVisits: MAX_HISTORY_BRANCH_ENTRY_VISITS },
+    limits.firstWindowId,
+    detailScanBudget,
+  );
   if (input.action === "list") {
     const selected = searchPage(history, offset, () => true);
     const page = {

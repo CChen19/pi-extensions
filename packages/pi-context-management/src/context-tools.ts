@@ -30,6 +30,7 @@ const NOTE_ACTIONS = ["write", "append"] as const;
 
 export interface ContextToolRuntime {
   isEnabled(ctx: ExtensionContext): boolean;
+  firstWindowId(ctx: ExtensionContext): string | undefined;
   requestNewContext(
     ctx: ExtensionContext,
     input: { toolCallId: string; reason?: string },
@@ -148,7 +149,9 @@ export function registerContextManagementTools(pi: ExtensionAPI, runtime: Contex
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       requireEnabled(runtime, ctx);
       throwIfAborted(signal);
-      const recalled = recallContext(ctx.sessionManager.getBranch(), params, toolCallId);
+      const recalled = recallContext(ctx.sessionManager.getBranch(), params, toolCallId, {
+        firstWindowId: runtime.firstWindowId(ctx),
+      });
       throwIfAborted(signal);
       return {
         content: [{ type: "text", text: recalled.text }],

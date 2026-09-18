@@ -1565,6 +1565,18 @@ test("usage and notes tools remain observational and branch-persistent", async (
     current.current.ctx,
   );
   assert.match(usage.content[0].text, /"remainingTokens": 75/);
+  const lineage = current.entries.find(
+    (entry) => entry.type === "custom" && entry.customType === CONTEXT_STATE_ENTRY_TYPE,
+  );
+  assert.ok(lineage?.type === "custom");
+  const history = await tool(current, "context_management_recall_context").execute(
+    "history",
+    { source: "history", action: "list" },
+    undefined,
+    undefined,
+    current.current.ctx,
+  );
+  assert.match(history.content[0].text, new RegExp((lineage.data as { firstWindowId: string }).firstWindowId));
   await tool(current, "context_management_update_notes").execute(
     "note",
     { action: "write", note: "decision", content: "Use OAuth" },
@@ -2644,6 +2656,68 @@ test("global re-enable restores activation in every deactivated session", async 
     undefined,
   );
   assert.equal(current.mock.sentMessages.length, sentAfterActivation);
+});
+
+test("global re-enable activates a live session that started without lineage", async () => {
+  let selection = 0;
+  const current = setup(false, undefined, {
+    select: async (_title: string, options: string[]) => {
+      selection += 1;
+      if (selection === 1) return options.find((option) => option.startsWith("Settings"));
+      if (selection === 2) return options.find((option) => option.startsWith("Experimental context management"));
+      if (selection === 3) return options.find((option) => option === "On");
+      return undefined;
+    },
+  });
+  await start(current);
+
+  const secondEntries: SessionEntry[] = [messageEntry()];
+  const second = createMockContext({
+    mode: "print",
+    hasUI: false,
+    sessionManager: {
+      getSessionId: () => "second-context-session",
+      getSessionName: () => undefined,
+      getBranch: () => secondEntries,
+      getEntries: () => secondEntries,
+    },
+    getContextUsage: () => ({ tokens: 25, contextWindow: 100, percent: 25 }),
+  });
+  const sessionStart = current.mock.events.get("session_start")?.[0];
+  assert.ok(sessionStart);
+  await sessionStart({ type: "session_start", reason: "startup" }, second.ctx);
+
+  const command = current.mock.commands.get("context-management");
+  assert.ok(command);
+  await command.handler("", current.current.ctx);
+  assert.equal(current.runtime.get().settings.enabled, true);
+  assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read", ...CONTEXT_MANAGEMENT_TOOL_NAMES]);
+
+  const context = current.mock.events.get("context")?.[0];
+  assert.ok(context);
+  const sentBeforeActivation = current.mock.sentMessages.length;
+  const projected = (await context(
+    { type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) },
+    second.ctx,
+  )) as { messages: AgentMessage[] } | undefined;
+  const activation = projected?.messages.at(-1);
+  assert.ok(activation?.role === "custom");
+  assert.equal(activation.customType, CONTEXT_CONTRACT_MESSAGE_TYPE);
+  assert.equal(current.mock.sentMessages.length, sentBeforeActivation + 1);
+  persistSentCustomMessage(secondEntries, current.mock.sentMessages.at(-1)?.message);
+  assert.equal(
+    await context({ type: "context", messages: secondEntries.flatMap(sessionEntryToContextMessages) }, second.ctx),
+    undefined,
+  );
+  await assert.doesNotReject(() =>
+    tool(current, "context_management_get_context_remaining").execute(
+      "second-session-usage",
+      {},
+      undefined,
+      undefined,
+      second.ctx,
+    ),
+  );
 });
 
 test("restores a persisted accepted rollover and resumes compaction", async () => {
