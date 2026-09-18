@@ -1,5 +1,11 @@
 # @narumitw/pi-codex-compact
 
+## 0.53.1
+
+### Patch Changes
+
+- eeede25: Allow managed npm installs without physical Pi peer packages to open the settings menu.
+
 ## 0.53.0
 
 ### Minor Changes
