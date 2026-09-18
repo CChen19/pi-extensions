@@ -396,12 +396,20 @@ test("response validation covers answer identity, ranges, distributions, and sel
       /probability-weighted level distribution/,
     ],
     [
-      "legend mismatch",
+      "legend key mismatch",
       (response) => {
         const answer = response.answers.frustration;
         if (answer?.type === "score") delete answer.legend["2"];
       },
       /keys must exactly match/,
+    ],
+    [
+      "legend value mismatch",
+      (response) => {
+        const answer = response.answers.frustration;
+        if (answer?.type === "score") answer.legend["1"] = "Not the requested level";
+      },
+      /must match the requested score criterion/,
     ],
   ];
 
@@ -410,6 +418,39 @@ test("response validation covers answer identity, ranges, distributions, and sel
     mutate(response);
     assert.throws(() => normalizeJevResponse(response, decisionInput), pattern, name);
   }
+});
+
+test("score legends compare structured criteria independent of object key order", () => {
+  const input: JevDecisionInput = {
+    state: "x",
+    questions: {
+      severity: {
+        type: "score",
+        instructions: "Rate severity",
+        criteria: [
+          { label: "low", metadata: { rank: 0, tags: ["routine"] } },
+          { label: "high", metadata: { rank: 1, tags: ["urgent"] } },
+        ],
+      },
+    },
+  };
+  const response: JevDecisionResponse = {
+    model: "typesafe/jev-1.13",
+    answers: {
+      severity: {
+        type: "score",
+        score: 0.6,
+        legend: {
+          "0": { metadata: { tags: ["routine"], rank: 0 }, label: "low" },
+          "1": { metadata: { tags: ["urgent"], rank: 1 }, label: "high" },
+        },
+        probabilities: { "0": 0.4, "1": 0.6 },
+        confidence: 0.8,
+      },
+    },
+  };
+
+  assert.deepEqual(normalizeJevResponse(response, input), response);
 });
 
 test("score validation permits small probability-rounding differences", () => {

@@ -167,12 +167,19 @@ function normalizeScoreAnswer(answer: Record<string, unknown>, question: ScoreQu
   }
   const legend = requireRecord(answer.legend, `${path}.legend`);
   requireExactKeys(legend, levelKeys, `${path}.legend`);
+  const normalizedLegend = Object.fromEntries(
+    levelKeys.map((level) => [level, requireStructuredValue(legend[level], propertyPath(`${path}.legend`, level))]),
+  );
+  for (const [index, criterion] of question.criteria.entries()) {
+    const level = String(index);
+    if (!jsonValuesEqual(normalizedLegend[level], criterion)) {
+      throw new Error(`${propertyPath(`${path}.legend`, level)} must match the requested score criterion`);
+    }
+  }
   return {
     type: "score",
     score,
-    legend: Object.fromEntries(
-      levelKeys.map((level) => [level, requireStructuredValue(legend[level], propertyPath(`${path}.legend`, level))]),
-    ),
+    legend: normalizedLegend,
     probabilities,
     confidence: requireProbability(answer.confidence, `${path}.confidence`),
   };
@@ -242,6 +249,27 @@ function requireJsonValue(value: unknown, path: string, ancestors: Set<object>):
     );
   }
   throw new Error(`${path} must contain only JSON values`);
+}
+
+function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => jsonValuesEqual(value, right[index]))
+    );
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) => Object.hasOwn(right, key) && jsonValuesEqual(left[key] as JsonValue, right[key] as JsonValue),
+    )
+  );
 }
 
 function requireProbability(value: unknown, path: string): number {
