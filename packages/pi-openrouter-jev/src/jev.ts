@@ -7,7 +7,7 @@ import {
   formatSize,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { formatJevResult, requestJevDecision, resolveOpenRouterAuthorization } from "./client.js";
+import { formatJevResult, formatJevToolError, requestJevDecision, resolveOpenRouterAuthorization } from "./client.js";
 import { normalizeJevInput } from "./validation.js";
 
 export interface JevExtensionOptions {
@@ -57,10 +57,15 @@ export function createJevTool(options: JevExtensionOptions = {}) {
     ],
     parameters: jevToolParameters,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const input = normalizeJevInput(params);
-      const auth = await resolveOpenRouterAuthorization(ctx);
-      const response = await requestJevDecision(input, auth, signal, options.fetch);
-      return formatJevResult(response);
+      try {
+        const input = normalizeJevInput(params);
+        const auth = await resolveOpenRouterAuthorization(ctx);
+        const response = await requestJevDecision(input, auth, signal, options.fetch);
+        return formatJevResult(response);
+      } catch (error) {
+        if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+        throw formatJevToolError(error);
+      }
     },
   });
 }

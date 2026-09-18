@@ -27,7 +27,7 @@ export function normalizeJevInput(value: unknown): JevDecisionInput {
   const questions = Object.fromEntries(
     entries.map(([id, question]) => {
       if (!id.trim()) throw new Error("question ids must not be empty");
-      return [id, normalizeQuestion(question, `questions.${id}`)];
+      return [id, normalizeQuestion(question, propertyPath("questions", id))];
     }),
   );
   return { state, questions };
@@ -43,7 +43,7 @@ export function normalizeJevResponse(value: unknown, input: JevDecisionInput): J
 
   const answers = Object.fromEntries(
     Object.entries(input.questions).map(([id, question]) => {
-      return [id, normalizeAnswer(rawAnswers[id], question, `response.answers.${id}`)];
+      return [id, normalizeAnswer(rawAnswers[id], question, propertyPath("response.answers", id))];
     }),
   );
   const usage = response.usage === undefined ? undefined : normalizeUsage(response.usage);
@@ -57,7 +57,7 @@ export function normalizeJevResponse(value: unknown, input: JevDecisionInput): J
 function normalizeQuestion(value: unknown, path: string): JevQuestion {
   const question = requireRecord(value, path);
   for (const field of Object.keys(question)) {
-    if (!QUESTION_FIELDS.has(field)) throw new Error(`${path}.${field} is not supported`);
+    if (!QUESTION_FIELDS.has(field)) throw new Error(`${propertyPath(path, field)} is not supported`);
   }
   const instructions = requireStructuredValue(question.instructions, `${path}.instructions`);
   if (question.type === "noul") return normalizeNoulQuestion(question, instructions, path);
@@ -102,7 +102,7 @@ function normalizeChoiceQuestion(
         if (!option.trim()) throw new Error(`${path}.criteria option names must not be empty`);
         return [
           option,
-          description === null ? null : requireStructuredValue(description, `${path}.criteria.${option}`),
+          description === null ? null : requireStructuredValue(description, propertyPath(`${path}.criteria`, option)),
         ];
       }),
     ),
@@ -159,15 +159,21 @@ function normalizeScoreAnswer(answer: Record<string, unknown>, question: ScoreQu
   if (score < 0 || score > question.criteria.length - 1) {
     throw new Error(`${path}.score must be between 0 and ${question.criteria.length - 1}`);
   }
+  const probabilities = normalizeProbabilities(answer.probabilities, levelKeys, path);
+  const expectedScore = levelKeys.reduce((total, level) => total + Number(level) * (probabilities[level] ?? 0), 0);
+  const scoreTolerance = PROBABILITY_SUM_TOLERANCE * Math.max(1, question.criteria.length - 1);
+  if (Math.abs(score - expectedScore) > scoreTolerance) {
+    throw new Error(`${path}.score must match the probability-weighted level distribution`);
+  }
   const legend = requireRecord(answer.legend, `${path}.legend`);
   requireExactKeys(legend, levelKeys, `${path}.legend`);
   return {
     type: "score",
     score,
     legend: Object.fromEntries(
-      levelKeys.map((level) => [level, requireStructuredValue(legend[level], `${path}.legend.${level}`)]),
+      levelKeys.map((level) => [level, requireStructuredValue(legend[level], propertyPath(`${path}.legend`, level))]),
     ),
-    probabilities: normalizeProbabilities(answer.probabilities, levelKeys, path),
+    probabilities,
     confidence: requireProbability(answer.confidence, `${path}.confidence`),
   };
 }
@@ -177,7 +183,7 @@ function normalizeProbabilities(value: unknown, expectedKeys: string[], answerPa
   const probabilities = requireRecord(value, path);
   requireExactKeys(probabilities, expectedKeys, path);
   const normalized = Object.fromEntries(
-    expectedKeys.map((key) => [key, requireProbability(probabilities[key], `${path}.${key}`)]),
+    expectedKeys.map((key) => [key, requireProbability(probabilities[key], propertyPath(path, key))]),
   );
   const sum = Object.values(normalized).reduce((total, probability) => total + probability, 0);
   if (Math.abs(sum - 1) > PROBABILITY_SUM_TOLERANCE) {
@@ -211,7 +217,7 @@ function requireStructuredValue(value: unknown, path: string): StructuredValue {
   }
   if (isRecord(value)) {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, requireJsonValue(item, `${path}.${key}`, new Set())]),
+      Object.entries(value).map(([key, item]) => [key, requireJsonValue(item, propertyPath(path, key), new Set())]),
     );
   }
   throw new Error(`${path} must be a string, object, or array`);
@@ -232,7 +238,7 @@ function requireJsonValue(value: unknown, path: string, ancestors: Set<object>):
     if (ancestors.has(value)) throw new Error(`${path} must not contain circular data`);
     const nextAncestors = new Set(ancestors).add(value);
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, requireJsonValue(item, `${path}.${key}`, nextAncestors)]),
+      Object.entries(value).map(([key, item]) => [key, requireJsonValue(item, propertyPath(path, key), nextAncestors)]),
     );
   }
   throw new Error(`${path} must contain only JSON values`);
@@ -253,8 +259,18 @@ function requireExactKeys(value: Record<string, unknown>, expectedKeys: string[]
   const actual = Object.keys(value).sort();
   const expected = [...expectedKeys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new Error(`${path} keys must exactly match: ${expected.join(", ")}`);
+    throw new Error(`${path} keys must exactly match: ${expected.map(quotePathKey).join(", ")}`);
   }
+}
+
+function propertyPath(path: string, key: string): string {
+  return `${path}[${quotePathKey(key)}]`;
+}
+
+function quotePathKey(key: string): string {
+  return JSON.stringify(key).replace(/[\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/gu, (character) => {
+    return `\\u${(character.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`;
+  });
 }
 
 function requireRecord(value: unknown, path: string): Record<string, unknown> {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { Usage } from "@earendil-works/pi-ai";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { test, vi } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
@@ -88,7 +89,7 @@ function registeredTool(fetchImpl: typeof fetch) {
       signal: AbortSignal,
       onUpdate: undefined,
       ctx: ReturnType<typeof officialContext>,
-    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: { truncated: boolean } }>;
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: { truncated: boolean }; usage?: Usage }>;
   };
 }
 
@@ -146,6 +147,14 @@ test("tool sends a fixed-model request with Pi-resolved OpenRouter auth and retu
   assert.equal(fetchImpl.mock.calls.length, 1);
   assert.deepEqual(JSON.parse(result.content[0]?.text ?? ""), decisionResponse);
   assert.equal(result.details.truncated, false);
+  assert.deepEqual(result.usage, {
+    input: 312,
+    output: 48,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 360,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  });
 });
 
 test("resolved Authorization header takes precedence over the API key", async () => {
@@ -249,6 +258,44 @@ test("normalizes structured questions and enforces per-type criteria", () => {
   for (const [value, pattern] of invalidCases) assert.throws(() => normalizeJevInput(value), pattern);
 });
 
+test("validation paths escape untrusted question ids", () => {
+  const id = "unsafe\u001b]8;;https://evil.example\u0007link\u202ename";
+  assert.throws(
+    () => normalizeJevInput({ state: "x", questions: { [id]: { type: "noul", instructions: 1 } } }),
+    (error: Error) => {
+      assert.equal(error.message.includes("\u001b"), false);
+      assert.equal(error.message.includes("\u0007"), false);
+      assert.equal(error.message.includes("\u202e"), false);
+      assert.match(error.message, /questions\["unsafe\\u001b/);
+      assert.match(error.message, /\\u202e/);
+      return true;
+    },
+  );
+});
+
+test("tool validation failures are terminal-safe and bounded before network access", async () => {
+  const id = `unsafe\u001b]8;;https://evil.example\u0007${"x".repeat(DEFAULT_MAX_BYTES * 2)}\u202e`;
+  const fetchImpl = vi.fn<typeof fetch>();
+  await assert.rejects(
+    () =>
+      registeredTool(fetchImpl).execute(
+        "call-1",
+        { state: "x", questions: { [id]: { type: "noul", instructions: 1 } } },
+        new AbortController().signal,
+        undefined,
+        officialContext(),
+      ),
+    (error: Error) => {
+      assert.equal(error.message.includes("\u001b"), false);
+      assert.equal(error.message.includes("\u0007"), false);
+      assert.equal(error.message.includes("\u202e"), false);
+      assert.ok(Buffer.byteLength(error.message, "utf8") <= 2048);
+      return true;
+    },
+  );
+  assert.equal(fetchImpl.mock.calls.length, 0);
+});
+
 test("rejects non-JSON and circular structured values", () => {
   assert.throws(
     () =>
@@ -266,13 +313,22 @@ test("rejects non-JSON and circular structured values", () => {
   );
 });
 
-test("normalizes OpenRouter token aliases and optional cost usage", () => {
+test("normalizes OpenRouter token aliases and reports optional cost as Pi tool usage", () => {
   const response = structuredClone(decisionResponse) as unknown as Record<string, unknown>;
   response.usage = { prompt_tokens: 12, completion_tokens: 3, cost: 0.001 };
-  assert.deepEqual(normalizeJevResponse(response, decisionInput).usage, {
+  const normalized = normalizeJevResponse(response, decisionInput);
+  assert.deepEqual(normalized.usage, {
     input_tokens: 12,
     output_tokens: 3,
     cost: 0.001,
+  });
+  assert.deepEqual(formatJevResult(normalized).usage, {
+    input: 12,
+    output: 3,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 15,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
   });
 });
 
@@ -332,6 +388,14 @@ test("response validation covers answer identity, ranges, distributions, and sel
       /between 0 and 2/,
     ],
     [
+      "score contradicts probabilities",
+      (response) => {
+        const answer = response.answers.frustration;
+        if (answer?.type === "score") answer.probabilities = { "0": 1, "1": 0, "2": 0 };
+      },
+      /probability-weighted level distribution/,
+    ],
+    [
       "legend mismatch",
       (response) => {
         const answer = response.answers.frustration;
@@ -346,6 +410,14 @@ test("response validation covers answer identity, ranges, distributions, and sel
     mutate(response);
     assert.throws(() => normalizeJevResponse(response, decisionInput), pattern, name);
   }
+});
+
+test("score validation permits small probability-rounding differences", () => {
+  const response = structuredClone(decisionResponse);
+  const answer = response.answers.frustration;
+  assert.equal(answer?.type, "score");
+  answer.score = 1.63;
+  assert.equal(normalizeJevResponse(response, decisionInput).answers.frustration?.type, "score");
 });
 
 test("HTTP failures are bounded, terminal-safe, and redact credentials", async () => {
@@ -414,6 +486,50 @@ test("non-JSON, invalid, oversized, and oversized-request responses fail observa
   assert.equal(fetchImpl.mock.calls.length, 0);
 });
 
+test("response limits reject declared and streamed overflow before buffering the complete body", async () => {
+  const auth = { authorization: "Bearer secret", secrets: ["secret"] };
+  let declaredBodyCancelled = false;
+  const declaredBody = new ReadableStream<Uint8Array>({
+    cancel() {
+      declaredBodyCancelled = true;
+    },
+  });
+  await assert.rejects(
+    () =>
+      requestJevDecision(
+        decisionInput,
+        auth,
+        undefined,
+        async () =>
+          new Response(declaredBody, {
+            status: 200,
+            headers: { "Content-Length": String(1024 * 1024 + 1) },
+          }),
+      ),
+    /response exceeds the (?:1|1\.0)MB/,
+  );
+  assert.equal(declaredBodyCancelled, true);
+
+  let pulls = 0;
+  let streamedBodyCancelled = false;
+  const chunk = new Uint8Array(600 * 1024).fill(120);
+  const streamedBody = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      streamedBodyCancelled = true;
+    },
+  });
+  await assert.rejects(
+    () => requestJevDecision(decisionInput, auth, undefined, async () => new Response(streamedBody, { status: 200 })),
+    /response exceeds the (?:1|1\.0)MB/,
+  );
+  assert.equal(streamedBodyCancelled, true);
+  assert.ok(pulls <= 3, `expected early stream cancellation, received ${pulls} pulls`);
+});
+
 test("fetch cancellation is preserved", async () => {
   const controller = new AbortController();
   controller.abort();
@@ -431,6 +547,30 @@ test("fetch cancellation is preserved", async () => {
       ),
     (error: Error) => error.name === "AbortError",
   );
+});
+
+test("response body reading preserves cancellation and releases the stream", async () => {
+  const controller = new AbortController();
+  let bodyCancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start() {
+      queueMicrotask(() => controller.abort());
+    },
+    cancel() {
+      bodyCancelled = true;
+    },
+  });
+  await assert.rejects(
+    () =>
+      requestJevDecision(
+        decisionInput,
+        { authorization: "Bearer secret", secrets: ["secret"] },
+        controller.signal,
+        async () => new Response(body, { status: 200 }),
+      ),
+    (error: Error) => error.name === "AbortError",
+  );
+  assert.equal(bodyCancelled, true);
 });
 
 test("model-visible output is terminal-safe and bounded", () => {

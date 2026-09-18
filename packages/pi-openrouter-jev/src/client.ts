@@ -1,7 +1,8 @@
 import { stripVTControlCharacters } from "node:util";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
-import type { JevDecisionInput, JevDecisionResponse } from "./types.js";
+import type { JevDecisionInput, JevDecisionResponse, JevUsage } from "./types.js";
 import { normalizeJevResponse } from "./validation.js";
 
 export const JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
@@ -75,10 +76,7 @@ export async function requestJevDecision(
     body,
     signal,
   });
-  const responseText = await response.text();
-  if (Buffer.byteLength(responseText, "utf8") > MAX_RESPONSE_BYTES) {
-    throw new Error(`OpenRouter Jev response exceeds the ${formatSize(MAX_RESPONSE_BYTES)} response limit.`);
-  }
+  const responseText = await readBoundedResponseText(response, signal);
   if (!response.ok) {
     const detail = formatErrorDetail(responseText, auth.secrets);
     throw new Error(`OpenRouter Jev request failed (${response.status})${detail ? `: ${detail}` : ""}`);
@@ -99,6 +97,7 @@ export async function requestJevDecision(
 
 export function formatJevResult(response: JevDecisionResponse) {
   const serialized = escapeTerminalControls(JSON.stringify(response, null, 2));
+  const usage = response.usage ? toToolUsage(response.usage) : undefined;
   const initial = truncateHead(serialized, {
     maxBytes: DEFAULT_MAX_BYTES,
     maxLines: DEFAULT_MAX_LINES,
@@ -107,6 +106,7 @@ export function formatJevResult(response: JevDecisionResponse) {
     return {
       content: [{ type: "text" as const, text: initial.content }],
       details: resultDetails(initial, false),
+      ...(usage ? { usage } : {}),
     };
   }
 
@@ -121,6 +121,7 @@ export function formatJevResult(response: JevDecisionResponse) {
       return {
         content: [{ type: "text" as const, text }],
         details: resultDetails(excerpt, true),
+        ...(usage ? { usage } : {}),
       };
     }
     const nextByteBudget = Math.max(0, DEFAULT_MAX_BYTES - Buffer.byteLength(footer, "utf8") - 2);
@@ -131,6 +132,11 @@ export function formatJevResult(response: JevDecisionResponse) {
     byteBudget = Math.min(byteBudget, nextByteBudget);
     lineBudget = Math.min(lineBudget, nextLineBudget);
   }
+}
+
+export function formatJevToolError(error: unknown): Error {
+  const message = sanitizeErrorText(errorMessage(error), []);
+  return new Error(message || "Jev request failed.");
 }
 
 function resultDetails(
@@ -153,6 +159,72 @@ function resultDetails(
   };
 }
 
+async function readBoundedResponseText(response: Response, signal: AbortSignal | undefined): Promise<string> {
+  if (signal?.aborted) {
+    await cancelResponseBody(response, signal.reason);
+    signal.throwIfAborted();
+  }
+
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && /^\d+$/u.test(contentLength) && Number(contentLength) > MAX_RESPONSE_BYTES) {
+    await cancelResponseBody(response);
+    throw new Error(`OpenRouter Jev response exceeds the ${formatSize(MAX_RESPONSE_BYTES)} response limit.`);
+  }
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  const abortReader = () => {
+    void reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", abortReader, { once: true });
+
+  try {
+    signal?.throwIfAborted();
+    for (;;) {
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`OpenRouter Jev response exceeds the ${formatSize(MAX_RESPONSE_BYTES)} response limit.`);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } catch (error) {
+    if (signal?.aborted) await reader.cancel(signal.reason).catch(() => {});
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", abortReader);
+    reader.releaseLock();
+  }
+}
+
+async function cancelResponseBody(response: Response, reason?: unknown): Promise<void> {
+  await response.body?.cancel(reason).catch(() => {});
+}
+
+function toToolUsage(usage: JevUsage): Usage {
+  return {
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: usage.input_tokens + usage.output_tokens,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: usage.cost ?? 0,
+    },
+  };
+}
+
 function formatErrorDetail(responseText: string, secrets: readonly string[]): string {
   if (!responseText) return "";
   let value = responseText;
@@ -166,10 +238,16 @@ function formatErrorDetail(responseText: string, secrets: readonly string[]): st
   } catch {
     // Keep the plain-text response.
   }
+  return sanitizeErrorText(value, secrets);
+}
+
+function sanitizeErrorText(value: string, secrets: readonly string[]): string {
   for (const secret of [...secrets].sort((left, right) => right.length - left.length)) {
     value = value.replaceAll(secret, "[redacted]");
   }
-  const safe = stripControlCharacters(stripVTControlCharacters(value)).replace(/\s+/gu, " ").trim();
+  const safe = escapeTerminalControls(stripControlCharacters(stripVTControlCharacters(value)))
+    .replace(/\s+/gu, " ")
+    .trim();
   return truncateHead(safe, { maxBytes: MAX_ERROR_BYTES, maxLines: 1 }).content;
 }
 
@@ -177,7 +255,14 @@ function escapeTerminalControls(value: string): string {
   let escaped = "";
   for (const character of value) {
     const code = character.codePointAt(0) ?? 0;
-    if ((code >= 0x7f && code <= 0x9f) || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)) {
+    if (
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0x061c ||
+      code === 0x200e ||
+      code === 0x200f ||
+      (code >= 0x2028 && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069)
+    ) {
       escaped += `\\u${code.toString(16).padStart(4, "0")}`;
     } else {
       escaped += character;
