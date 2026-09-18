@@ -1,0 +1,537 @@
+import assert from "node:assert/strict";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import {
+  buildSessionContext,
+  type CompactionEntry,
+  type SessionBeforeCompactEvent,
+  type SessionEntry,
+  sessionEntryToContextMessages,
+} from "@earendil-works/pi-coding-agent";
+import { test } from "vitest";
+import {
+  activeContextManagementCompaction,
+  CONTEXT_CONTRACT_MESSAGE_TYPE,
+  CONTEXT_DEACTIVATION_MESSAGE_TYPE,
+  CONTEXT_DETAILS_KIND,
+  CONTEXT_STATE_ENTRY_TYPE,
+  CONTEXT_VERSION,
+  type ContextManagementDetails,
+  compactionRetainedContext,
+  contextContract,
+  contextDeactivation,
+  createContextManagementDetails,
+  createInitialContextState,
+  latestContextMode,
+  loadContextLineage,
+  parseContextManagementCompaction,
+  parseContextManagementDetails,
+  projectContextManagementContext,
+  reconcileContextContract,
+} from "../src/context-window.js";
+import { fingerprintMessage } from "../src/fingerprint.js";
+
+const first = "11111111-1111-4111-8111-111111111111";
+const second = "22222222-2222-4222-8222-222222222222";
+
+function message(text: string, timestamp: number): AgentMessage {
+  return { role: "user", content: [{ type: "text", text }], timestamp };
+}
+
+function customState(data: unknown): SessionEntry {
+  return {
+    type: "custom",
+    customType: CONTEXT_STATE_ENTRY_TYPE,
+    data,
+    id: "state",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function customMessage(
+  id: string,
+  parentId: string,
+  customType: string,
+  content: string,
+): Extract<SessionEntry, { type: "custom_message" }> {
+  return {
+    type: "custom_message",
+    customType,
+    content,
+    display: false,
+    id,
+    parentId,
+    timestamp: "2026-01-01T00:00:01.000Z",
+  };
+}
+
+test("creates and reconstructs versioned context lineage", () => {
+  const state = createInitialContextState(first);
+  assert.deepEqual(state, {
+    kind: CONTEXT_DETAILS_KIND,
+    version: CONTEXT_VERSION,
+    firstWindowId: first,
+    currentWindowId: first,
+  });
+  const kept = message("kept", 2);
+  const details = createContextManagementDetails({
+    lineage: state,
+    keptMessages: [kept],
+    reason: "manual",
+    windowId: second,
+    createdAt: "2026-01-01T00:00:01.000Z",
+  });
+  const compaction: SessionEntry = {
+    type: "compaction",
+    id: "compact",
+    parentId: "state",
+    timestamp: "2026-01-01T00:00:01.000Z",
+    summary: contextContract(details),
+    firstKeptEntryId: "kept",
+    tokensBefore: 100,
+    details,
+  };
+  assert.deepEqual(loadContextLineage([customState(state), compaction]), details);
+  assert.deepEqual(activeContextManagementCompaction([customState(state), compaction])?.details, details);
+  assert.equal(parseContextManagementDetails({ ...details, retryResponseFingerprint: "bad" }), undefined);
+});
+
+test("rejects malformed and unsupported context details", () => {
+  assert.equal(parseContextManagementDetails(undefined), undefined);
+  assert.equal(
+    parseContextManagementDetails({
+      kind: CONTEXT_DETAILS_KIND,
+      version: 2,
+      firstWindowId: first,
+      previousWindowId: first,
+      currentWindowId: second,
+      reason: "manual",
+      keptMessageFingerprints: [],
+      createdAt: "now",
+    }),
+    undefined,
+  );
+});
+
+test("rejects foreign compaction details before serialization", () => {
+  let serializations = 0;
+  const foreign = {
+    kind: "foreign-compaction",
+    version: 1,
+    toJSON() {
+      serializations += 1;
+      throw new Error("foreign details should not be serialized");
+    },
+  };
+  assert.equal(parseContextManagementDetails(foreign), undefined);
+  assert.equal(serializations, 0);
+  const entry: SessionEntry = {
+    type: "compaction",
+    id: "foreign",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    summary: "foreign summary",
+    firstKeptEntryId: "foreign",
+    tokensBefore: 1,
+    details: foreign,
+  };
+  assert.equal(loadContextLineage([entry]), undefined);
+  assert.equal(serializations, 0);
+});
+
+test("loads the newest owned lineage without replaying older entries", () => {
+  const state = createInitialContextState(first);
+  const details = createContextManagementDetails({
+    lineage: state,
+    keptMessages: [],
+    reason: "manual",
+    windowId: second,
+  });
+  const newest: SessionEntry = {
+    type: "compaction",
+    id: "newest",
+    parentId: "older",
+    timestamp: "2026-01-01T00:00:01.000Z",
+    summary: contextContract(details),
+    firstKeptEntryId: "older",
+    tokensBefore: 100,
+    details,
+  };
+  const entries = new Proxy([customState(state), newest], {
+    get(target, property, receiver) {
+      if (property === "0") throw new Error("older lineage entry was replayed");
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  assert.deepEqual(loadContextLineage(entries), details);
+});
+
+test("bounds every branch scan and shares one details-work budget", () => {
+  const entries: SessionEntry[] = [
+    {
+      type: "message",
+      id: "first-message",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: message("first", 1),
+    },
+    {
+      type: "message",
+      id: "second-message",
+      parentId: "first-message",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      message: message("second", 2),
+    },
+  ];
+  for (const scan of [loadContextLineage, activeContextManagementCompaction, latestContextMode]) {
+    assert.throws(
+      () => scan(entries, { remainingVisits: 1, remainingScanUnits: 1_000 }),
+      /context branch traversal exceeded its entry limit/,
+    );
+  }
+
+  const malformedDetails = {
+    kind: CONTEXT_DETAILS_KIND,
+    version: CONTEXT_VERSION,
+    firstWindowId: first,
+    previousWindowId: first,
+    currentWindowId: second,
+    reason: "manual",
+    keptMessageFingerprints: ["g".repeat(64)],
+    createdAt: "now",
+  };
+  const malformedCompactions: SessionEntry[] = [
+    {
+      type: "compaction",
+      id: "first-malformed",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      summary: "malformed",
+      firstKeptEntryId: "first-malformed",
+      tokensBefore: 1,
+      details: malformedDetails,
+    },
+    {
+      type: "compaction",
+      id: "second-malformed",
+      parentId: "first-malformed",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      summary: "malformed",
+      firstKeptEntryId: "second-malformed",
+      tokensBefore: 1,
+      details: malformedDetails,
+    },
+  ];
+  assert.throws(
+    () => loadContextLineage(malformedCompactions, { remainingVisits: 10, remainingScanUnits: 250 }),
+    /context branch traversal exceeded its scan limit/,
+  );
+});
+
+test("accepts persisted context details only with their canonical summary", () => {
+  const state = createInitialContextState(first);
+  const details = createContextManagementDetails({
+    lineage: state,
+    keptMessages: [],
+    reason: "manual",
+    windowId: second,
+  });
+  const replaced: CompactionEntry = {
+    type: "compaction",
+    id: "replaced",
+    parentId: "state",
+    timestamp: "2026-01-01T00:00:01.000Z",
+    summary: "Replacement summary",
+    firstKeptEntryId: "state",
+    tokensBefore: 100,
+    details,
+  };
+  assert.equal(parseContextManagementCompaction(replaced), undefined);
+  assert.deepEqual(loadContextLineage([customState(state), replaced]), state);
+  assert.equal(activeContextManagementCompaction([customState(state), replaced]), undefined);
+});
+
+test("derives context mode from Pi's compaction-aware model order", () => {
+  const state = createInitialContextState(first);
+  const activation = customMessage("activation", "state", CONTEXT_CONTRACT_MESSAGE_TYPE, contextContract(state));
+  const deactivation = customMessage(
+    "deactivation",
+    "activation",
+    CONTEXT_DEACTIVATION_MESSAGE_TYPE,
+    contextDeactivation(),
+  );
+  const details = createContextManagementDetails({
+    lineage: state,
+    keptMessages: sessionEntryToContextMessages(deactivation),
+    reason: "threshold",
+    windowId: second,
+  });
+  const compaction: SessionEntry = {
+    type: "compaction",
+    id: "compaction",
+    parentId: "deactivation",
+    timestamp: "2026-01-01T00:00:02.000Z",
+    summary: contextContract(details),
+    firstKeptEntryId: "deactivation",
+    tokensBefore: 100,
+    details,
+  };
+  const entries = [customState(state), activation, deactivation, compaction];
+  assert.equal(latestContextMode(entries), "inactive");
+
+  const reactivation = customMessage(
+    "reactivation",
+    "compaction",
+    CONTEXT_CONTRACT_MESSAGE_TYPE,
+    contextContract(details),
+  );
+  assert.equal(latestContextMode([...entries, reactivation]), "active");
+
+  const later: SessionEntry = {
+    type: "message",
+    id: "later",
+    parentId: "deactivation",
+    timestamp: "2026-01-01T00:00:02.000Z",
+    message: message("later retained message", 2),
+  };
+  const discardedDetails = createContextManagementDetails({
+    lineage: state,
+    keptMessages: [later.message],
+    reason: "threshold",
+    windowId: second,
+  });
+  const compactionDiscardingDeactivation: SessionEntry = {
+    ...compaction,
+    id: "discarding-compaction",
+    parentId: "later",
+    summary: contextContract(discardedDetails),
+    firstKeptEntryId: "later",
+    details: discardedDetails,
+  };
+  assert.equal(
+    latestContextMode([customState(state), activation, deactivation, later, compactionDiscardingDeactivation]),
+    "active",
+  );
+});
+
+test("projects only an exactly fingerprinted retained prefix", () => {
+  const kept = message("old retained", 2);
+  const later = message("new window", 4);
+  const details = createContextManagementDetails({
+    lineage: createInitialContextState(first),
+    keptMessages: [kept],
+    reason: "threshold",
+    windowId: second,
+    createdAt: "2026-01-01T00:00:03.000Z",
+  });
+  const summary: AgentMessage = {
+    role: "compactionSummary",
+    summary: contextContract(details),
+    tokensBefore: 100,
+    timestamp: 3,
+  };
+  const entry = {
+    type: "compaction",
+    id: "compact",
+    parentId: "kept",
+    timestamp: "2026-01-01T00:00:03.000Z",
+    summary: contextContract(details),
+    firstKeptEntryId: "kept",
+    tokensBefore: 100,
+    details,
+  } as CompactionEntry<typeof details>;
+  assert.deepEqual(projectContextManagementContext([summary, kept, later], entry, details), [summary, later]);
+  assert.equal(projectContextManagementContext([summary, message("changed", 2), later], entry, details), undefined);
+  const next = message("next ordinary turn", 5);
+  const firstProjection = projectContextManagementContext([summary, kept, later], entry, details);
+  const secondProjection = projectContextManagementContext([summary, kept, later, next], entry, details);
+  assert.deepEqual(secondProjection?.slice(0, firstProjection?.length), firstProjection);
+});
+
+test("shares one fingerprint budget across retained creation and projection", () => {
+  const retained = [message("a".repeat(2_100_000), 2), message("b".repeat(2_100_000), 3)];
+  const fingerprints = retained.map((item) => fingerprintMessage(item));
+  assert.throws(
+    () =>
+      createContextManagementDetails({
+        lineage: createInitialContextState(first),
+        keptMessages: retained,
+        reason: "threshold",
+        windowId: second,
+      }),
+    /fingerprint exceeded its traversal limit/,
+  );
+
+  const details: ContextManagementDetails = {
+    kind: CONTEXT_DETAILS_KIND,
+    version: CONTEXT_VERSION,
+    firstWindowId: first,
+    previousWindowId: first,
+    currentWindowId: second,
+    reason: "threshold",
+    keptMessageFingerprints: fingerprints,
+    createdAt: "2026-01-01T00:00:03.000Z",
+  };
+  const summary: AgentMessage = {
+    role: "compactionSummary",
+    summary: contextContract(details),
+    tokensBefore: 100,
+    timestamp: 4,
+  };
+  const entry = {
+    type: "compaction",
+    summary: contextContract(details),
+  } as CompactionEntry<ContextManagementDetails>;
+  assert.throws(
+    () => projectContextManagementContext([summary, ...retained], entry, details),
+    /fingerprint exceeded its traversal limit/,
+  );
+});
+
+test.each(["error", "length"] as const)(
+  "excludes a retried overflow %s response immediately and after reconstruction",
+  (stopReason) => {
+    const user = message("kept", 1);
+    const failed: AgentMessage = {
+      role: "assistant",
+      content: [],
+      api: "openai-responses",
+      provider: "test",
+      model: "test",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason,
+      timestamp: 2,
+    };
+    const entries: SessionEntry[] = [
+      {
+        type: "message",
+        id: "user",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01.000Z",
+        message: user,
+      },
+      {
+        type: "message",
+        id: "failed",
+        parentId: "user",
+        timestamp: "2026-01-01T00:00:02.000Z",
+        message: failed,
+      },
+    ];
+    const event: SessionBeforeCompactEvent = {
+      type: "session_before_compact",
+      preparation: {
+        firstKeptEntryId: "user",
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 100,
+        fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+        settings: { enabled: true, reserveTokens: 10, keepRecentTokens: 10 },
+      },
+      branchEntries: entries,
+      reason: "overflow",
+      willRetry: true,
+      signal: new AbortController().signal,
+    };
+    const retained = compactionRetainedContext(event);
+    assert.deepEqual(retained.keptMessages, [user]);
+    assert.match(retained.retryResponseFingerprint ?? "", /^[a-f0-9]{64}$/);
+    assert.deepEqual(compactionRetainedContext({ ...event, willRetry: false }), {
+      keptMessages: [user, failed],
+    });
+
+    const details = createContextManagementDetails({
+      lineage: createInitialContextState(first),
+      ...retained,
+      reason: "overflow",
+      windowId: second,
+    });
+    const summary: AgentMessage = {
+      role: "compactionSummary",
+      summary: contextContract(details),
+      tokensBefore: 100,
+      timestamp: 3,
+    };
+    const entry: CompactionEntry<typeof details> = {
+      type: "compaction",
+      id: "retry-compaction",
+      parentId: "failed",
+      timestamp: new Date(3).toISOString(),
+      summary: contextContract(details),
+      firstKeptEntryId: "user",
+      tokensBefore: 100,
+      details,
+    };
+    const next = message("retried response", 4);
+    assert.deepEqual(projectContextManagementContext([summary, user, next], entry, details), [summary, next]);
+    const reconstructedMessages = buildSessionContext(
+      [
+        ...entries,
+        entry,
+        {
+          type: "message",
+          id: "retry",
+          parentId: entry.id,
+          timestamp: new Date(4).toISOString(),
+          message: next,
+        },
+      ],
+      "retry",
+    ).messages;
+    assert.deepEqual(projectContextManagementContext(reconstructedMessages, entry, details), [summary, next]);
+  },
+);
+
+test("fails closed when the active compaction summary timestamp is non-finite", () => {
+  const kept = message("kept", 2);
+  const details = createContextManagementDetails({
+    lineage: createInitialContextState(first),
+    keptMessages: [kept],
+    reason: "threshold",
+    windowId: second,
+  });
+  const summary: AgentMessage = {
+    role: "compactionSummary",
+    summary: contextContract(details),
+    tokensBefore: 100,
+    timestamp: Number.POSITIVE_INFINITY,
+  };
+  const olderSummary: AgentMessage = {
+    role: "compactionSummary",
+    summary: "older",
+    tokensBefore: 50,
+    timestamp: 1,
+  };
+  const entry = {
+    type: "compaction",
+    summary: contextContract(details),
+  } as CompactionEntry<typeof details>;
+  assert.equal(projectContextManagementContext([summary, olderSummary, kept], entry, details), undefined);
+});
+
+test("restores exactly one current context contract", () => {
+  const lineage = createInitialContextState(first);
+  const ordinary = [message("hello", 1)];
+  const once = reconcileContextContract(ordinary, lineage);
+  const twice = reconcileContextContract(once, lineage);
+  assert.equal(once.length, 2);
+  assert.deepEqual(twice, once);
+  const branchSummary: AgentMessage = {
+    role: "branchSummary",
+    summary: "branch",
+    fromId: "old",
+    timestamp: 2,
+  };
+  const restored = reconcileContextContract([branchSummary, ...ordinary], lineage);
+  assert.equal(restored[0], branchSummary);
+  assert.equal(restored[1], ordinary[0]);
+  assert.equal(restored[2].role, "custom");
+});
