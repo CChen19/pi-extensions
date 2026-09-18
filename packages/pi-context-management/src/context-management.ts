@@ -69,6 +69,7 @@ interface SessionState {
   generation: number;
   sessionId: string;
   lineage?: ContextLineage;
+  lineageFailed: boolean;
   pending?: PendingRollover;
   warned: boolean;
   warnedUnavailableTools: boolean;
@@ -343,7 +344,8 @@ export function createContextManager(
       : current.filter((name) => !inspection.ownedNames.has(name));
     if (!sameNames(current, next)) pi.setActiveTools(next);
     for (const candidate of states.values()) {
-      candidate.toolsAvailable = available && (candidate === state || candidate.lineage !== undefined);
+      candidate.toolsAvailable =
+        available && !candidate.lineageFailed && (candidate === state || candidate.lineage !== undefined);
     }
     if (activate && !available) {
       warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
@@ -380,15 +382,25 @@ export function createContextManager(
   };
 
   const ensureLineage = (state: SessionState, ctx: ExtensionContext): ContextLineage => {
-    const persisted = state.lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
-    if (persisted) {
-      state.lineage = persisted;
-      return persisted;
+    let lineage: ContextLineage;
+    try {
+      const persisted = state.lineage ?? loadContextLineage(ctx.sessionManager.getBranch());
+      if (persisted) {
+        lineage = persisted;
+      } else {
+        const initial = createInitialContextState();
+        pi.appendEntry(CONTEXT_STATE_ENTRY_TYPE, initial);
+        lineage = initial;
+      }
+    } catch (error) {
+      state.lineageFailed = true;
+      state.toolsAvailable = false;
+      throw error;
     }
-    const initial = createInitialContextState();
-    pi.appendEntry(CONTEXT_STATE_ENTRY_TYPE, initial);
-    state.lineage = initial;
-    return initial;
+    state.lineage = lineage;
+    state.lineageFailed = false;
+    state.toolsAvailable = (isConfigured() || state.removeToolsAtSettlement) && inspectToolUnit().complete;
+    return lineage;
   };
 
   const warnEnabled = (state: SessionState, ctx: ExtensionContext) => {
@@ -462,6 +474,7 @@ export function createContextManager(
     for (const candidate of states.values()) {
       if (
         candidate !== state &&
+        candidate.lineage !== undefined &&
         !candidate.controller.signal.aborted &&
         candidate.sessionId === candidate.key.getSessionId() &&
         latestContextMode(candidate.key.getBranch()) !== "active"
@@ -511,6 +524,9 @@ export function createContextManager(
     isEnabled(ctx) {
       const state = stateFor(ctx);
       return state ? enabledFor(state) : false;
+    },
+    firstWindowId(ctx) {
+      return stateFor(ctx)?.lineage?.firstWindowId;
     },
     requestNewContext,
   });
@@ -665,6 +681,7 @@ export function createContextManager(
         generation,
         sessionId,
         lineage: loadContextLineage(branch, recoveryBudget),
+        lineageFailed: false,
         pending: restoredRollover(branch, sessionId, generation, recoveryBudget),
         warned: false,
         warnedUnavailableTools: false,
@@ -691,6 +708,7 @@ export function createContextManager(
         ...previous,
         generation,
         lineage: loadContextLineage(branch, recoveryBudget),
+        lineageFailed: false,
         pending: restoredRollover(branch, previous.sessionId, generation, recoveryBudget),
         removeToolsAtSettlement: false,
         fallbackDeactivationPending: false,
@@ -776,10 +794,10 @@ export function createContextManager(
         return undefined;
       }
       const branch = ctx.sessionManager.getBranch();
-      const activeLineage = state.lineage ?? loadContextLineage(branch);
-      if (!activeLineage) return undefined;
       try {
         const activationPending = state.fallbackActivationPending && latestContextMode(branch) !== "active";
+        const activeLineage = state.lineage ?? loadContextLineage(branch);
+        if (!activeLineage) return undefined;
         const compaction = activeContextManagementCompaction(branch);
         if (compaction) {
           const projected = projectContextManagementContext(messages, compaction.entry, compaction.details);

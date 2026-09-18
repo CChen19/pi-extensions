@@ -198,6 +198,7 @@ Limits are fixed to keep session growth and tool responses bounded:
 | Recall query | 512 characters |
 | Recall search page | 20 matches |
 | History branch traversal | 100,000 entry visits per request |
+| History compaction attribution | 8,388,608 persisted-detail scan units per request |
 | Context lineage, mode, and rollover recovery | 100,000 combined entry visits and 8,388,608 persisted-detail scan units per operation |
 | History read scan | 4,194,304 scan units per selected item |
 | History search scan | 4,194,304 scan units across indexed characters and visited values per request |

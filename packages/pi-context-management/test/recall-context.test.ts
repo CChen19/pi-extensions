@@ -4,6 +4,7 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import {
   CONTEXT_STATE_ENTRY_TYPE,
+  contextContract,
   createContextManagementDetails,
   createInitialContextState,
 } from "../src/context-window.js";
@@ -76,7 +77,9 @@ function assistantMessage(content: unknown[]): AgentMessage {
 
 test("lists and searches model-visible history without custom-entry payloads", () => {
   const entries = branch();
-  const listed = recallContext(entries, { source: "history", action: "list" });
+  const listed = recallContext(entries, { source: "history", action: "list" }, undefined, {
+    firstWindowId: windowId,
+  });
   assert.match(listed.text, /"id": "user"/);
   assert.match(listed.text, new RegExp(windowId));
   const searched = recallContext(entries, {
@@ -133,9 +136,9 @@ test("excludes hidden shell executions from every recall action", () => {
   assert.match(read.text, /visible-output/);
 });
 
-test("history list stops branch traversal after one page", () => {
-  const entries = branch();
-  for (let index = 0; index < 25; index += 1) {
+test("history list uses restored lineage without rescanning before its first page", () => {
+  const entries: SessionEntry[] = [];
+  for (let index = 0; index < 100; index += 1) {
     entries.push(
       historyEntry(`page-${index}`, {
         role: "user",
@@ -144,6 +147,7 @@ test("history list stops branch traversal after one page", () => {
       }),
     );
   }
+  entries.push(branch()[1]);
   let visits = 0;
   const branchView = new Proxy(entries, {
     get(target, property, receiver) {
@@ -151,17 +155,20 @@ test("history list stops branch traversal after one page", () => {
       return function* iterate() {
         for (const entry of target) {
           visits += 1;
-          if (visits > 40) throw new Error("history list traversed beyond its first page");
+          if (visits > 21) throw new Error("history list rescanned before producing its first page");
           yield entry;
         }
       };
     },
   });
 
-  const listed = recallContext(branchView, { source: "history", action: "list" });
+  const listed = recallContext(branchView, { source: "history", action: "list" }, undefined, {
+    firstWindowId: windowId,
+  });
   assert.equal((listed.details.items as unknown[]).length, 20);
   assert.equal(listed.details.nextCursor, "20");
-  assert.ok(visits <= 40);
+  assert.equal((listed.details.items as Array<{ windowId?: string }>)[0]?.windowId, windowId);
+  assert.equal(visits, 21);
 });
 
 test("bounds branch traversal for every history action", () => {
@@ -183,6 +190,46 @@ test("bounds branch traversal for every history action", () => {
   for (const input of inputs) {
     assert.throws(() => recallContext(entries, input), /history branch traversal exceeded its entry limit/);
   }
+});
+
+test("shares one detail-scan budget across recalled compactions", () => {
+  const firstLineage = createInitialContextState(windowId);
+  const retained: AgentMessage = {
+    role: "user",
+    content: [{ type: "text", text: "retained" }],
+    timestamp: 1,
+  };
+  const firstDetails = createContextManagementDetails({
+    lineage: firstLineage,
+    keptMessages: Array(10).fill(retained),
+    reason: "manual",
+    windowId: "22222222-2222-4222-8222-222222222222",
+  });
+  const secondDetails = createContextManagementDetails({
+    lineage: firstDetails,
+    keptMessages: Array(10).fill(retained),
+    reason: "manual",
+    windowId: "33333333-3333-4333-8333-333333333333",
+  });
+  const entries: SessionEntry[] = [firstDetails, secondDetails].map((details, index) => ({
+    type: "compaction",
+    id: `compaction-${index}`,
+    parentId: index === 0 ? null : `compaction-${index - 1}`,
+    timestamp: `2026-01-01T00:00:0${index}.000Z`,
+    summary: contextContract(details),
+    firstKeptEntryId: `compaction-${index}`,
+    tokensBefore: 100,
+    details,
+  }));
+
+  assert.throws(
+    () =>
+      recallContext(entries, { source: "history", action: "list" }, undefined, {
+        firstWindowId: firstLineage.firstWindowId,
+        historyDetailScanUnits: 1_000,
+      }),
+    /context branch traversal exceeded its scan limit/,
+  );
 });
 
 test("bounds branch traversal for every notes recall action", () => {
