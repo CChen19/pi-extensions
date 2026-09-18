@@ -13,6 +13,21 @@ export interface ContextManagementMenuOwner {
   onSettingsChanged(): void | Promise<void>;
 }
 
+const settingsChangeQueues = new WeakMap<ContextManagementSettingsRuntime, Promise<void>>();
+
+function enqueueSettingsChange<T>(runtime: ContextManagementSettingsRuntime, operation: () => Promise<T>): Promise<T> {
+  const queued = settingsChangeQueues.get(runtime) ?? Promise.resolve();
+  const result = queued.then(operation, operation);
+  settingsChangeQueues.set(
+    runtime,
+    result.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return result;
+}
+
 async function updateEnabled(
   runtime: ContextManagementSettingsRuntime,
   ctx: ExtensionCommandContext,
@@ -20,39 +35,41 @@ async function updateEnabled(
   signal: AbortSignal,
   onSettingsChanged: () => void | Promise<void>,
 ) {
-  const previous = runtime.get().settings.enabled;
-  try {
-    await runtime.update({ enabled }, signal);
-  } catch (error) {
-    if (signal.aborted) return { kind: "rejected" as const };
-    ctx.ui.notify(
-      `Could not save pi-context-management.json: ${safeText(error instanceof Error ? error.message : String(error))}`,
-      "error",
-    );
-    return { kind: "rejected" as const };
-  }
-  try {
-    // A completed save remains committed even if menu cancellation races with reconciliation.
-    await onSettingsChanged();
-  } catch (error) {
-    let rollbackError: unknown;
+  return enqueueSettingsChange(runtime, async () => {
+    const previous = runtime.get().settings.enabled;
     try {
-      await runtime.update({ enabled: previous });
+      await runtime.update({ enabled }, signal);
+    } catch (error) {
+      if (signal.aborted) return { kind: "rejected" as const };
+      ctx.ui.notify(
+        `Could not save pi-context-management.json: ${safeText(error instanceof Error ? error.message : String(error))}`,
+        "error",
+      );
+      return { kind: "rejected" as const };
+    }
+    try {
+      // A completed save remains committed even if menu cancellation races with reconciliation.
       await onSettingsChanged();
-    } catch (recoveryError) {
-      rollbackError = recoveryError;
+    } catch (error) {
+      let rollbackError: unknown;
+      try {
+        await runtime.update({ enabled: previous });
+        await onSettingsChanged();
+      } catch (recoveryError) {
+        rollbackError = recoveryError;
+      }
+      if (signal.aborted) return { kind: "rejected" as const };
+      const failure = safeText(error instanceof Error ? error.message : String(error));
+      const recovery = rollbackError
+        ? ` The previous setting could not be fully restored: ${safeText(rollbackError instanceof Error ? rollbackError.message : String(rollbackError))}`
+        : " The previous setting was restored.";
+      ctx.ui.notify(`Could not apply experimental context management: ${failure}.${recovery}`, "error");
+      return { kind: "rejected" as const };
     }
     if (signal.aborted) return { kind: "rejected" as const };
-    const failure = safeText(error instanceof Error ? error.message : String(error));
-    const recovery = rollbackError
-      ? ` The previous setting could not be fully restored: ${safeText(rollbackError instanceof Error ? rollbackError.message : String(rollbackError))}`
-      : " The previous setting was restored.";
-    ctx.ui.notify(`Could not apply experimental context management: ${failure}.${recovery}`, "error");
-    return { kind: "rejected" as const };
-  }
-  if (signal.aborted) return { kind: "rejected" as const };
-  ctx.ui.notify("Context management settings saved.", "info");
-  return { kind: "stay" as const };
+    ctx.ui.notify("Context management settings saved.", "info");
+    return { kind: "stay" as const };
+  });
 }
 
 export function createContextManagementMenu(

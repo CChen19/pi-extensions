@@ -27,6 +27,10 @@ export interface RecallContextInput {
   cursor?: string;
 }
 
+export interface RecallContextLimits {
+  historySearchScanUnits?: number;
+}
+
 interface HistoryMessageItem {
   id: string;
   windowId?: string;
@@ -412,6 +416,7 @@ export function recallContext(
   entries: readonly SessionEntry[],
   input: RecallContextInput,
   activeToolCallId?: string,
+  limits: RecallContextLimits = {},
 ): { text: string; details: Record<string, unknown> } {
   if (input.source !== "history" && input.source !== "notes") {
     throw new Error("context_management_recall_context source must be history or notes");
@@ -494,7 +499,10 @@ export function recallContext(
       details: { source: "history", id: item.id, ...page },
     };
   }
-  const searchBudget: SearchScanBudget = { remainingUnits: MAX_HISTORY_SEARCH_SCAN_UNITS, exceeded: false };
+  const searchBudget: SearchScanBudget = {
+    remainingUnits: limits.historySearchScanUnits ?? MAX_HISTORY_SEARCH_SCAN_UNITS,
+    exceeded: false,
+  };
   const indexedText = new Map<string, string>();
   const matches = searchPage(history, offset, (item) => {
     if (isActiveToolCallMessage(item.message, activeToolCallId)) return false;

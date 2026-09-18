@@ -92,6 +92,50 @@ test("setting changes apply immediately and runtime failures restore the prior v
   assert.match(notifications[0]?.message ?? "", /previous setting was restored/i);
 });
 
+test("concurrent setting changes roll back to the latest serialized value", async () => {
+  const memory = memoryRuntime();
+  let releaseFirst!: () => void;
+  let firstApplyStarted!: () => void;
+  const firstApply = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const firstStarted = new Promise<void>((resolve) => {
+    firstApplyStarted = resolve;
+  });
+  const firstMenu = createContextManagementMenu(memory.runtime, {
+    onSettingsChanged: async () => {
+      firstApplyStarted();
+      await firstApply;
+    },
+  });
+  let secondApplications = 0;
+  const secondMenu = createContextManagementMenu(memory.runtime, {
+    onSettingsChanged: () => {
+      secondApplications += 1;
+      if (secondApplications === 1) throw new Error("second activation failed");
+    },
+  });
+  const firstContext = createMockContext({ mode: "tui" });
+  const secondContext = createMockContext({ mode: "tui" });
+  const action = {
+    state: memory.runtime.get(),
+    signal: new AbortController().signal,
+    itemId: "enabled",
+    value: "On",
+  };
+
+  const firstResult = firstMenu.actions["set-enabled"]({ ...action, ctx: firstContext.ctx });
+  await firstStarted;
+  const secondResult = secondMenu.actions["set-enabled"]({ ...action, ctx: secondContext.ctx });
+  releaseFirst();
+
+  assert.deepEqual(await firstResult, { kind: "stay" });
+  assert.deepEqual(await secondResult, { kind: "rejected" });
+  assert.deepEqual(memory.patches, [{ enabled: true }, { enabled: true }, { enabled: true }]);
+  assert.equal(memory.runtime.get().settings.enabled, true);
+  assert.match(secondContext.notifications[0]?.message ?? "", /previous setting was restored/i);
+});
+
 test("a committed save reconciles runtime state after menu cancellation", async () => {
   const memory = memoryRuntime();
   let release!: () => void;

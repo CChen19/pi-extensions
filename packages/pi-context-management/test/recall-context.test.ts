@@ -554,13 +554,19 @@ test("charges structural nodes to the aggregate history-search budget", () => {
             type: "toolCall",
             id: `large-structure-call-${index}`,
             name: "foreign_tool",
-            arguments: { values: Array(900_000).fill(index === 4 ? {} : "") },
+            arguments: { values: Array(200).fill(index === 4 ? {} : "") },
           },
         ]),
       ),
     );
   }
-  assert.throws(() => recallContext(entries, { source: "history", action: "search", query: "absent" }), /scan limit/);
+  assert.throws(
+    () =>
+      recallContext(entries, { source: "history", action: "search", query: "absent" }, undefined, {
+        historySearchScanUnits: 600,
+      }),
+    /scan limit/,
+  );
 });
 
 test("indexes deeply nested structures without recursive traversal", () => {

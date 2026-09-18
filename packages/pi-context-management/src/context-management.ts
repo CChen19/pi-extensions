@@ -342,14 +342,20 @@ export function createContextManager(
       ? [...current, ...inspection.inactiveNames]
       : current.filter((name) => !inspection.ownedNames.has(name));
     if (!sameNames(current, next)) pi.setActiveTools(next);
-    for (const candidate of states.values()) candidate.toolsAvailable = available;
+    for (const candidate of states.values()) {
+      candidate.toolsAvailable = available && (candidate === state || candidate.lineage !== undefined);
+    }
     if (activate && !available) {
       warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
     }
     return available;
   };
 
-  const deactivateIncompleteToolUnit = (state: SessionState, ctx: ExtensionContext): boolean => {
+  const deactivateIncompleteToolUnit = (
+    state: SessionState,
+    ctx: ExtensionContext,
+    publishCurrentDeactivation = true,
+  ): boolean => {
     const inspection = inspectToolUnit();
     if (inspection.complete) return false;
     let branchIsActive = false;
@@ -365,7 +371,9 @@ export function createContextManager(
         candidate.pending.errorMessage = "Experimental context management tool unit became incomplete during rollover.";
       }
     }
-    if (branchIsActive) pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+    if (branchIsActive && publishCurrentDeactivation) {
+      pi.sendMessage(deactivationMessage(), { triggerTurn: false });
+    }
     removeOwnedTools(inspection.ownedNames);
     warnToolUnitUnavailable(state, ctx, inspection.unavailableNames, inspection.inactiveNames);
     return branchIsActive;
@@ -440,7 +448,15 @@ export function createContextManager(
     try {
       activeLineage = ensureLineage(state, ctx);
     } catch (error) {
-      reconcileTools(state, false, ctx);
+      state.toolsAvailable = false;
+      const healthySessionRemains = [...states.values()].some(
+        (candidate) =>
+          candidate !== state &&
+          candidate.toolsAvailable &&
+          !candidate.controller.signal.aborted &&
+          candidate.sessionId === candidate.key.getSessionId(),
+      );
+      if (!healthySessionRemains) reconcileTools(state, false, ctx);
       throw error;
     }
     for (const candidate of states.values()) {
@@ -745,7 +761,9 @@ export function createContextManager(
     projectContext(messages, ctx) {
       const state = stateFor(ctx);
       if (!state) return undefined;
-      if (state.toolsAvailable && !inspectToolUnit().complete) deactivateIncompleteToolUnit(state, ctx);
+      if (state.toolsAvailable && !inspectToolUnit().complete) {
+        deactivateIncompleteToolUnit(state, ctx, false);
+      }
       if (!enabledFor(state)) {
         if (state.fallbackDeactivationPending) {
           if (latestContextMode(ctx.sessionManager.getBranch()) !== "inactive") {

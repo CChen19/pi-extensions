@@ -358,6 +358,56 @@ test("startup activation fails closed when initial lineage persistence fails", a
   );
 });
 
+test("a failed initial lineage write does not disable a healthy concurrent session", async () => {
+  const current = setup();
+  await start(current);
+  persistLastSentCustomMessage(current);
+
+  const secondEntries: SessionEntry[] = [messageEntry()];
+  const second = createMockContext({
+    mode: "print",
+    hasUI: false,
+    sessionManager: {
+      getSessionId: () => "second-context-session",
+      getSessionName: () => undefined,
+      getBranch: () => secondEntries,
+      getEntries: () => secondEntries,
+    },
+  });
+  const appendEntry = current.mock.rawPi.appendEntry;
+  current.mock.rawPi.appendEntry = (customType, data) => {
+    if (customType === CONTEXT_STATE_ENTRY_TYPE) throw new Error("second lineage write failed");
+    appendEntry(customType, data);
+  };
+  const sessionStart = current.mock.events.get("session_start")?.[0];
+  assert.ok(sessionStart);
+
+  await assert.rejects(async () => {
+    await sessionStart({ type: "session_start", reason: "startup" }, second.ctx);
+  }, /second lineage write failed/);
+
+  assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read", ...CONTEXT_MANAGEMENT_TOOL_NAMES]);
+  await assert.doesNotReject(() =>
+    tool(current, "context_management_get_context_remaining").execute(
+      "healthy-call",
+      {},
+      undefined,
+      undefined,
+      current.current.ctx,
+    ),
+  );
+  await assert.rejects(
+    tool(current, "context_management_get_context_remaining").execute(
+      "failed-session-call",
+      {},
+      undefined,
+      undefined,
+      second.ctx,
+    ),
+    /disabled/,
+  );
+});
+
 test("a failed initial lineage write is retried after menu rollback", async () => {
   let selection = 0;
   const current = setup(false, undefined, {
@@ -1213,10 +1263,10 @@ test.each(["context", "compaction"] as const)(
       assert.equal(result, undefined);
     }
 
-    assert.equal(
-      (current.mock.sentMessages.at(-1)?.message as { customType?: string } | undefined)?.customType,
-      CONTEXT_DEACTIVATION_MESSAGE_TYPE,
+    const deactivations = current.mock.sentMessages.filter(
+      (item) => (item.message as { customType?: string }).customType === CONTEXT_DEACTIVATION_MESSAGE_TYPE,
     );
+    assert.equal(deactivations.length, 1);
     assert.deepEqual(current.mock.rawPi.getActiveTools(), ["read"]);
     assert.match(current.current.notifications.at(-1)?.message ?? "", /inactive/);
     await assert.rejects(
