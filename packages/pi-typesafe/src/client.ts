@@ -2,6 +2,13 @@ import { stripVTControlCharacters } from "node:util";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
+import {
+  APIError,
+  type Questions,
+  type SystemOneRequest,
+  TypeSafeClient,
+  type Fetch as TypeSafeFetch,
+} from "@typesafe-ai/sdk";
 import type { JevDecisionInput, JevDecisionResponse, JevUsage } from "./types.js";
 import { normalizeJevResponse } from "./validation.js";
 
@@ -13,6 +20,7 @@ const OPENROUTER_ORIGIN = "https://openrouter.ai";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ERROR_BYTES = 2048;
+const TYPESAFE_TIMEOUT_MS = 10_000;
 
 export interface JevProvider {
   name: "TypeSafe" | "OpenRouter";
@@ -91,15 +99,87 @@ export async function requestJevDecision(
   signal: AbortSignal | undefined,
   fetchImpl: typeof fetch = fetch,
 ): Promise<JevDecisionResponse> {
-  const body = JSON.stringify({
+  const request = {
     model: provider.model,
     state: input.state,
     questions: input.questions,
-  });
+  };
+  const body = JSON.stringify(request);
   if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) {
     throw new Error(`Jev request exceeds the ${formatSize(MAX_REQUEST_BYTES)} request limit.`);
   }
 
+  if (provider.name === "TypeSafe") {
+    return requestOfficialTypeSafeDecision(input, provider, request, signal, fetchImpl);
+  }
+  return requestOpenRouterDecision(input, provider, body, signal, fetchImpl);
+}
+
+async function requestOfficialTypeSafeDecision(
+  input: JevDecisionInput,
+  provider: JevProvider,
+  request: { model: string; state: JevDecisionInput["state"]; questions: JevDecisionInput["questions"] },
+  signal: AbortSignal | undefined,
+  fetchImpl: typeof fetch,
+): Promise<JevDecisionResponse> {
+  const sdkFetch: TypeSafeFetch = async (url, init) => {
+    const response = await fetchImpl(url, init);
+    const responseText = await readBoundedResponseText(response, init?.signal ?? undefined, provider.name);
+    const headers = new Headers(response.headers);
+    headers.delete("content-encoding");
+    headers.delete("content-length");
+    const body = response.status === 204 || response.status === 205 || response.status === 304 ? null : responseText;
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+  const client = new TypeSafeClient({
+    apiKey: provider.authorization.replace(/^Bearer\s+/u, ""),
+    baseURL: new URL(provider.endpoint).origin,
+    defaultModel: provider.model,
+    fetch: sdkFetch,
+    logLevel: "off",
+    retry: { maxRetries: 0 },
+    timeout: TYPESAFE_TIMEOUT_MS,
+  });
+  const sdkRequest: SystemOneRequest<Questions> = {
+    ...request,
+    questions: request.questions as Questions,
+  };
+
+  let payload: unknown;
+  try {
+    payload = await client.systemOne(sdkRequest, { signal });
+    signal?.throwIfAborted();
+  } catch (error) {
+    if (signal?.aborted) signal.throwIfAborted();
+    if (error instanceof APIError) {
+      const detail = formatErrorPayload(error.body, provider.secrets);
+      throw new Error(`${provider.name} Jev request failed (${error.status})${detail ? `: ${detail}` : ""}`);
+    }
+    const detail = sanitizeErrorText(errorMessage(error), provider.secrets);
+    throw new Error(`${provider.name} Jev request failed${detail ? `: ${detail}` : "."}`);
+  }
+
+  if (typeof payload === "string") {
+    throw new Error(`${provider.name} Jev returned a non-JSON response.`);
+  }
+  try {
+    return normalizeJevResponse(payload, input);
+  } catch (error) {
+    throw new Error(`${provider.name} Jev returned an invalid response: ${errorMessage(error)}`);
+  }
+}
+
+async function requestOpenRouterDecision(
+  input: JevDecisionInput,
+  provider: JevProvider,
+  body: string,
+  signal: AbortSignal | undefined,
+  fetchImpl: typeof fetch,
+): Promise<JevDecisionResponse> {
   const response = await fetchImpl(provider.endpoint, {
     method: "POST",
     headers: {
@@ -264,16 +344,26 @@ function toToolUsage(usage: JevUsage): Usage {
 
 function formatErrorDetail(responseText: string, secrets: readonly string[]): string {
   if (!responseText) return "";
-  let value = responseText;
   try {
-    const payload = JSON.parse(responseText) as unknown;
-    if (isRecord(payload) && typeof payload.error === "string") value = payload.error;
-    else if (isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string") {
-      value = payload.error.message;
-    } else if (isRecord(payload) && typeof payload.message === "string") value = payload.message;
-    else value = JSON.stringify(payload);
+    return formatErrorPayload(JSON.parse(responseText) as unknown, secrets);
   } catch {
-    // Keep the plain-text response.
+    return sanitizeErrorText(responseText, secrets);
+  }
+}
+
+function formatErrorPayload(payload: unknown, secrets: readonly string[]): string {
+  let value: string;
+  if (isRecord(payload) && typeof payload.error === "string") value = payload.error;
+  else if (isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string") {
+    value = payload.error.message;
+  } else if (isRecord(payload) && typeof payload.message === "string") value = payload.message;
+  else if (typeof payload === "string") value = payload;
+  else {
+    try {
+      value = JSON.stringify(payload) ?? String(payload);
+    } catch {
+      value = String(payload);
+    }
   }
   return sanitizeErrorText(value, secrets);
 }

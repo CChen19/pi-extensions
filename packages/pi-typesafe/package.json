@@ -34,6 +34,9 @@
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
