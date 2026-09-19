@@ -133,6 +133,31 @@ test("empty selections preserve only the prior compressed summary without a mode
   assert.equal(calls, 0);
 });
 
+test("empty selections still honor explicit compaction instructions", async () => {
+  let observedContext: unknown;
+  const { ctx } = createMockContext({
+    model,
+    modelRegistry: {
+      async complete(_model: unknown, context: unknown) {
+        observedContext = context;
+        return response();
+      },
+    },
+  });
+  const result = await summarizeWithActiveModel(ctx, {
+    model,
+    thinkingLevel: "off",
+    selectedUnits: [],
+    previousSummary: "prior",
+    customInstructions: "Focus on unresolved tests",
+    reserveTokens: 1_000,
+    signal: new AbortController().signal,
+  });
+  assert.match(JSON.stringify(observedContext), /prior/u);
+  assert.match(JSON.stringify(observedContext), /Focus on unresolved tests/u);
+  assert.deepEqual(result, { text: "## Goal\nContinue safely", usage });
+});
+
 test.each([
   ["length", response({ stopReason: "length" }), /token limit/u],
   ["provider error", response({ stopReason: "error", errorMessage: "bad" }), /failed: bad/u],

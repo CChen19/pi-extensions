@@ -46,16 +46,19 @@ export function batchHistoryUnits(units: readonly HistoryUnit[]): HistoryUnit[][
   let current: HistoryUnit[] = [];
   for (const unit of units) {
     const candidate = [...current, unit];
+    const candidateBytes = batchBytes(candidate);
+    let currentBytes = candidateBytes;
     if (
       current.length > 0 &&
-      (candidate.length > MAX_EVALUATOR_BATCH_UNITS || batchBytes(candidate) > MAX_EVALUATOR_BATCH_BYTES)
+      (candidate.length > MAX_EVALUATOR_BATCH_UNITS || candidateBytes > MAX_EVALUATOR_BATCH_BYTES)
     ) {
       batches.push(current);
       current = [unit];
+      currentBytes = batchBytes(current);
     } else {
       current = candidate;
     }
-    if (batchBytes(current) > MAX_EVALUATOR_BATCH_BYTES) {
+    if (currentBytes > MAX_EVALUATOR_BATCH_BYTES) {
       throw new Error(`History unit ${unit.id} exceeds the TypeSafe batch limit`);
     }
   }

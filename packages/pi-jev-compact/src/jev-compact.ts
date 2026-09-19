@@ -126,7 +126,11 @@ async function compactWithJev(
     });
     if (!isCurrent()) return { cancel: true as const };
 
-    const { readFiles, modifiedFiles } = fileOperationLists(event.preparation.fileOps);
+    const { readFiles, modifiedFiles } = fileOperationLists({
+      read: new Set([...(prior?.readFiles ?? []), ...event.preparation.fileOps.read]),
+      written: new Set(event.preparation.fileOps.written),
+      edited: new Set([...(prior?.modifiedFiles ?? []), ...event.preparation.fileOps.edited]),
+    });
     const summary = appendFileOperations(
       composeCompactionSummary(generated.text, retainedUnits),
       readFiles,

@@ -40,6 +40,7 @@ pi -e ./packages/pi-jev-compact
 The TypeSafe SDK requires Node.js 20 or newer.
 Pi extensions run with your user permissions, so review third-party source before installing it.
 Do not load another custom compaction extension at the same time because Pi runs every registered compaction hook in extension order.
+When loading this repository's root package, run `pi config` before setting a TypeSafe key and disable the `pi-codex-compact` and `pi-context-management` extension entrypoints.
 
 ## 🚀 Quick start
 
@@ -142,7 +143,7 @@ When a bound cannot be satisfied safely, the extension warns in UI-capable modes
 - A TypeSafe authentication or network failure is discovered at compaction time; setup does not make a validation request.
 - TypeSafe evaluation usage is stored as token counts in compaction details but is not added to Pi provider cost totals.
 - Branch summaries created by `/tree` are not customized.
-- Enabling multiple custom compaction extensions can produce load-order-dependent behavior and is unsupported.
+- Multiple custom compaction routes can all perform remote work before Pi keeps only the last result. This extension cannot inspect another extension's state, so disable every other compaction extension with `pi config` before configuring its TypeSafe key.
 
 ## 🗂️ Package layout
 

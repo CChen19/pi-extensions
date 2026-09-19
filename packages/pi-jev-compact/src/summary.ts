@@ -37,7 +37,7 @@ export async function summarizeWithActiveModel(
     signal: AbortSignal;
   },
 ): Promise<ActiveModelSummary> {
-  if (options.selectedUnits.length === 0) {
+  if (options.selectedUnits.length === 0 && !options.customInstructions?.trim()) {
     return {
       text: options.previousSummary?.trim() || "No history units were selected for summarization.",
     };

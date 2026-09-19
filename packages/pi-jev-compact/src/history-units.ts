@@ -1,4 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { contentText } from "@earendil-works/pi-ai";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 
 export const JEV_COMPACT_DETAILS_KIND = "pi-jev-compact";
 export const JEV_COMPACT_DETAILS_VERSION = 1;
@@ -168,17 +170,17 @@ function draftsForMessage(message: AgentMessage): UnitDraft[] {
               content: toolResultText(block.text),
             },
       );
-    case "bashExecution":
+    case "bashExecution": {
+      const [converted] = convertToLlm([message]);
+      if (converted?.role !== "user") return [];
       return [
         {
           kind: "bash-execution",
           label: `User shell command${message.cancelled ? " cancelled" : ""}`,
-          content: boundedText(
-            `$ ${message.command}\n${message.output}\n[exit=${String(message.exitCode)} truncated=${String(message.truncated)}]`,
-            "bash execution",
-          ),
+          content: boundedText(contentText(converted.content), "bash execution"),
         },
       ];
+    }
     case "custom":
       return contentDrafts("custom", message.content, message.customType);
     case "branchSummary":

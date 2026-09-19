@@ -43,6 +43,18 @@ const toolResult = (text: string): AgentMessage => ({
   timestamp: 2,
 });
 
+const bashExecution = (overrides: Record<string, unknown> = {}): AgentMessage =>
+  ({
+    role: "bashExecution",
+    command: "npm test",
+    output: "passed",
+    exitCode: 0,
+    cancelled: false,
+    truncated: false,
+    timestamp: 3,
+    ...overrides,
+  }) as AgentMessage;
+
 test("assistant text, tool calls, and tool results become independent ordered units", () => {
   const units = combineHistoryUnits(
     [],
@@ -131,6 +143,41 @@ test("history sources, custom content, images, summaries, and prior retained uni
   );
   assert.match(units[1]?.content ?? "", /base64Characters=4/u);
   assert.doesNotMatch(units[1]?.content ?? "", /abcd/u);
+});
+
+test("bash units match Pi context conversion and exclude private shell messages", () => {
+  assert.deepEqual(buildHistoryUnits([bashExecution({ excludeFromContext: true })], "history"), []);
+
+  const cases = [
+    {
+      message: bashExecution({ output: "" }),
+      expected: "Ran `npm test`\n(no output)",
+    },
+    {
+      message: bashExecution(),
+      expected: "Ran `npm test`\n```\npassed\n```",
+    },
+    {
+      message: bashExecution({ cancelled: true, exitCode: 7 }),
+      expected: "Ran `npm test`\n```\npassed\n```\n\n(command cancelled)",
+    },
+    {
+      message: bashExecution({ exitCode: 7 }),
+      expected: "Ran `npm test`\n```\npassed\n```\n\nCommand exited with code 7",
+    },
+    {
+      message: bashExecution({ truncated: true, fullOutputPath: "/tmp/full-output.log" }),
+      expected: "Ran `npm test`\n```\npassed\n```\n\n[Output truncated. Full output: /tmp/full-output.log]",
+    },
+    {
+      message: bashExecution({ truncated: true }),
+      expected: "Ran `npm test`\n```\npassed\n```",
+    },
+  ];
+  for (const { message, expected } of cases) {
+    const [unit] = buildHistoryUnits([message], "history");
+    assert.equal(unit?.content, expected);
+  }
 });
 
 test("tool results use bounded Pi-style serialization", () => {

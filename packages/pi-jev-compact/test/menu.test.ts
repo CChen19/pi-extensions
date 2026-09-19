@@ -93,7 +93,7 @@ async function openSecretInput(tui: ReturnType<typeof createTuiHarness>, running
 }
 
 test("TUI saves pasted secrets through masked input with remapped keys and narrow rendering", async () => {
-  const runtime = memoryRuntime();
+  const runtime = memoryRuntime({ path: "/agent/\u001b[31mpi-jev-compact.json" });
   const tui = createTuiHarness({ width: 30, rows: 16, keybindings: remappedKeybindings() });
   const { ctx, notifications } = createMockContext({
     mode: "tui",
@@ -118,6 +118,7 @@ test("TUI saves pasted secrets through masked input with remapped keys and narro
   assert.deepEqual(runtime.saved, [secret]);
   assert.equal(runtime.get().settings.apiKey, secret);
   assert.doesNotMatch(JSON.stringify(notifications), new RegExp(secret, "u"));
+  assert.equal(JSON.stringify(notifications).includes("\u001b"), false);
   assert.match(notifications.at(-1)?.message ?? "", /saved to/u);
 });
 

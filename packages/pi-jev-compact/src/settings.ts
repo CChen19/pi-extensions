@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -76,6 +76,9 @@ export async function loadJevCompactSettings(
 ): Promise<JevCompactSettingsState> {
   throwIfAborted(signal);
   try {
+    const pathStats = await lstat(path);
+    throwIfAborted(signal);
+    if (pathStats.isSymbolicLink()) throw new Error("symbolic links are not accepted");
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     let text: string;
     try {

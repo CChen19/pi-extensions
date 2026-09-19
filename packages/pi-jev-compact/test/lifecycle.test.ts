@@ -231,8 +231,8 @@ test("repeated compaction reevaluates prior retained units and uses only the pri
       inputTokens: 1,
       outputTokens: 1,
     },
-    readFiles: [],
-    modifiedFiles: [],
+    readFiles: ["src/prior-read.ts"],
+    modifiedFiles: ["src/prior-modified.ts"],
   };
   let previousSummary: string | undefined;
   const state = setup({
@@ -262,6 +262,11 @@ test("repeated compaction reevaluates prior retained units and uses only the pri
   assert.equal(previousSummary, "pure prior summary");
   assert.deepEqual(state.selected, [["prior retained"]]);
   assert.equal(result.compaction.details.retainedUnits[0]?.content, "new retained");
+  assert.deepEqual(new Set(result.compaction.details.readFiles), new Set(["src/prior-read.ts", "src/read.ts"]));
+  assert.deepEqual(
+    new Set(result.compaction.details.modifiedFiles),
+    new Set(["src/prior-modified.ts", "src/new.ts", "src/changed.ts"]),
+  );
 });
 
 test("session start reports invalid settings without exposing contents", async () => {
