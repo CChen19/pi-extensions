@@ -44,7 +44,7 @@ test("Jev evaluator batches candidates, forwards cancellation, and aggregates ty
   assert.equal(result.outputTokens, 4);
   assert.equal(result.scores.get("id-0"), 0.9);
   assert.equal(result.scores.get("id-1"), 0.1);
-  assert.equal(client.requests[0]?.options?.signal, controller.signal);
+  assert.equal(client.requests[0]?.options?.signal?.aborted, false);
   const questions = client.requests[0]?.request.questions ?? {};
   assert.match(JSON.stringify(questions.candidate_0), /untrusted data/);
 });
@@ -79,6 +79,39 @@ test("Jev evaluator rejects invalid responses and redacts the API key from error
     evaluator.evaluate("query", [{ id: "one", path: "one", text: "text" }], "file"),
     (error: Error) => error.message.includes("[REDACTED]") && !error.message.includes("secret-key"),
   );
+});
+
+test("Jev evaluator cancels sibling batches after the first request failure", async () => {
+  let calls = 0;
+  let markSiblingAborted: () => void = () => undefined;
+  const siblingAborted = new Promise<void>((resolve) => {
+    markSiblingAborted = resolve;
+  });
+  const client: SystemOneClient = {
+    systemOne(_request, options) {
+      calls += 1;
+      if (calls === 1) return Promise.reject(new Error("first batch failed"));
+      return new Promise((_resolve, reject) => {
+        const abort = () => {
+          markSiblingAborted();
+          reject(options?.signal?.reason ?? new DOMException("Aborted", "AbortError"));
+        };
+        if (options?.signal?.aborted) abort();
+        else options?.signal?.addEventListener("abort", abort, { once: true });
+      });
+    },
+  };
+  const evaluator = new JevEvaluator("secret-key", client);
+  await assert.rejects(
+    evaluator.evaluate(
+      "query",
+      Array.from({ length: 9 }, (_, index) => ({ id: String(index), path: `${index}.md`, text: "candidate" })),
+      "file",
+    ),
+    /first batch failed/,
+  );
+  await siblingAborted;
+  assert.equal(calls, 2);
 });
 
 test("Jev evaluator stops before requests when cancelled", async () => {

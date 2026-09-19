@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { renameSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "vitest";
@@ -56,6 +57,7 @@ test("search roots remain inside the canonical workspace", async () => {
       await assert.rejects(resolveSearchRoot(workspace, "../"), /inside the current workspace/);
       await assert.rejects(resolveSearchRoot(workspace, "outside"), /outside the current workspace/);
       assert.equal(await resolveSearchRoot(workspace, "@."), await resolveSearchRoot(workspace, "."));
+      assert.equal(await resolveSearchRoot(path.parse(workspace).root, workspace), await realpath(workspace));
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
@@ -92,14 +94,17 @@ test("safe loading decodes UTF-8, rejects unsupported or changed data, and honor
     await writeFile(path.join(workspace, "text.txt"), "alpha\r\nbeta\r\n");
     await writeFile(path.join(workspace, "binary.bin"), Buffer.from([1, 0, 2]));
     await writeFile(path.join(workspace, "invalid.txt"), Buffer.from([0xc3, 0x28]));
+    await writeFile(path.join(workspace, "race.txt"), "old contents\n");
     await writeFile(path.join(workspace, "oversized.txt"), Buffer.alloc(512 * 1024 + 1, 97));
     const discovery = await discoverSearchFiles(workspace, ".");
     const text = discovery.files.find((file) => file.path === "text.txt");
     const binary = discovery.files.find((file) => file.path === "binary.bin");
     const invalid = discovery.files.find((file) => file.path === "invalid.txt");
+    const raced = discovery.files.find((file) => file.path === "race.txt");
     assert.ok(text);
     assert.ok(binary);
     assert.ok(invalid);
+    assert.ok(raced);
     assert.equal(
       discovery.files.some((file) => file.path === "oversized.txt"),
       false,
@@ -108,8 +113,24 @@ test("safe loading decodes UTF-8, rejects unsupported or changed data, and honor
     await assert.rejects(loadTextFile(binary, discovery.root), UnsupportedSearchFileError);
     await assert.rejects(loadTextFile(invalid, discovery.root), UnsupportedSearchFileError);
 
+    const replacementPath = path.join(workspace, "race.next");
+    await writeFile(replacementPath, "new contents\n");
+    let checks = 0;
+    const replacementSignal = {
+      aborted: false,
+      throwIfAborted() {
+        checks += 1;
+        if (checks === 4) renameSync(replacementPath, path.join(workspace, "race.txt"));
+      },
+    } as AbortSignal;
+    await assert.rejects(loadTextFile(raced, discovery.root, replacementSignal), /changed while it was read/);
+
+    await writeFile(path.join(workspace, "text.txt"), "omega\r\nzeta\r\n");
+    await utimes(path.join(workspace, "text.txt"), new Date(), new Date(Date.now() + 1_000));
+    await assert.rejects(loadTextFile(text, discovery.root), /changed while it was being opened/);
+
     await writeFile(path.join(workspace, "text.txt"), "changed size after discovery\n");
-    await assert.rejects(loadTextFile(text, discovery.root), /changed size/);
+    await assert.rejects(loadTextFile(text, discovery.root), /changed size|changed while it was being opened/);
 
     if (process.platform !== "win32") {
       await mkdir(path.join(workspace, "nested"));

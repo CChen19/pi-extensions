@@ -158,7 +158,8 @@ Each canonical search root selected inside the workspace receives a separate der
 The database stores file metadata, structural outlines, source chunks, FTS terms, and content hashes.
 It never stores vectors or credentials.
 SQLite WAL mode, transactions, a busy timeout, and per-process mutation ordering protect complete file updates.
-A private, cancellable cross-process lock serializes database creation and recovery, atomically quarantines stale owners, and leaves ordinary updates to SQLite writer locks.
+A private, cancellable cross-process lock serializes database creation and recovery, while per-handle leases prevent replacement recovery until every live process has closed the index.
+Stale lock claims and leases from exited processes are recovered automatically, and ordinary updates remain coordinated by SQLite writer locks.
 
 Schema or chunk-policy changes rebuild a validated replacement before swapping it into place.
 A corrupt derived index is rebuilt automatically when possible.

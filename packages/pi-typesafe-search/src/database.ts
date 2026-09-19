@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync } from "node:fs";
-import { chmod, link, lstat, mkdir, open as openFile, readFile, rename, rm, unlink } from "node:fs/promises";
+import { chmodSync, lstatSync, unlinkSync } from "node:fs";
+import { chmod, link, lstat, mkdir, open as openFile, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
@@ -95,6 +95,7 @@ async function openSearchDatabaseLocked(path: string, root: string, signal?: Abo
     try {
       await secureDatabaseArtifacts(path);
       signal?.throwIfAborted();
+      await attachDatabaseLease(database, path);
       return database;
     } catch (error) {
       database.close();
@@ -108,6 +109,7 @@ async function openSearchDatabaseLocked(path: string, root: string, signal?: Abo
     existing.validate();
   } catch (error: unknown) {
     existing?.close();
+    await waitForNoDatabaseLeases(path, signal);
     await rebuildDatabase(path, root).catch((rebuildError: unknown) => {
       throw new Error(`Cannot recover search index (${formatError(error)}): ${formatError(rebuildError)}`);
     });
@@ -117,6 +119,7 @@ async function openSearchDatabaseLocked(path: string, root: string, signal?: Abo
   try {
     await secureDatabaseArtifacts(path);
     signal?.throwIfAborted();
+    await attachDatabaseLease(existing, path);
     return existing;
   } catch (error) {
     existing.close();
@@ -129,6 +132,8 @@ export class SearchDatabase {
   private readonly database: DatabaseSync;
   private readonly root: string;
   private closed = false;
+  private handleClosed = false;
+  private leasePath?: string;
 
   constructor(path: string, root: string, initialize = false) {
     this.path = path;
@@ -225,6 +230,22 @@ export class SearchDatabase {
     });
   }
 
+  removeFilesIfUnchanged(files: readonly StoredFileRecord[]): number {
+    this.assertOpen();
+    if (files.length === 0) return 0;
+    let removed = 0;
+    this.transaction(() => {
+      const remove = this.database.prepare(
+        `DELETE FROM files
+         WHERE path = ? AND dev = ? AND ino = ? AND size = ? AND mtime_ns = ? AND hash = ?`,
+      );
+      for (const file of files) {
+        removed += Number(remove.run(file.path, file.dev, file.ino, file.size, file.mtimeNs, file.hash).changes);
+      }
+    });
+    return removed;
+  }
+
   setUnavailableFiles(paths: readonly string[]): void {
     this.assertOpen();
     this.database.exec("DELETE FROM temp.unavailable_files");
@@ -316,8 +337,23 @@ export class SearchDatabase {
 
   close(): void {
     if (this.closed) return;
+    if (!this.handleClosed) {
+      this.database.close();
+      this.handleClosed = true;
+    }
+    try {
+      if (this.leasePath) unlinkSync(this.leasePath);
+    } catch (error: unknown) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+    }
+    this.leasePath = undefined;
     this.closed = true;
-    this.database.close();
+  }
+
+  attachLease(path: string): void {
+    this.assertOpen();
+    if (this.leasePath) throw new Error("Search database already has a live-handle lease");
+    this.leasePath = path;
   }
 
   private transaction(callback: () => void): void {
@@ -336,7 +372,7 @@ export class SearchDatabase {
   }
 
   private assertOpen(): void {
-    if (this.closed) throw new Error("Search database is closed");
+    if (this.closed || this.handleClosed) throw new Error("Search database is closed");
   }
 }
 
@@ -452,6 +488,68 @@ async function rebuildDatabase(path: string, root: string): Promise<void> {
   }
 }
 
+async function attachDatabaseLease(database: SearchDatabase, path: string): Promise<void> {
+  const leasePath = `${path}.lease-${process.pid}-${randomUUID()}`;
+  const handle = await openFile(leasePath, "wx", DATABASE_FILE_MODE);
+  try {
+    await handle.writeFile(`${process.pid}:${randomUUID()}\n${Date.now()}\n`, "utf8");
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await unlink(leasePath).catch(() => undefined);
+    throw error;
+  }
+  await handle.close();
+  try {
+    database.attachLease(leasePath);
+  } catch (error) {
+    await unlink(leasePath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function waitForNoDatabaseLeases(path: string, signal?: AbortSignal): Promise<void> {
+  const directory = dirname(path);
+  const prefix = `${basename(path)}.lease-`;
+  const deadline = Date.now() + DATABASE_LOCK_WAIT_MS;
+  while (true) {
+    signal?.throwIfAborted();
+    let liveLeases = 0;
+    for (const name of await readdir(directory)) {
+      if (!name.startsWith(prefix)) continue;
+      const leasePath = join(directory, name);
+      let stats: Awaited<ReturnType<typeof lstat>>;
+      try {
+        stats = await lstat(leasePath);
+      } catch (error: unknown) {
+        if (isNodeError(error) && error.code === "ENOENT") continue;
+        throw error;
+      }
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error(`Search index lease is not a private regular file: ${leasePath}`);
+      }
+      const owner = await readFile(leasePath, "utf8").catch((error: unknown) => {
+        if (isNodeError(error) && error.code === "ENOENT") return "";
+        throw error;
+      });
+      const pid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
+      const stale =
+        Number.isSafeInteger(pid) && pid > 0
+          ? !isProcessAlive(pid)
+          : Date.now() - stats.mtimeMs >= INCOMPLETE_LOCK_STALE_MS;
+      if (stale) {
+        await unlink(leasePath).catch((error: unknown) => {
+          if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+        });
+      } else {
+        liveLeases += 1;
+      }
+    }
+    if (liveLeases === 0) return;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for live search index handles to close: ${path}`);
+    await delay(DATABASE_LOCK_RETRY_MS, undefined, signal ? { signal } : undefined);
+  }
+}
+
 async function acquireDatabaseLock(path: string, signal?: AbortSignal): Promise<() => Promise<void>> {
   const lockPath = `${path}.lock`;
   const owner = `${process.pid}:${randomUUID()}`;
@@ -479,16 +577,7 @@ async function acquireDatabaseLock(path: string, signal?: AbortSignal): Promise<
       if (!isNodeError(error) || error.code !== "EEXIST") throw error;
       const staleClaimPath = await staleDatabaseLockClaim(lockPath);
       signal?.throwIfAborted();
-      if (staleClaimPath) {
-        try {
-          await link(lockPath, staleClaimPath);
-          const [current, claimed] = await Promise.all([lstat(lockPath), lstat(staleClaimPath)]);
-          if (current.dev === claimed.dev && current.ino === claimed.ino) await unlink(lockPath);
-        } catch (claimError: unknown) {
-          if (!isLockClaimRace(claimError)) throw claimError;
-        }
-        continue;
-      }
+      if (staleClaimPath && (await quarantineStaleDatabaseLock(lockPath, staleClaimPath))) continue;
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for search index initialization: ${path}`);
       await delay(DATABASE_LOCK_RETRY_MS, undefined, signal ? { signal } : undefined);
     }
@@ -520,8 +609,22 @@ async function staleDatabaseLockClaim(lockPath: string): Promise<string | undefi
   return `${lockPath}.stale-${identity}`;
 }
 
-function isLockClaimRace(error: unknown): boolean {
-  return isNodeError(error) && (error.code === "ENOENT" || error.code === "EEXIST");
+async function quarantineStaleDatabaseLock(lockPath: string, claimPath: string): Promise<boolean> {
+  try {
+    await link(lockPath, claimPath);
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === "ENOENT") return true;
+    if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+  }
+  try {
+    const [current, claimed] = await Promise.all([lstat(lockPath), lstat(claimPath)]);
+    if (current.dev !== claimed.dev || current.ino !== claimed.ino) return false;
+    await unlink(lockPath);
+    return true;
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === "ENOENT") return true;
+    throw error;
+  }
 }
 
 function isProcessAlive(pid: number): boolean {

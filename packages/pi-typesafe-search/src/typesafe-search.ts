@@ -54,9 +54,9 @@ export default function registerJevSearch(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {
         const query = params.query.trim();
-        const path = params.path.trim();
+        const path = params.path;
         if (!query) throw new Error("jev_search query must not be empty");
-        if (!path) throw new Error("jev_search path must not be empty");
+        if (!path.trim()) throw new Error("jev_search path must not be empty");
         const alternatives = orderedAlternatives(query, params.alternatives ?? []);
         const limit = params.limit ?? DEFAULT_RESULT_LIMIT;
         const state = await sessionState(ctx);
@@ -314,7 +314,7 @@ function safeDisplayField(value: string): string {
 }
 
 function safeDisplayMultiline(value: string): string {
-  return [...stripVTControlCharacters(value)]
+  return [...stripVTControlCharacters(value).replace(/\p{Cf}/gu, "")]
     .filter((character) => {
       const code = character.codePointAt(0) ?? 0;
       return code === 9 || code === 10 || code === 13 || code >= 160 || (code >= 32 && code <= 126);

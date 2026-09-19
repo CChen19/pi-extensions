@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { link, lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout as delay } from "node:timers/promises";
 import { test } from "vitest";
 import type { SearchChunk } from "../src/chunks.js";
 import { databasePathForRoot, openSearchDatabase } from "../src/database.js";
@@ -15,6 +17,19 @@ async function withTempAgent(fn: (directory: string) => Promise<void>) {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+async function waitForPath(target: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await lstat(target);
+      return;
+    } catch (error: unknown) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
+    }
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for path: ${target}`);
 }
 
 function chunk(body: string, sequence = 0): SearchChunk {
@@ -106,6 +121,31 @@ test("concurrent stale-lock recovery uses one atomic quarantine claim", async ()
   });
 });
 
+test("stale-lock recovery completes a claim left behind by a crashed claimant", async () => {
+  if (process.platform === "win32") return;
+  await withTempAgent(async (agentDirectory) => {
+    const root = path.join(agentDirectory, "crashed-claim-workspace");
+    const initial = await openSearchDatabase(root, agentDirectory);
+    initial.close();
+    const databasePath = databasePathForRoot(root, agentDirectory);
+    const lockPath = `${databasePath}.lock`;
+    const owner = `99999999:dead-owner\n${Date.now()}\n`;
+    await writeFile(lockPath, owner, { mode: 0o600 });
+    const stats = await lstat(lockPath);
+    const identity = createHash("sha256")
+      .update(`${stats.dev}:${stats.ino}:${stats.mtimeMs}:${owner}`, "utf8")
+      .digest("hex")
+      .slice(0, 24);
+    await link(lockPath, `${lockPath}.stale-${identity}`);
+
+    const recovered = await openSearchDatabase(root, agentDirectory);
+    recovered.close();
+    await assert.rejects(lstat(lockPath), (error: unknown) =>
+      Boolean(error instanceof Error && "code" in error && error.code === "ENOENT"),
+    );
+  });
+});
+
 test("database lock waits honor cancellation", async () => {
   await withTempAgent(async (agentDirectory) => {
     const root = path.join(agentDirectory, "cancel-lock-workspace");
@@ -149,6 +189,42 @@ test("database paths reject symbolic links", async () => {
     await writeFile(target, "not an index", { mode: 0o600 });
     await symlink(target, databasePath);
     await assert.rejects(openSearchDatabase(root, agentDirectory), /not a private regular file/);
+  });
+});
+
+test("schema recovery waits for live database handles before replacing the index", async () => {
+  await withTempAgent(async (agentDirectory) => {
+    const root = "/workspace/live-handle";
+    const active = await openSearchDatabase(root, agentDirectory);
+    active.replaceFile(file, [chunk("active handle content")]);
+    const databasePath = databasePathForRoot(root, agentDirectory);
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare("UPDATE meta SET value = 'obsolete' WHERE key = 'schema_version'").run();
+    sqlite.close();
+
+    let settled = false;
+    const recovery = openSearchDatabase(root, agentDirectory);
+    void recovery.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await waitForPath(`${databasePath}.lock`);
+    await delay(50);
+    assert.equal(settled, false);
+    assert.match(active.representativeChunks(file.path, 1)[0]?.body ?? "", /active handle/);
+
+    active.close();
+    const rebuilt = await recovery;
+    assert.deepEqual(rebuilt.listFiles(), []);
+    rebuilt.close();
+    const leases = (await readdir(path.dirname(databasePath))).filter((name) =>
+      name.startsWith(`${path.basename(databasePath)}.lease-`),
+    );
+    assert.deepEqual(leases, []);
   });
 });
 

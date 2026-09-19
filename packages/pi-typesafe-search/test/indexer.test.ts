@@ -89,6 +89,68 @@ test("database mutation failures abort refresh instead of looking like skipped s
   });
 });
 
+test("queued refresh cancellation returns before the active mutation and preserves queue order", async () => {
+  await withFixture(async (workspace, agentDirectory) => {
+    await writeFile(path.join(workspace, "source.txt"), "queued source\n");
+    const database = await openSearchDatabase(workspace, agentDirectory);
+    const discovery = await discoverSearchFiles(workspace, ".");
+    const originalSecureArtifacts = database.secureArtifacts.bind(database);
+    let markBlocked: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let secureCalls = 0;
+    const secure = vi.spyOn(database, "secureArtifacts").mockImplementation(async () => {
+      await originalSecureArtifacts();
+      secureCalls += 1;
+      if (secureCalls === 1) {
+        markBlocked();
+        await gate;
+      }
+    });
+
+    const first = refreshIndex(database, discovery);
+    await blocked;
+    const controller = new AbortController();
+    const cancelled = refreshIndex(database, discovery, controller.signal);
+    controller.abort();
+    await assert.rejects(cancelled, (error: unknown) => Boolean(error instanceof Error && error.name === "AbortError"));
+
+    let thirdSettled = false;
+    const third = refreshIndex(database, discovery).finally(() => {
+      thirdSettled = true;
+    });
+    await Promise.resolve();
+    assert.equal(thirdSettled, false);
+    release();
+    await Promise.all([first, third]);
+    assert.equal(secureCalls, 2);
+    secure.mockRestore();
+    database.close();
+  });
+});
+
+test("stale discovery snapshots do not delete files indexed by another handle", async () => {
+  await withFixture(async (workspace, agentDirectory) => {
+    const staleDiscovery = await discoverSearchFiles(workspace, ".");
+    const staleHandle = await openSearchDatabase(workspace, agentDirectory);
+    const freshHandle = await openSearchDatabase(workspace, agentDirectory);
+    await writeFile(path.join(workspace, "new.txt"), "newly indexed content\n");
+    await refreshIndex(freshHandle, await discoverSearchFiles(workspace, "."));
+
+    const staleRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(staleRefresh.removed, 0);
+    assert.equal(staleHandle.getFile("new.txt")?.path, "new.txt");
+    assert.match(staleHandle.representativeChunks("new.txt", 1)[0]?.body ?? "", /newly indexed/);
+    freshHandle.close();
+    staleHandle.close();
+  });
+});
+
 test("failed or cancelled refreshes keep complete prior file versions and queues recover", async () => {
   await withFixture(async (workspace, agentDirectory) => {
     const sourcePath = path.join(workspace, "source.txt");

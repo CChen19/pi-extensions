@@ -1,6 +1,6 @@
 import { constants, type Dirent } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { MAX_CORPUS_BYTES, MAX_FILE_BYTES, MAX_FILES, SETTINGS_FILE_NAME } from "./constants.js";
 
@@ -218,8 +218,12 @@ export async function loadTextFile(file: DiscoveredFile, root: string, signal?: 
     ) {
       throw new Error(`${file.path} changed path identity while it was being opened`);
     }
-    if (stats.dev.toString() !== file.dev || stats.ino.toString() !== file.ino) {
-      throw new Error(`${file.path} changed identity while it was being opened`);
+    if (
+      stats.dev.toString() !== file.dev ||
+      stats.ino.toString() !== file.ino ||
+      stats.mtimeNs.toString() !== file.mtimeNs
+    ) {
+      throw new Error(`${file.path} changed while it was being opened`);
     }
     if (Number(stats.size) !== file.size || stats.size > BigInt(MAX_FILE_BYTES)) {
       throw new Error(`${file.path} changed size while it was being opened`);
@@ -234,6 +238,29 @@ export async function loadTextFile(file: DiscoveredFile, root: string, signal?: 
       offset += bytesRead;
     }
     if (offset > MAX_FILE_BYTES || offset !== file.size) throw new Error(`${file.path} changed while it was read`);
+    signal?.throwIfAborted();
+    const [finalHandleStats, finalCanonicalPath, finalPathStats] = await Promise.all([
+      handle.stat({ bigint: true }),
+      realpath(file.absolutePath),
+      lstat(file.absolutePath, { bigint: true }),
+    ]);
+    signal?.throwIfAborted();
+    if (
+      finalCanonicalPath !== file.absolutePath ||
+      !isInside(root, finalCanonicalPath) ||
+      !finalPathStats.isFile() ||
+      finalPathStats.isSymbolicLink() ||
+      finalPathStats.dev !== finalHandleStats.dev ||
+      finalPathStats.ino !== finalHandleStats.ino ||
+      finalPathStats.size !== finalHandleStats.size ||
+      finalPathStats.mtimeNs !== finalHandleStats.mtimeNs ||
+      finalHandleStats.dev !== stats.dev ||
+      finalHandleStats.ino !== stats.ino ||
+      finalHandleStats.size !== stats.size ||
+      finalHandleStats.mtimeNs !== stats.mtimeNs
+    ) {
+      throw new Error(`${file.path} changed while it was read`);
+    }
     const contents = buffer.subarray(0, offset);
     if (contents.includes(0)) throw new UnsupportedSearchFileError(`${file.path} appears to be binary`);
     let text: string;
@@ -258,6 +285,38 @@ async function canonicalAgentDirectory(): Promise<string | undefined> {
   }
 }
 
+export async function isCurrentSearchFile(root: string, filePath: string, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  if (isAbsolute(filePath)) return false;
+  const segments = filePath.split(/[\\/]/u);
+  if (segments.some((segment) => IGNORED_DIRECTORIES.has(segment)) || isSensitiveFileName(basename(filePath))) {
+    return false;
+  }
+  const candidate = resolve(root, filePath);
+  if (!isInside(root, candidate)) return false;
+  try {
+    const [canonicalPath, stats, agentDirectory] = await Promise.all([
+      realpath(candidate),
+      lstat(candidate, { bigint: true }),
+      canonicalAgentDirectory(),
+    ]);
+    signal?.throwIfAborted();
+    const size = Number(stats.size);
+    return (
+      canonicalPath === candidate &&
+      isInside(root, canonicalPath) &&
+      (!agentDirectory || !isInside(agentDirectory, canonicalPath)) &&
+      stats.isFile() &&
+      !stats.isSymbolicLink() &&
+      Number.isSafeInteger(size) &&
+      size <= MAX_FILE_BYTES
+    );
+  } catch {
+    if (signal?.aborted) signal.throwIfAborted();
+    return false;
+  }
+}
+
 export function isSensitiveFileName(name: string): boolean {
   const lower = name.toLowerCase();
   if (lower === ".env" || lower.startsWith(".env.")) return true;
@@ -269,7 +328,8 @@ export function isSensitiveFileName(name: string): boolean {
 }
 
 function isInside(root: string, candidate: string): boolean {
-  return candidate === root || candidate.startsWith(`${root}${sep}`);
+  const child = relative(root, candidate);
+  return child === "" || (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`));
 }
 
 function toPosix(path: string): string {
