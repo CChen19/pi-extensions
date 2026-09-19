@@ -79,7 +79,25 @@ async function readBoundedSettingsText(handle: FileHandle): Promise<string> {
     bytesRead += result.bytesRead;
   }
   if (bytesRead > MAX_SETTINGS_BYTES) throw new Error("settings file exceeds 64 KiB");
-  return buffer.toString("utf8", 0, bytesRead);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
+  } catch {
+    throw new Error("settings file is not valid UTF-8");
+  }
+}
+
+/** @internal Exported for deterministic filesystem race coverage. */
+export async function readSettingsTextFromValidatedPath(path: string, signal?: AbortSignal): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stats = await handle.stat();
+    throwIfAborted(signal);
+    if (!stats.isFile()) throw new Error("settings path is not a regular file");
+    if (stats.size > MAX_SETTINGS_BYTES) throw new Error("settings file exceeds 64 KiB");
+    return await readBoundedSettingsText(handle);
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function loadTypeSafeCompactSettings(
@@ -92,17 +110,7 @@ export async function loadTypeSafeCompactSettings(
     throwIfAborted(signal);
     if (pathStats.isSymbolicLink()) throw new Error("symbolic links are not accepted");
     if (!pathStats.isFile()) throw new Error("settings path is not a regular file");
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let text: string;
-    try {
-      const stats = await handle.stat();
-      throwIfAborted(signal);
-      if (!stats.isFile()) throw new Error("settings path is not a regular file");
-      if (stats.size > MAX_SETTINGS_BYTES) throw new Error("settings file exceeds 64 KiB");
-      text = await readBoundedSettingsText(handle);
-    } finally {
-      await handle.close();
-    }
+    const text = await readSettingsTextFromValidatedPath(path, signal);
     throwIfAborted(signal);
     let document: unknown;
     try {
