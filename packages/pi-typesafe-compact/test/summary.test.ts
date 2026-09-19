@@ -327,6 +327,32 @@ test("forwarded previous summaries count toward the compact-input byte bound", a
   assert.equal(compactCalls, 0);
 });
 
+test("custom instructions count toward the compact-input byte bound", async () => {
+  let authCalls = 0;
+  let compactCalls = 0;
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        authCalls += 1;
+        return { ok: true };
+      },
+    },
+  });
+  await assert.rejects(
+    summarizeWithPiNativeCompact(
+      ctx,
+      summaryOptions({ selectedUnits: [], customInstructions: "é".repeat(300 * 1024) }),
+      async () => {
+        compactCalls += 1;
+        return compactResult();
+      },
+    ),
+    /Selected history exceeds the 512 KiB/u,
+  );
+  assert.equal(authCalls, 0);
+  assert.equal(compactCalls, 0);
+});
+
 test("selected input must fit the active model compaction budget", async () => {
   let authCalls = 0;
   let compactCalls = 0;

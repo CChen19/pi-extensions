@@ -103,7 +103,11 @@ function selectedPreparation(
     ? 0
     : Buffer.byteLength(preparation.previousSummary ?? "", "utf8");
   const selectedBytes =
-    (history?.bytes ?? 0) + (turnPrefix?.bytes ?? 0) + (previousSummary?.bytes ?? 0) + forwardedPreviousSummaryBytes;
+    (history?.bytes ?? 0) +
+    (turnPrefix?.bytes ?? 0) +
+    (previousSummary?.bytes ?? 0) +
+    forwardedPreviousSummaryBytes +
+    Buffer.byteLength(customInstructions ?? "", "utf8");
   if (selectedBytes > MAX_SELECTED_CONTEXT_BYTES) {
     throw new Error("Selected history exceeds the 512 KiB Pi-native compact request limit");
   }

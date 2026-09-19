@@ -9,6 +9,7 @@ import {
   createTypeSafeCompactSettingsRuntime,
   loadTypeSafeCompactSettings,
   MAX_SETTINGS_BYTES,
+  readSettingsTextFromValidatedPath,
 } from "../src/settings.js";
 
 const roots: string[] = [];
@@ -88,7 +89,25 @@ test("malformed, invalid, oversized, and symlinked settings remain invalid and u
   assert.match(linked.issue ?? "", /symbolic links/u);
 });
 
-test.runIf(process.platform !== "win32")("non-regular settings paths are rejected before opening", async () => {
+test("invalid UTF-8 settings remain invalid and byte-for-byte unchanged", async () => {
+  const path = await fixturePath();
+  await mkdir(dirname(path), { recursive: true });
+  const original = Buffer.concat([
+    Buffer.from('{"future":"', "utf8"),
+    Buffer.from([0xff]),
+    Buffer.from('","apiKey":"stored-secret"}\n', "utf8"),
+  ]);
+  await writeFile(path, original, { mode: 0o600 });
+
+  const runtime = createTypeSafeCompactSettingsRuntime(path);
+  const state = await runtime.reload();
+  assert.equal(state.kind, "invalid");
+  assert.match(state.issue ?? "", /not valid UTF-8/u);
+  await assert.rejects(runtime.setApiKey("replacement-secret"), /Cannot overwrite an invalid/u);
+  assert.deepEqual(await readFile(path), original);
+});
+
+test.runIf(process.platform !== "win32")("non-regular settings paths are rejected without blocking", async () => {
   const path = await fixturePath();
   await mkdir(dirname(path), { recursive: true });
   await execFileAsync("mkfifo", [path]);
@@ -96,6 +115,7 @@ test.runIf(process.platform !== "win32")("non-regular settings paths are rejecte
   const state = await loadTypeSafeCompactSettings(path);
   assert.equal(state.kind, "invalid");
   assert.match(state.issue ?? "", /not a regular file/u);
+  await assert.rejects(readSettingsTextFromValidatedPath(path), /not a regular file/u);
 });
 
 test("oversized serialized saves preserve the previous file and effective state", async () => {
