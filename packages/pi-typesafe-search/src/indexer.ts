@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chunkTextFile } from "./chunks.js";
-import type { SearchDatabase } from "./database.js";
-import { type DiscoveryResult, loadTextFile, UnsupportedSearchFileError } from "./files.js";
+import type { SearchDatabase, StoredFileRecord } from "./database.js";
+import { type DiscoveryResult, loadTextFile, searchFileStatus, UnsupportedSearchFileError } from "./files.js";
 
 export interface IndexProgress {
   current: number;
@@ -24,7 +24,7 @@ export function refreshIndex(
   signal?: AbortSignal,
   onProgress?: (progress: IndexProgress) => void,
 ): Promise<IndexUpdateResult> {
-  return enqueueMutation(database.path, () => refreshIndexNow(database, discovery, signal, onProgress));
+  return enqueueMutation(database.path, signal, () => refreshIndexNow(database, discovery, signal, onProgress));
 }
 
 async function refreshIndexNow(
@@ -39,7 +39,7 @@ async function refreshIndexNow(
   let indexed = 0;
   let unchanged = 0;
   let skipped = discovery.skippedFiles;
-  const unavailablePaths: string[] = [];
+  const unavailableFiles: StoredFileRecord[] = [];
 
   for (let index = 0; index < discovery.files.length; index += 1) {
     signal?.throwIfAborted();
@@ -64,9 +64,12 @@ async function refreshIndexNow(
     } catch (error: unknown) {
       if (signal?.aborted || isAbortError(error)) throw error;
       if (error instanceof UnsupportedSearchFileError) {
-        database.removeFiles([file.path]);
+        if (previous) database.removeFilesIfUnchanged([previous]);
       } else {
-        unavailablePaths.push(file.path);
+        const current = database.getFile(file.path);
+        if (current && (await searchFileStatus(discovery.root, current, signal)) !== "current") {
+          unavailableFiles.push(current);
+        }
       }
       skipped += 1;
       continue;
@@ -92,17 +95,34 @@ async function refreshIndexNow(
   }
 
   signal?.throwIfAborted();
-  const removedPaths = [...existing.keys()].filter((path) => !discoveredPaths.has(path));
-  database.removeFiles(removedPaths);
-  database.setUnavailableFiles(unavailablePaths);
+  const removalCandidates: StoredFileRecord[] = [];
+  for (const file of existing.values()) {
+    if (discoveredPaths.has(file.path)) continue;
+    const status = await searchFileStatus(discovery.root, file, signal);
+    if (status === "current") continue;
+    if (status === "unavailable") {
+      unavailableFiles.push(file);
+      continue;
+    }
+    removalCandidates.push(file);
+  }
+  signal?.throwIfAborted();
+  const removed = database.removeFilesIfUnchanged(removalCandidates);
+  database.setUnavailableFiles(unavailableFiles);
   await database.secureArtifacts();
-  return { indexed, unchanged, removed: removedPaths.length, skipped };
+  signal?.throwIfAborted();
+  return { indexed, unchanged, removed, skipped };
 }
 
-function enqueueMutation<T>(path: string, mutation: () => Promise<T>): Promise<T> {
+function enqueueMutation<T>(path: string, signal: AbortSignal | undefined, mutation: () => Promise<T>): Promise<T> {
   const previous = mutationQueues.get(path) ?? Promise.resolve();
-  const result = previous.then(mutation, mutation);
-  const settled = result.then(
+  let started = false;
+  const reserved = previous.then(async () => {
+    signal?.throwIfAborted();
+    started = true;
+    return await mutation();
+  });
+  const settled = reserved.then(
     () => undefined,
     () => undefined,
   );
@@ -110,7 +130,27 @@ function enqueueMutation<T>(path: string, mutation: () => Promise<T>): Promise<T
   void settled.finally(() => {
     if (mutationQueues.get(path) === settled) mutationQueues.delete(path);
   });
-  return result;
+  return signal ? waitForQueuedPromise(reserved, signal, () => started) : reserved;
+}
+
+function waitForQueuedPromise<T>(promise: Promise<T>, signal: AbortSignal, hasStarted: () => boolean): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      if (!hasStarted()) reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function isAbortError(error: unknown): boolean {

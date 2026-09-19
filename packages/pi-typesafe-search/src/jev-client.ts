@@ -60,27 +60,34 @@ export class JevEvaluator {
     const batches = batchCandidates(query, candidates);
     const responses = new Array<Awaited<ReturnType<JevEvaluator["evaluateBatch"]>>>(batches.length);
     let nextBatch = 0;
+    let failed = false;
     let failure: unknown;
+    const batchController = new AbortController();
+    const operationSignal = signal ? AbortSignal.any([signal, batchController.signal]) : batchController.signal;
     const workerCount = Math.min(JEV_CONCURRENCY, batches.length);
 
     await Promise.all(
       Array.from({ length: workerCount }, async () => {
-        while (failure === undefined) {
+        while (!failed) {
           try {
-            signal?.throwIfAborted();
+            operationSignal.throwIfAborted();
             const index = nextBatch;
             nextBatch += 1;
             if (index >= batches.length) return;
             const current = batches[index];
             if (!current) return;
-            responses[index] = await this.evaluateBatch(query, current, kind, signal);
+            responses[index] = await this.evaluateBatch(query, current, kind, operationSignal);
           } catch (error) {
-            failure ??= error;
+            if (!failed) {
+              failed = true;
+              failure = error;
+              batchController.abort(error);
+            }
           }
         }
       }),
     );
-    if (failure !== undefined) throw failure;
+    if (failed) throw failure;
 
     const scores = new Map<string, number>();
     let inputTokens = 0;

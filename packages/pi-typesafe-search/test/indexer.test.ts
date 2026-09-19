@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, unlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test, vi } from "vitest";
@@ -85,6 +85,157 @@ test("database mutation failures abort refresh instead of looking like skipped s
     );
     assert.equal(database.listFiles().length, 0);
     failure.mockRestore();
+    database.close();
+  });
+});
+
+test("queued refresh cancellation returns before the active mutation and preserves queue order", async () => {
+  await withFixture(async (workspace, agentDirectory) => {
+    await writeFile(path.join(workspace, "source.txt"), "queued source\n");
+    const database = await openSearchDatabase(workspace, agentDirectory);
+    const discovery = await discoverSearchFiles(workspace, ".");
+    const originalSecureArtifacts = database.secureArtifacts.bind(database);
+    let markBlocked: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let secureCalls = 0;
+    const secure = vi.spyOn(database, "secureArtifacts").mockImplementation(async () => {
+      await originalSecureArtifacts();
+      secureCalls += 1;
+      if (secureCalls === 1) {
+        markBlocked();
+        await gate;
+      }
+    });
+
+    const first = refreshIndex(database, discovery);
+    await blocked;
+    const controller = new AbortController();
+    const cancelled = refreshIndex(database, discovery, controller.signal);
+    controller.abort();
+    await assert.rejects(cancelled, (error: unknown) => Boolean(error instanceof Error && error.name === "AbortError"));
+
+    let thirdSettled = false;
+    const third = refreshIndex(database, discovery).finally(() => {
+      thirdSettled = true;
+    });
+    await Promise.resolve();
+    assert.equal(thirdSettled, false);
+    release();
+    await Promise.all([first, third]);
+    assert.equal(secureCalls, 2);
+    secure.mockRestore();
+    database.close();
+  });
+});
+
+test("stale discovery snapshots do not delete files indexed by another handle", async () => {
+  await withFixture(async (workspace, agentDirectory) => {
+    const staleDiscovery = await discoverSearchFiles(workspace, ".");
+    const staleHandle = await openSearchDatabase(workspace, agentDirectory);
+    const freshHandle = await openSearchDatabase(workspace, agentDirectory);
+    await writeFile(path.join(workspace, "new.txt"), "newly indexed content\n");
+    await refreshIndex(freshHandle, await discoverSearchFiles(workspace, "."));
+
+    const staleRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(staleRefresh.removed, 0);
+    assert.equal(staleHandle.getFile("new.txt")?.path, "new.txt");
+    assert.match(staleHandle.representativeChunks("new.txt", 1)[0]?.body ?? "", /newly indexed/);
+
+    await writeFile(path.join(workspace, "new.txt"), "changed after the fresh index was published\n");
+    await utimes(path.join(workspace, "new.txt"), new Date(), new Date(Date.now() + 1_000));
+    const changedRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(changedRefresh.removed, 1);
+    assert.equal(staleHandle.getFile("new.txt"), undefined);
+    assert.deepEqual(staleHandle.representativeChunks("new.txt", 1), []);
+    freshHandle.close();
+    staleHandle.close();
+  });
+});
+
+test("normalized POSIX paths preserve backslashes that are filename characters", async () => {
+  if (process.platform === "win32") return;
+  await withFixture(async (workspace, agentDirectory) => {
+    const staleDiscovery = await discoverSearchFiles(workspace, ".");
+    const staleHandle = await openSearchDatabase(workspace, agentDirectory);
+    const freshHandle = await openSearchDatabase(workspace, agentDirectory);
+    const filePath = String.raw`notes\node_modules\guide.md`;
+    await writeFile(path.join(workspace, filePath), "backslash filename content\n");
+    await refreshIndex(freshHandle, await discoverSearchFiles(workspace, "."));
+
+    const staleRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(staleRefresh.removed, 0);
+    assert.equal(staleHandle.getFile(filePath)?.path, filePath);
+    assert.match(staleHandle.representativeChunks(filePath, 1)[0]?.body ?? "", /backslash filename/);
+    freshHandle.close();
+    staleHandle.close();
+  });
+});
+
+test("failed stale loads preserve a concurrently indexed current row", async () => {
+  await withFixture(async (workspace, agentDirectory) => {
+    const sourcePath = path.join(workspace, "concurrent.txt");
+    await writeFile(sourcePath, "version one\n");
+    const staleDiscovery = await discoverSearchFiles(workspace, ".");
+    const staleHandle = await openSearchDatabase(workspace, agentDirectory);
+    const freshHandle = await openSearchDatabase(workspace, agentDirectory);
+    await refreshIndex(freshHandle, staleDiscovery);
+
+    await writeFile(sourcePath, "version two\n");
+    await utimes(sourcePath, new Date(), new Date(Date.now() + 1_000));
+    const freshDiscovery = await discoverSearchFiles(workspace, ".");
+    assert.equal(freshDiscovery.files[0]?.ino, staleDiscovery.files[0]?.ino);
+    assert.equal(freshDiscovery.files[0]?.size, staleDiscovery.files[0]?.size);
+    assert.notEqual(freshDiscovery.files[0]?.mtimeNs, staleDiscovery.files[0]?.mtimeNs);
+    await refreshIndex(freshHandle, freshDiscovery);
+    const currentHash = freshHandle.getFile("concurrent.txt")?.hash;
+
+    const staleRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(staleRefresh.skipped, 1);
+    assert.equal(staleHandle.getFile("concurrent.txt")?.hash, currentHash);
+    assert.match(staleHandle.representativeChunks("concurrent.txt", 1)[0]?.body ?? "", /version two/);
+    freshHandle.close();
+    staleHandle.close();
+  });
+});
+
+test("filesystem revalidation errors preserve but hide indexed rows", async () => {
+  if (process.platform === "win32") return;
+  await withFixture(async (workspace, agentDirectory) => {
+    const database = await openSearchDatabase(workspace, agentDirectory);
+    const inaccessiblePath = "a".repeat(300);
+    database.replaceFile(
+      {
+        path: inaccessiblePath,
+        dev: "1",
+        ino: "2",
+        size: 10,
+        mtimeNs: "3",
+        hash: "stale-hash",
+        title: "Stale",
+        outline: "Stale",
+      },
+      [
+        {
+          sequence: 0,
+          startLine: 1,
+          endLine: 1,
+          heading: "Stale",
+          body: "stale content",
+          hash: "stale-chunk",
+        },
+      ],
+    );
+
+    const refresh = await refreshIndex(database, await discoverSearchFiles(workspace, "."));
+    assert.equal(refresh.removed, 0);
+    assert.equal(database.getFile(inaccessiblePath)?.path, inaccessiblePath);
+    assert.deepEqual(database.representativeChunks(inaccessiblePath, 1), []);
     database.close();
   });
 });

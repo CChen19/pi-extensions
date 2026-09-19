@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync } from "node:fs";
-import { chmod, link, lstat, mkdir, open as openFile, readFile, rename, rm, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
@@ -14,7 +14,6 @@ const DATABASE_FILE_MODE = 0o600;
 const BUSY_TIMEOUT_MS = 5_000;
 const DATABASE_LOCK_WAIT_MS = 10_000;
 const DATABASE_LOCK_RETRY_MS = 25;
-const INCOMPLETE_LOCK_STALE_MS = 2_000;
 
 export interface IndexedFileRecord {
   path: string;
@@ -95,6 +94,7 @@ async function openSearchDatabaseLocked(path: string, root: string, signal?: Abo
     try {
       await secureDatabaseArtifacts(path);
       signal?.throwIfAborted();
+      await attachDatabaseLease(database, path);
       return database;
     } catch (error) {
       database.close();
@@ -108,6 +108,7 @@ async function openSearchDatabaseLocked(path: string, root: string, signal?: Abo
     existing.validate();
   } catch (error: unknown) {
     existing?.close();
+    await waitForNoDatabaseLeases(path, signal);
     await rebuildDatabase(path, root).catch((rebuildError: unknown) => {
       throw new Error(`Cannot recover search index (${formatError(error)}): ${formatError(rebuildError)}`);
     });
@@ -117,6 +118,7 @@ async function openSearchDatabaseLocked(path: string, root: string, signal?: Abo
   try {
     await secureDatabaseArtifacts(path);
     signal?.throwIfAborted();
+    await attachDatabaseLease(existing, path);
     return existing;
   } catch (error) {
     existing.close();
@@ -129,6 +131,8 @@ export class SearchDatabase {
   private readonly database: DatabaseSync;
   private readonly root: string;
   private closed = false;
+  private handleClosed = false;
+  private leaseDatabase?: DatabaseSync;
 
   constructor(path: string, root: string, initialize = false) {
     this.path = path;
@@ -225,11 +229,30 @@ export class SearchDatabase {
     });
   }
 
-  setUnavailableFiles(paths: readonly string[]): void {
+  removeFilesIfUnchanged(files: readonly StoredFileRecord[]): number {
+    this.assertOpen();
+    if (files.length === 0) return 0;
+    let removed = 0;
+    this.transaction(() => {
+      const remove = this.database.prepare(
+        `DELETE FROM files
+         WHERE path = ? AND dev = ? AND ino = ? AND size = ? AND mtime_ns = ? AND hash = ?`,
+      );
+      for (const file of files) {
+        removed += Number(remove.run(file.path, file.dev, file.ino, file.size, file.mtimeNs, file.hash).changes);
+      }
+    });
+    return removed;
+  }
+
+  setUnavailableFiles(files: readonly StoredFileRecord[]): void {
     this.assertOpen();
     this.database.exec("DELETE FROM temp.unavailable_files");
-    const insert = this.database.prepare("INSERT OR IGNORE INTO temp.unavailable_files(path) VALUES (?)");
-    for (const path of paths) insert.run(path);
+    const insert = this.database.prepare(
+      `INSERT OR REPLACE INTO temp.unavailable_files(path, dev, ino, size, mtime_ns, hash)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const file of files) insert.run(file.path, file.dev, file.ino, file.size, file.mtimeNs, file.hash);
   }
 
   searchFts(expression: string, limit: number, filePath?: string): FtsChunk[] {
@@ -241,7 +264,13 @@ export class SearchDatabase {
        FROM chunks_fts
        JOIN chunks c ON c.id = chunks_fts.rowid
        WHERE chunks_fts MATCH ?
-         AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = c.file_path)
+         AND NOT EXISTS (
+           SELECT 1 FROM temp.unavailable_files u
+           JOIN files f ON f.path = u.path
+           WHERE u.path = c.file_path
+             AND u.dev = f.dev AND u.ino = f.ino AND u.size = f.size
+             AND u.mtime_ns = f.mtime_ns AND u.hash = f.hash
+         )
          ${filter}
        ORDER BY bm25 ASC, c.file_path ASC, c.seq ASC
        LIMIT ?`,
@@ -261,7 +290,12 @@ export class SearchDatabase {
       return this.database
         .prepare(
           `SELECT path, title, outline FROM files
-           WHERE NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = files.path)
+           WHERE NOT EXISTS (
+             SELECT 1 FROM temp.unavailable_files u
+             WHERE u.path = files.path
+               AND u.dev = files.dev AND u.ino = files.ino AND u.size = files.size
+               AND u.mtime_ns = files.mtime_ns AND u.hash = files.hash
+           )
            ORDER BY path LIMIT ?`,
         )
         .all(limit) as unknown as FileMapRecord[];
@@ -269,7 +303,12 @@ export class SearchDatabase {
     const selected: FileMapRecord[] = [];
     const statement = this.database.prepare(
       `SELECT path, title, outline FROM files
-       WHERE path = ? AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = files.path)`,
+       WHERE path = ? AND NOT EXISTS (
+         SELECT 1 FROM temp.unavailable_files u
+         WHERE u.path = files.path
+           AND u.dev = files.dev AND u.ino = files.ino AND u.size = files.size
+           AND u.mtime_ns = files.mtime_ns AND u.hash = files.hash
+       )`,
     );
     for (const path of paths.slice(0, limit)) {
       const row = statement.get(path) as FileMapRecord | undefined;
@@ -287,7 +326,13 @@ export class SearchDatabase {
                   ROW_NUMBER() OVER (ORDER BY seq) AS position
            FROM chunks c
            WHERE file_path = ?
-             AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = c.file_path)
+             AND NOT EXISTS (
+               SELECT 1 FROM temp.unavailable_files u
+               JOIN files f ON f.path = u.path
+               WHERE u.path = c.file_path
+                 AND u.dev = f.dev AND u.ino = f.ino AND u.size = f.size
+                 AND u.mtime_ns = f.mtime_ns AND u.hash = f.hash
+             )
          )
          SELECT id, file_path, seq, start_line, end_line, heading, body, hash
          FROM ranked
@@ -316,8 +361,26 @@ export class SearchDatabase {
 
   close(): void {
     if (this.closed) return;
+    if (!this.handleClosed) {
+      this.database.close();
+      this.handleClosed = true;
+    }
+    const leaseDatabase = this.leaseDatabase;
+    this.leaseDatabase = undefined;
     this.closed = true;
-    this.database.close();
+    if (leaseDatabase) {
+      try {
+        if (leaseDatabase.isTransaction) leaseDatabase.exec("ROLLBACK");
+      } finally {
+        leaseDatabase.close();
+      }
+    }
+  }
+
+  attachLease(leaseDatabase: DatabaseSync): void {
+    this.assertOpen();
+    if (this.leaseDatabase) throw new Error("Search database already has a live-handle lease");
+    this.leaseDatabase = leaseDatabase;
   }
 
   private transaction(callback: () => void): void {
@@ -336,7 +399,7 @@ export class SearchDatabase {
   }
 
   private assertOpen(): void {
-    if (this.closed) throw new Error("Search database is closed");
+    if (this.closed || this.handleClosed) throw new Error("Search database is closed");
   }
 }
 
@@ -369,7 +432,12 @@ function configureDatabase(database: DatabaseSync): void {
     PRAGMA synchronous = NORMAL;
     PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
     CREATE TEMP TABLE unavailable_files (
-      path TEXT PRIMARY KEY
+      path TEXT PRIMARY KEY,
+      dev TEXT NOT NULL,
+      ino TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      mtime_ns TEXT NOT NULL,
+      hash TEXT NOT NULL
     ) STRICT;
   `);
 }
@@ -452,85 +520,87 @@ async function rebuildDatabase(path: string, root: string): Promise<void> {
   }
 }
 
+function attachDatabaseLease(database: SearchDatabase, path: string): void {
+  const leaseDatabase = openGuardDatabase(`${path}.leases`);
+  try {
+    leaseDatabase.exec("CREATE TABLE IF NOT EXISTS lease_guard (marker INTEGER NOT NULL) STRICT");
+    leaseDatabase.exec("BEGIN");
+    leaseDatabase.prepare("SELECT marker FROM lease_guard LIMIT 1").get();
+    database.attachLease(leaseDatabase);
+  } catch (error) {
+    if (leaseDatabase.isTransaction) leaseDatabase.exec("ROLLBACK");
+    leaseDatabase.close();
+    throw error;
+  }
+}
+
+async function waitForNoDatabaseLeases(path: string, signal?: AbortSignal): Promise<void> {
+  const leaseDatabase = openGuardDatabase(`${path}.leases`);
+  try {
+    await acquireExclusiveTransaction(leaseDatabase, path, signal, "live search index handles to close");
+    leaseDatabase.exec("ROLLBACK");
+  } finally {
+    leaseDatabase.close();
+  }
+}
+
 async function acquireDatabaseLock(path: string, signal?: AbortSignal): Promise<() => Promise<void>> {
-  const lockPath = `${path}.lock`;
-  const owner = `${process.pid}:${randomUUID()}`;
+  const lockDatabase = openGuardDatabase(`${path}.guard`);
+  try {
+    await acquireExclusiveTransaction(lockDatabase, path, signal, "search index initialization");
+  } catch (error) {
+    lockDatabase.close();
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    try {
+      lockDatabase.exec("ROLLBACK");
+    } finally {
+      lockDatabase.close();
+    }
+  };
+}
+
+async function acquireExclusiveTransaction(
+  database: DatabaseSync,
+  path: string,
+  signal: AbortSignal | undefined,
+  description: string,
+): Promise<void> {
   const deadline = Date.now() + DATABASE_LOCK_WAIT_MS;
   while (true) {
     signal?.throwIfAborted();
     try {
-      const handle = await openFile(lockPath, "wx", DATABASE_FILE_MODE);
-      try {
-        await handle.writeFile(`${owner}\n${Date.now()}\n`, "utf8");
-      } catch (error) {
-        await handle.close();
-        await unlink(lockPath).catch(() => undefined);
-        throw error;
-      }
-      await handle.close();
-      let released = false;
-      return async () => {
-        if (released) return;
-        released = true;
-        const currentOwner = await readFile(lockPath, "utf8").catch(() => "");
-        if (currentOwner.startsWith(`${owner}\n`)) await unlink(lockPath);
-      };
+      database.exec("BEGIN EXCLUSIVE");
+      return;
     } catch (error: unknown) {
-      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-      const staleClaimPath = await staleDatabaseLockClaim(lockPath);
-      signal?.throwIfAborted();
-      if (staleClaimPath) {
-        try {
-          await link(lockPath, staleClaimPath);
-          const [current, claimed] = await Promise.all([lstat(lockPath), lstat(staleClaimPath)]);
-          if (current.dev === claimed.dev && current.ino === claimed.ino) await unlink(lockPath);
-        } catch (claimError: unknown) {
-          if (!isLockClaimRace(claimError)) throw claimError;
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) throw new Error(`Timed out waiting for search index initialization: ${path}`);
+      if (!isDatabaseBusyError(error)) throw error;
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}: ${path}`);
       await delay(DATABASE_LOCK_RETRY_MS, undefined, signal ? { signal } : undefined);
     }
   }
 }
 
-async function staleDatabaseLockClaim(lockPath: string): Promise<string | undefined> {
-  let stats: Awaited<ReturnType<typeof lstat>>;
+function openGuardDatabase(path: string): DatabaseSync {
+  const database = new DatabaseSync(path);
   try {
-    stats = await lstat(lockPath);
-  } catch (error: unknown) {
-    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    const stats = lstatSync(path);
+    if (!stats.isFile() || stats.isSymbolicLink())
+      throw new Error(`Database guard is not a private regular file: ${path}`);
+    if (process.platform !== "win32") chmodSync(path, DATABASE_FILE_MODE);
+    database.exec("PRAGMA busy_timeout = 0");
+    return database;
+  } catch (error) {
+    database.close();
     throw error;
   }
-  if (!stats.isFile() || stats.isSymbolicLink()) {
-    throw new Error(`Search index lock is not a private regular file: ${lockPath}`);
-  }
-  const owner = await readFile(lockPath, "utf8").catch(() => "");
-  const pid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
-  const stale =
-    Number.isSafeInteger(pid) && pid > 0
-      ? !isProcessAlive(pid)
-      : Date.now() - stats.mtimeMs >= INCOMPLETE_LOCK_STALE_MS;
-  if (!stale) return undefined;
-  const identity = createHash("sha256")
-    .update(`${stats.dev}:${stats.ino}:${stats.mtimeMs}:${owner}`, "utf8")
-    .digest("hex")
-    .slice(0, 24);
-  return `${lockPath}.stale-${identity}`;
 }
 
-function isLockClaimRace(error: unknown): boolean {
-  return isNodeError(error) && (error.code === "ENOENT" || error.code === "EEXIST");
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error: unknown) {
-    return !isNodeError(error) || error.code !== "ESRCH";
-  }
+function isDatabaseBusyError(error: unknown): boolean {
+  return error instanceof Error && /database is (?:busy|locked)/iu.test(error.message);
 }
 
 async function databasePathState(path: string): Promise<"missing" | "regular" | "unsafe"> {

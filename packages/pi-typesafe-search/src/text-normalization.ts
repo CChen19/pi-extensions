@@ -10,23 +10,29 @@ export function searchTerms(value: string): string[] {
     .replace(/[_./\\-]+/g, " ")
     .toLocaleLowerCase("en-US");
   const terms: string[] = [];
+  const seen = new Set<string>();
+  const addTerm = (term: string) => {
+    if (!term || seen.has(term) || terms.length >= MAX_TERMS) return;
+    seen.add(term);
+    terms.push(term);
+  };
   for (const match of normalized.matchAll(WORD_PATTERN)) {
     const word = match[0];
     if (!word) continue;
     if (containsCjk(word)) {
       const characters = [...word];
-      if (characters.length === 1) terms.push(word);
+      if (characters.length === 1) addTerm(word);
       else {
         for (let index = 0; index < characters.length - 1 && terms.length < MAX_TERMS; index += 1) {
-          terms.push(`${characters[index]}${characters[index + 1]}`);
+          addTerm(`${characters[index]}${characters[index + 1]}`);
         }
       }
     } else {
-      terms.push(word.slice(0, MAX_TERM_LENGTH));
+      addTerm(word.slice(0, MAX_TERM_LENGTH));
     }
     if (terms.length >= MAX_TERMS) break;
   }
-  return [...new Set(terms.filter(Boolean))];
+  return terms;
 }
 
 export function searchableText(value: string): string {
