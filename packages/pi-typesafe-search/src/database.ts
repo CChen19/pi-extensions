@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, unlinkSync } from "node:fs";
-import { chmod, link, lstat, mkdir, open as openFile, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
+import { chmodSync, lstatSync } from "node:fs";
+import { chmod, lstat, mkdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
@@ -14,7 +14,6 @@ const DATABASE_FILE_MODE = 0o600;
 const BUSY_TIMEOUT_MS = 5_000;
 const DATABASE_LOCK_WAIT_MS = 10_000;
 const DATABASE_LOCK_RETRY_MS = 25;
-const INCOMPLETE_LOCK_STALE_MS = 2_000;
 
 export interface IndexedFileRecord {
   path: string;
@@ -133,7 +132,7 @@ export class SearchDatabase {
   private readonly root: string;
   private closed = false;
   private handleClosed = false;
-  private leasePath?: string;
+  private leaseDatabase?: DatabaseSync;
 
   constructor(path: string, root: string, initialize = false) {
     this.path = path;
@@ -341,19 +340,22 @@ export class SearchDatabase {
       this.database.close();
       this.handleClosed = true;
     }
-    try {
-      if (this.leasePath) unlinkSync(this.leasePath);
-    } catch (error: unknown) {
-      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-    }
-    this.leasePath = undefined;
+    const leaseDatabase = this.leaseDatabase;
+    this.leaseDatabase = undefined;
     this.closed = true;
+    if (leaseDatabase) {
+      try {
+        if (leaseDatabase.isTransaction) leaseDatabase.exec("ROLLBACK");
+      } finally {
+        leaseDatabase.close();
+      }
+    }
   }
 
-  attachLease(path: string): void {
+  attachLease(leaseDatabase: DatabaseSync): void {
     this.assertOpen();
-    if (this.leasePath) throw new Error("Search database already has a live-handle lease");
-    this.leasePath = path;
+    if (this.leaseDatabase) throw new Error("Search database already has a live-handle lease");
+    this.leaseDatabase = leaseDatabase;
   }
 
   private transaction(callback: () => void): void {
@@ -488,152 +490,87 @@ async function rebuildDatabase(path: string, root: string): Promise<void> {
   }
 }
 
-async function attachDatabaseLease(database: SearchDatabase, path: string): Promise<void> {
-  const leasePath = `${path}.lease-${process.pid}-${randomUUID()}`;
-  const handle = await openFile(leasePath, "wx", DATABASE_FILE_MODE);
+function attachDatabaseLease(database: SearchDatabase, path: string): void {
+  const leaseDatabase = openGuardDatabase(`${path}.leases`);
   try {
-    await handle.writeFile(`${process.pid}:${randomUUID()}\n${Date.now()}\n`, "utf8");
+    leaseDatabase.exec("CREATE TABLE IF NOT EXISTS lease_guard (marker INTEGER NOT NULL) STRICT");
+    leaseDatabase.exec("BEGIN");
+    leaseDatabase.prepare("SELECT marker FROM lease_guard LIMIT 1").get();
+    database.attachLease(leaseDatabase);
   } catch (error) {
-    await handle.close().catch(() => undefined);
-    await unlink(leasePath).catch(() => undefined);
-    throw error;
-  }
-  await handle.close();
-  try {
-    database.attachLease(leasePath);
-  } catch (error) {
-    await unlink(leasePath).catch(() => undefined);
+    if (leaseDatabase.isTransaction) leaseDatabase.exec("ROLLBACK");
+    leaseDatabase.close();
     throw error;
   }
 }
 
 async function waitForNoDatabaseLeases(path: string, signal?: AbortSignal): Promise<void> {
-  const directory = dirname(path);
-  const prefix = `${basename(path)}.lease-`;
-  const deadline = Date.now() + DATABASE_LOCK_WAIT_MS;
-  while (true) {
-    signal?.throwIfAborted();
-    let liveLeases = 0;
-    for (const name of await readdir(directory)) {
-      if (!name.startsWith(prefix)) continue;
-      const leasePath = join(directory, name);
-      let stats: Awaited<ReturnType<typeof lstat>>;
-      try {
-        stats = await lstat(leasePath);
-      } catch (error: unknown) {
-        if (isNodeError(error) && error.code === "ENOENT") continue;
-        throw error;
-      }
-      if (!stats.isFile() || stats.isSymbolicLink()) {
-        throw new Error(`Search index lease is not a private regular file: ${leasePath}`);
-      }
-      const owner = await readFile(leasePath, "utf8").catch((error: unknown) => {
-        if (isNodeError(error) && error.code === "ENOENT") return "";
-        throw error;
-      });
-      const pid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
-      const stale =
-        Number.isSafeInteger(pid) && pid > 0
-          ? !isProcessAlive(pid)
-          : Date.now() - stats.mtimeMs >= INCOMPLETE_LOCK_STALE_MS;
-      if (stale) {
-        await unlink(leasePath).catch((error: unknown) => {
-          if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-        });
-      } else {
-        liveLeases += 1;
-      }
-    }
-    if (liveLeases === 0) return;
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for live search index handles to close: ${path}`);
-    await delay(DATABASE_LOCK_RETRY_MS, undefined, signal ? { signal } : undefined);
+  const leaseDatabase = openGuardDatabase(`${path}.leases`);
+  try {
+    await acquireExclusiveTransaction(leaseDatabase, path, signal, "live search index handles to close");
+    leaseDatabase.exec("ROLLBACK");
+  } finally {
+    leaseDatabase.close();
   }
 }
 
 async function acquireDatabaseLock(path: string, signal?: AbortSignal): Promise<() => Promise<void>> {
-  const lockPath = `${path}.lock`;
-  const owner = `${process.pid}:${randomUUID()}`;
+  const lockDatabase = openGuardDatabase(`${path}.lock`);
+  try {
+    await acquireExclusiveTransaction(lockDatabase, path, signal, "search index initialization");
+  } catch (error) {
+    lockDatabase.close();
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    try {
+      lockDatabase.exec("ROLLBACK");
+    } finally {
+      lockDatabase.close();
+    }
+  };
+}
+
+async function acquireExclusiveTransaction(
+  database: DatabaseSync,
+  path: string,
+  signal: AbortSignal | undefined,
+  description: string,
+): Promise<void> {
   const deadline = Date.now() + DATABASE_LOCK_WAIT_MS;
   while (true) {
     signal?.throwIfAborted();
     try {
-      const handle = await openFile(lockPath, "wx", DATABASE_FILE_MODE);
-      try {
-        await handle.writeFile(`${owner}\n${Date.now()}\n`, "utf8");
-      } catch (error) {
-        await handle.close();
-        await unlink(lockPath).catch(() => undefined);
-        throw error;
-      }
-      await handle.close();
-      let released = false;
-      return async () => {
-        if (released) return;
-        released = true;
-        const currentOwner = await readFile(lockPath, "utf8").catch(() => "");
-        if (currentOwner.startsWith(`${owner}\n`)) await unlink(lockPath);
-      };
+      database.exec("BEGIN EXCLUSIVE");
+      return;
     } catch (error: unknown) {
-      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-      const staleClaimPath = await staleDatabaseLockClaim(lockPath);
-      signal?.throwIfAborted();
-      if (staleClaimPath && (await quarantineStaleDatabaseLock(lockPath, staleClaimPath))) continue;
-      if (Date.now() >= deadline) throw new Error(`Timed out waiting for search index initialization: ${path}`);
+      if (!isDatabaseBusyError(error)) throw error;
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}: ${path}`);
       await delay(DATABASE_LOCK_RETRY_MS, undefined, signal ? { signal } : undefined);
     }
   }
 }
 
-async function staleDatabaseLockClaim(lockPath: string): Promise<string | undefined> {
-  let stats: Awaited<ReturnType<typeof lstat>>;
+function openGuardDatabase(path: string): DatabaseSync {
+  const database = new DatabaseSync(path);
   try {
-    stats = await lstat(lockPath);
-  } catch (error: unknown) {
-    if (isNodeError(error) && error.code === "ENOENT") return undefined;
-    throw error;
-  }
-  if (!stats.isFile() || stats.isSymbolicLink()) {
-    throw new Error(`Search index lock is not a private regular file: ${lockPath}`);
-  }
-  const owner = await readFile(lockPath, "utf8").catch(() => "");
-  const pid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
-  const stale =
-    Number.isSafeInteger(pid) && pid > 0
-      ? !isProcessAlive(pid)
-      : Date.now() - stats.mtimeMs >= INCOMPLETE_LOCK_STALE_MS;
-  if (!stale) return undefined;
-  const identity = createHash("sha256")
-    .update(`${stats.dev}:${stats.ino}:${stats.mtimeMs}:${owner}`, "utf8")
-    .digest("hex")
-    .slice(0, 24);
-  return `${lockPath}.stale-${identity}`;
-}
-
-async function quarantineStaleDatabaseLock(lockPath: string, claimPath: string): Promise<boolean> {
-  try {
-    await link(lockPath, claimPath);
-  } catch (error: unknown) {
-    if (isNodeError(error) && error.code === "ENOENT") return true;
-    if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-  }
-  try {
-    const [current, claimed] = await Promise.all([lstat(lockPath), lstat(claimPath)]);
-    if (current.dev !== claimed.dev || current.ino !== claimed.ino) return false;
-    await unlink(lockPath);
-    return true;
-  } catch (error: unknown) {
-    if (isNodeError(error) && error.code === "ENOENT") return true;
+    const stats = lstatSync(path);
+    if (!stats.isFile() || stats.isSymbolicLink())
+      throw new Error(`Database guard is not a private regular file: ${path}`);
+    if (process.platform !== "win32") chmodSync(path, DATABASE_FILE_MODE);
+    database.exec("PRAGMA busy_timeout = 0");
+    return database;
+  } catch (error) {
+    database.close();
     throw error;
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error: unknown) {
-    return !isNodeError(error) || error.code !== "ESRCH";
-  }
+function isDatabaseBusyError(error: unknown): boolean {
+  return error instanceof Error && /database is (?:busy|locked)/iu.test(error.message);
 }
 
 async function databasePathState(path: string): Promise<"missing" | "regular" | "unsafe"> {

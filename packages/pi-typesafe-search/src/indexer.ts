@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chunkTextFile } from "./chunks.js";
 import type { SearchDatabase, StoredFileRecord } from "./database.js";
-import { type DiscoveryResult, isCurrentSearchFile, loadTextFile, UnsupportedSearchFileError } from "./files.js";
+import { type DiscoveryResult, loadTextFile, searchFileStatus, UnsupportedSearchFileError } from "./files.js";
 
 export interface IndexProgress {
   current: number;
@@ -94,7 +94,13 @@ async function refreshIndexNow(
   signal?.throwIfAborted();
   const removalCandidates: StoredFileRecord[] = [];
   for (const file of existing.values()) {
-    if (discoveredPaths.has(file.path) || (await isCurrentSearchFile(discovery.root, file.path, signal))) continue;
+    if (discoveredPaths.has(file.path)) continue;
+    const status = await searchFileStatus(discovery.root, file, signal);
+    if (status === "current") continue;
+    if (status === "unavailable") {
+      unavailablePaths.push(file.path);
+      continue;
+    }
     removalCandidates.push(file);
   }
   signal?.throwIfAborted();

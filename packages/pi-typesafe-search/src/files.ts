@@ -62,6 +62,16 @@ export interface LoadedTextFile extends DiscoveredFile {
   lines: string[];
 }
 
+export interface StoredFileSnapshot {
+  path: string;
+  dev: string;
+  ino: string;
+  size: number;
+  mtimeNs: string;
+}
+
+export type SearchFileStatus = "current" | "changed" | "absent" | "unavailable";
+
 export class UnsupportedSearchFileError extends Error {}
 
 export async function resolveSearchRoot(cwd: string, inputPath: string, signal?: AbortSignal): Promise<string> {
@@ -285,35 +295,48 @@ async function canonicalAgentDirectory(): Promise<string | undefined> {
   }
 }
 
-export async function isCurrentSearchFile(root: string, filePath: string, signal?: AbortSignal): Promise<boolean> {
+export async function searchFileStatus(
+  root: string,
+  file: StoredFileSnapshot,
+  signal?: AbortSignal,
+): Promise<SearchFileStatus> {
   signal?.throwIfAborted();
-  if (isAbsolute(filePath)) return false;
-  const segments = filePath.split(/[\\/]/u);
-  if (segments.some((segment) => IGNORED_DIRECTORIES.has(segment)) || isSensitiveFileName(basename(filePath))) {
-    return false;
+  if (isAbsolute(file.path)) return "changed";
+  const segments = file.path.split(/[\\/]/u);
+  if (segments.some((segment) => IGNORED_DIRECTORIES.has(segment)) || isSensitiveFileName(basename(file.path))) {
+    return "changed";
   }
-  const candidate = resolve(root, filePath);
-  if (!isInside(root, candidate)) return false;
+  const candidate = resolve(root, file.path);
+  if (!isInside(root, candidate)) return "changed";
+
   try {
-    const [canonicalPath, stats, agentDirectory] = await Promise.all([
-      realpath(candidate),
-      lstat(candidate, { bigint: true }),
-      canonicalAgentDirectory(),
-    ]);
+    const canonicalPath = await realpath(candidate);
+    signal?.throwIfAborted();
+    const stats = await lstat(candidate, { bigint: true });
+    signal?.throwIfAborted();
+    const agentDirectory = await canonicalAgentDirectory();
     signal?.throwIfAborted();
     const size = Number(stats.size);
-    return (
-      canonicalPath === candidate &&
-      isInside(root, canonicalPath) &&
-      (!agentDirectory || !isInside(agentDirectory, canonicalPath)) &&
-      stats.isFile() &&
-      !stats.isSymbolicLink() &&
-      Number.isSafeInteger(size) &&
-      size <= MAX_FILE_BYTES
-    );
-  } catch {
+    if (
+      canonicalPath !== candidate ||
+      !isInside(root, canonicalPath) ||
+      (agentDirectory && isInside(agentDirectory, canonicalPath)) ||
+      !stats.isFile() ||
+      stats.isSymbolicLink() ||
+      !Number.isSafeInteger(size) ||
+      size > MAX_FILE_BYTES
+    ) {
+      return "changed";
+    }
+    return stats.dev.toString() === file.dev &&
+      stats.ino.toString() === file.ino &&
+      size === file.size &&
+      stats.mtimeNs.toString() === file.mtimeNs
+      ? "current"
+      : "changed";
+  } catch (error: unknown) {
     if (signal?.aborted) signal.throwIfAborted();
-    return false;
+    return isNodeError(error) && error.code === "ENOENT" ? "absent" : "unavailable";
   }
 }
 

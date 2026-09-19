@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { link, lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -81,7 +80,7 @@ test("database creates a private per-workspace FTS5 index and persists chunks", 
   });
 });
 
-test("concurrent first opens serialize initialization and leave no lock artifact", async () => {
+test("concurrent first opens serialize initialization through the persistent guard", async () => {
   await withTempAgent(async (agentDirectory) => {
     const root = path.join(agentDirectory, "concurrent-workspace");
     const databases = await Promise.all(Array.from({ length: 12 }, () => openSearchDatabase(root, agentDirectory)));
@@ -93,56 +92,57 @@ test("concurrent first opens serialize initialization and leave no lock artifact
       for (const database of databases) database.close();
     }
 
-    await assert.rejects(lstat(`${databasePathForRoot(root, agentDirectory)}.lock`), (error: unknown) =>
-      Boolean(error instanceof Error && "code" in error && error.code === "ENOENT"),
-    );
+    assert.equal((await lstat(`${databasePathForRoot(root, agentDirectory)}.lock`)).isFile(), true);
   });
 });
 
-test("concurrent stale-lock recovery uses one atomic quarantine claim", async () => {
-  if (process.platform === "win32") return;
+test("a reacquired initialization guard cannot be removed by an earlier waiter", async () => {
   await withTempAgent(async (agentDirectory) => {
-    const root = path.join(agentDirectory, "stale-lock-workspace");
+    const root = path.join(agentDirectory, "reacquired-lock-workspace");
     const initial = await openSearchDatabase(root, agentDirectory);
     initial.close();
-    const databasePath = databasePathForRoot(root, agentDirectory);
-    const lockPath = `${databasePath}.lock`;
-    await writeFile(lockPath, `99999999:dead-owner\n${Date.now()}\n`, { mode: 0o600 });
+    const lockPath = `${databasePathForRoot(root, agentDirectory)}.lock`;
+    const firstOwner = new DatabaseSync(lockPath);
+    firstOwner.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
 
-    const databases = await Promise.all(Array.from({ length: 12 }, () => openSearchDatabase(root, agentDirectory)));
-    for (const database of databases) database.close();
-    const quarantines = (await readdir(path.dirname(databasePath))).filter((name) =>
-      name.startsWith(`${path.basename(databasePath)}.lock.stale-`),
-    );
-    assert.equal(quarantines.length, 1);
-    await assert.rejects(lstat(lockPath), (error: unknown) =>
-      Boolean(error instanceof Error && "code" in error && error.code === "ENOENT"),
-    );
+    let settled = false;
+    const pending = openSearchDatabase(root, agentDirectory).finally(() => {
+      settled = true;
+    });
+    await delay(50);
+    assert.equal(settled, false);
+
+    firstOwner.exec("ROLLBACK");
+    firstOwner.close();
+    const nextOwner = new DatabaseSync(lockPath);
+    nextOwner.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
+    await delay(50);
+    assert.equal(settled, false);
+
+    nextOwner.exec("ROLLBACK");
+    nextOwner.close();
+    const recovered = await pending;
+    recovered.close();
   });
 });
 
-test("stale-lock recovery completes a claim left behind by a crashed claimant", async () => {
-  if (process.platform === "win32") return;
+test("lease recovery is process-id independent after its connection exits", async () => {
   await withTempAgent(async (agentDirectory) => {
-    const root = path.join(agentDirectory, "crashed-claim-workspace");
+    const root = path.join(agentDirectory, "exited-process-workspace");
     const initial = await openSearchDatabase(root, agentDirectory);
     initial.close();
     const databasePath = databasePathForRoot(root, agentDirectory);
-    const lockPath = `${databasePath}.lock`;
-    const owner = `99999999:dead-owner\n${Date.now()}\n`;
-    await writeFile(lockPath, owner, { mode: 0o600 });
-    const stats = await lstat(lockPath);
-    const identity = createHash("sha256")
-      .update(`${stats.dev}:${stats.ino}:${stats.mtimeMs}:${owner}`, "utf8")
-      .digest("hex")
-      .slice(0, 24);
-    await link(lockPath, `${lockPath}.stale-${identity}`);
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare("UPDATE meta SET value = 'obsolete' WHERE key = 'schema_version'").run();
+    sqlite.close();
+
+    const abandonedLease = new DatabaseSync(`${databasePath}.leases`);
+    abandonedLease.exec("PRAGMA busy_timeout = 0; BEGIN");
+    abandonedLease.prepare("SELECT marker FROM lease_guard LIMIT 1").get();
+    abandonedLease.close();
 
     const recovered = await openSearchDatabase(root, agentDirectory);
     recovered.close();
-    await assert.rejects(lstat(lockPath), (error: unknown) =>
-      Boolean(error instanceof Error && "code" in error && error.code === "ENOENT"),
-    );
   });
 });
 
@@ -152,11 +152,14 @@ test("database lock waits honor cancellation", async () => {
     const initial = await openSearchDatabase(root, agentDirectory);
     initial.close();
     const lockPath = `${databasePathForRoot(root, agentDirectory)}.lock`;
-    await writeFile(lockPath, `${process.pid}:live-owner\n${Date.now()}\n`, { mode: 0o600 });
+    const owner = new DatabaseSync(lockPath);
+    owner.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
     const controller = new AbortController();
     const pending = openSearchDatabase(root, agentDirectory, controller.signal);
     setTimeout(() => controller.abort(), 10);
     await assert.rejects(pending, (error: unknown) => Boolean(error instanceof Error && error.name === "AbortError"));
+    owner.exec("ROLLBACK");
+    owner.close();
   });
 });
 
@@ -221,10 +224,7 @@ test("schema recovery waits for live database handles before replacing the index
     const rebuilt = await recovery;
     assert.deepEqual(rebuilt.listFiles(), []);
     rebuilt.close();
-    const leases = (await readdir(path.dirname(databasePath))).filter((name) =>
-      name.startsWith(`${path.basename(databasePath)}.lease-`),
-    );
-    assert.deepEqual(leases, []);
+    assert.equal((await lstat(`${databasePath}.leases`)).isFile(), true);
   });
 });
 

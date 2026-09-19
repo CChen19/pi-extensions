@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, unlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test, vi } from "vitest";
@@ -146,8 +146,51 @@ test("stale discovery snapshots do not delete files indexed by another handle", 
     assert.equal(staleRefresh.removed, 0);
     assert.equal(staleHandle.getFile("new.txt")?.path, "new.txt");
     assert.match(staleHandle.representativeChunks("new.txt", 1)[0]?.body ?? "", /newly indexed/);
+
+    await writeFile(path.join(workspace, "new.txt"), "changed after the fresh index was published\n");
+    await utimes(path.join(workspace, "new.txt"), new Date(), new Date(Date.now() + 1_000));
+    const changedRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(changedRefresh.removed, 1);
+    assert.equal(staleHandle.getFile("new.txt"), undefined);
+    assert.deepEqual(staleHandle.representativeChunks("new.txt", 1), []);
     freshHandle.close();
     staleHandle.close();
+  });
+});
+
+test("filesystem revalidation errors preserve but hide indexed rows", async () => {
+  if (process.platform === "win32") return;
+  await withFixture(async (workspace, agentDirectory) => {
+    const database = await openSearchDatabase(workspace, agentDirectory);
+    const inaccessiblePath = "a".repeat(300);
+    database.replaceFile(
+      {
+        path: inaccessiblePath,
+        dev: "1",
+        ino: "2",
+        size: 10,
+        mtimeNs: "3",
+        hash: "stale-hash",
+        title: "Stale",
+        outline: "Stale",
+      },
+      [
+        {
+          sequence: 0,
+          startLine: 1,
+          endLine: 1,
+          heading: "Stale",
+          body: "stale content",
+          hash: "stale-chunk",
+        },
+      ],
+    );
+
+    const refresh = await refreshIndex(database, await discoverSearchFiles(workspace, "."));
+    assert.equal(refresh.removed, 0);
+    assert.equal(database.getFile(inaccessiblePath)?.path, inaccessiblePath);
+    assert.deepEqual(database.representativeChunks(inaccessiblePath, 1), []);
+    database.close();
   });
 });
 
