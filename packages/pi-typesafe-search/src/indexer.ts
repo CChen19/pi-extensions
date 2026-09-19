@@ -39,6 +39,7 @@ async function refreshIndexNow(
   let indexed = 0;
   let unchanged = 0;
   let skipped = discovery.skippedFiles;
+  const unavailablePaths: string[] = [];
 
   for (let index = 0; index < discovery.files.length; index += 1) {
     signal?.throwIfAborted();
@@ -80,6 +81,8 @@ async function refreshIndexNow(
       if (signal?.aborted || isAbortError(error)) throw error;
       if (error instanceof UnsupportedSearchFileError) {
         database.removeFiles([file.path]);
+      } else {
+        unavailablePaths.push(file.path);
       }
       skipped += 1;
     }
@@ -88,6 +91,7 @@ async function refreshIndexNow(
   signal?.throwIfAborted();
   const removedPaths = [...existing.keys()].filter((path) => !discoveredPaths.has(path));
   database.removeFiles(removedPaths);
+  database.setUnavailableFiles(unavailablePaths);
   await database.secureArtifacts();
   return { indexed, unchanged, removed: removedPaths.length, skipped };
 }

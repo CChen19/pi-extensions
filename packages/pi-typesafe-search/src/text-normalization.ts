@@ -17,7 +17,7 @@ export function searchTerms(value: string): string[] {
       const characters = [...word];
       if (characters.length === 1) terms.push(word);
       else {
-        for (let index = 0; index < characters.length - 1; index += 1) {
+        for (let index = 0; index < characters.length - 1 && terms.length < MAX_TERMS; index += 1) {
           terms.push(`${characters[index]}${characters[index + 1]}`);
         }
       }

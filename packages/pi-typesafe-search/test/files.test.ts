@@ -31,12 +31,20 @@ test("discovery is deterministic and excludes symlinks, generated directories, a
     await symlink(path.join(workspace, "src", "a.ts"), path.join(workspace, "linked.ts"));
 
     const result = await discoverSearchFiles(workspace, ".");
+    assert.equal(result.workspacePrefix, "");
     assert.deepEqual(
       result.files.map((file) => file.path),
       ["src/a.ts", "src/b.ts"],
     );
     assert.equal(result.skippedDirectories, 1);
     assert.ok(result.skippedFiles >= 2);
+
+    const nested = await discoverSearchFiles(workspace, "src");
+    assert.equal(nested.workspacePrefix, "src");
+    assert.deepEqual(
+      nested.files.map((file) => file.path),
+      ["a.ts", "b.ts"],
+    );
   });
 });
 

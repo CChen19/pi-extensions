@@ -48,6 +48,7 @@ export interface DiscoveredFile {
 
 export interface DiscoveryResult {
   root: string;
+  workspacePrefix: string;
   files: DiscoveredFile[];
   skippedDirectories: number;
   skippedFiles: number;
@@ -85,6 +86,9 @@ export async function discoverSearchFiles(
   signal?: AbortSignal,
 ): Promise<DiscoveryResult> {
   const root = await resolveSearchRoot(cwd, inputPath, signal);
+  const canonicalCwd = await realpath(cwd);
+  signal?.throwIfAborted();
+  const workspacePrefix = toPosix(relative(canonicalCwd, root));
   const files: DiscoveredFile[] = [];
   const directories = [root];
   let skippedDirectories = 0;
@@ -160,7 +164,7 @@ export async function discoverSearchFiles(
   }
 
   files.sort((left, right) => left.path.localeCompare(right.path));
-  return { root, files, skippedDirectories, skippedFiles, totalBytes };
+  return { root, workspacePrefix, files, skippedDirectories, skippedFiles, totalBytes };
 }
 
 export async function loadTextFile(file: DiscoveredFile, root: string, signal?: AbortSignal): Promise<LoadedTextFile> {

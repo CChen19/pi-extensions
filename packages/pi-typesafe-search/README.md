@@ -81,6 +81,7 @@ flowchart LR
 
 The first search indexes accepted files under the selected directory.
 Later searches still scan file metadata but only reread and rechunk files whose identity, size, or high-resolution modification time changed.
+If a changed file cannot be read safely, its prior complete index row remains available for a later retry but is excluded from the current search.
 The extension does not run a watcher or background indexer.
 
 FTS5 supplies fast lexical recall.
@@ -155,7 +156,8 @@ Each canonical search root selected inside the workspace receives a separate der
 
 The database stores file metadata, structural outlines, source chunks, FTS terms, and content hashes.
 It never stores vectors or credentials.
-SQLite WAL mode, transactions, a busy timeout, and per-process mutation ordering protect complete file updates; separate Pi processes still rely on SQLite's writer-lock behavior.
+SQLite WAL mode, transactions, a busy timeout, and per-process mutation ordering protect complete file updates.
+A private cross-process lock serializes database creation and recovery, while SQLite writer locks coordinate ordinary updates from separate Pi processes.
 
 Schema or chunk-policy changes rebuild a validated replacement before swapping it into place.
 A corrupt derived index is rebuilt automatically when possible.

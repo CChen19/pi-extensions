@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import type { NoulQuestion, RequestOptions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { test } from "vitest";
+import { chunkTextFile } from "../src/chunks.js";
+import { CHUNK_MAX_BYTES } from "../src/constants.js";
 import { openSearchDatabase } from "../src/database.js";
 import { discoverSearchFiles } from "../src/files.js";
 import { JevEvaluator, type SystemOneClient } from "../src/jev-client.js";
@@ -131,4 +133,44 @@ test("overlapping matches merge line ranges without duplicating hits", () => {
     { start: merged[0]?.startLine, end: merged[0]?.endLine, body: merged[0]?.body },
     { start: 1, end: 5, body: "one\ntwo\nthree\nfour\nfive" },
   );
+});
+
+test("overlap merging closes transitive ranges regardless of relevance order", () => {
+  const base = {
+    id: 1,
+    filePath: "a.md",
+    heading: "A",
+    hash: "one",
+    rrfScore: 1,
+    sources: [],
+  };
+  const matches: SearchMatch[] = [
+    { ...base, sequence: 0, startLine: 1, endLine: 3, body: "one\ntwo\nthree", relevance: 0.9 },
+    { ...base, id: 3, sequence: 2, startLine: 5, endLine: 7, body: "five\nsix\nseven", relevance: 0.8 },
+    { ...base, id: 2, sequence: 1, startLine: 3, endLine: 5, body: "three\nfour\nfive", relevance: 0.7 },
+  ];
+
+  const merged = mergeOverlappingMatches(matches);
+  assert.equal(merged.length, 1);
+  assert.deepEqual(
+    { start: merged[0]?.startLine, end: merged[0]?.endLine, body: merged[0]?.body },
+    { start: 1, end: 7, body: "one\ntwo\nthree\nfour\nfive\nsix\nseven" },
+  );
+});
+
+test("overlap merging preserves every segment from a split long line", () => {
+  const source = "abcdef界".repeat(CHUNK_MAX_BYTES);
+  const chunks = chunkTextFile("long.txt", [source]).chunks;
+  const matches: SearchMatch[] = chunks.map((chunk, index) => ({
+    ...chunk,
+    id: index + 1,
+    filePath: "long.txt",
+    rrfScore: 1,
+    sources: [],
+    relevance: 0.9 - index / 100,
+  }));
+
+  const merged = mergeOverlappingMatches(matches);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.body, source);
 });

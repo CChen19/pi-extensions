@@ -53,7 +53,8 @@ test("extension registers one tool, loads private settings, searches, reports pr
       mode: 0o600,
     });
     await chmod(path.join(agentDirectory, "pi-typesafe-search.json"), 0o600);
-    await writeFile(path.join(workspace, "auth.md"), "# Authentication\nRefresh token restores sessions.\n");
+    await mkdir(path.join(workspace, "nested"));
+    await writeFile(path.join(workspace, "nested", "auth.md"), "# Authentication\nRefresh token restores sessions.\n");
     const restoreFetch = installFakeTypeSafeFetch();
     try {
       vi.resetModules();
@@ -67,7 +68,7 @@ test("extension registers one tool, loads private settings, searches, reports pr
       const tool = mock.tools[0] as {
         execute: (...args: unknown[]) => Promise<{
           content: Array<{ type: string; text: string }>;
-          details: { matches: unknown[]; requests: number };
+          details: { matches: Array<{ path: string }>; requests: number };
         }>;
       };
       const progress: string[] = [];
@@ -77,13 +78,14 @@ test("extension registers one tool, loads private settings, searches, reports pr
 
       const result = await tool.execute(
         "call",
-        { query: "stay signed in", path: ".", alternatives: ["refresh token"], limit: 3 },
+        { query: "stay signed in", path: "nested", alternatives: ["refresh token"], limit: 3 },
         new AbortController().signal,
         (update: { content: Array<{ text: string }> }) => progress.push(update.content[0]?.text ?? ""),
         ctx,
       );
       const text = result.content[0]?.text ?? "";
-      assert.match(text, /auth\.md:1-3/);
+      assert.match(text, /nested\/auth\.md:1-3/);
+      assert.equal(result.details.matches[0]?.path, "nested/auth.md");
       assert.match(text, /Jev 0\.900/);
       assert.ok(result.details.matches.length > 0);
       assert.ok(result.details.requests >= 2);
@@ -94,7 +96,7 @@ test("extension registers one tool, loads private settings, searches, reports pr
       await mock.events.get("session_start")?.[0]?.({}, ctx);
       const replacement = await tool.execute(
         "replacement",
-        { query: "refresh token", path: ".", limit: 1 },
+        { query: "refresh token", path: "nested", limit: 1 },
         undefined,
         undefined,
         ctx,
@@ -157,7 +159,7 @@ test("tool results strip terminal controls and bound model text and structured e
   const response: SearchResponse = {
     matches: Array.from({ length: 20 }, (_, index) => ({
       id: index,
-      filePath: `\u001b]8;;https://example.invalid\u0007file-${index}.md\u001b]8;;\u0007`,
+      filePath: `\u001b]8;;https://example.invalid\u0007file-${index}.md\u001b]8;;\u0007\nforged\tpath`,
       sequence: index,
       startLine: index * 100 + 1,
       endLine: index * 100 + 100,
@@ -166,7 +168,7 @@ test("tool results strip terminal controls and bound model text and structured e
       hash: String(index),
       rrfScore: 1,
       lexicalRank: index + 1,
-      sources: [],
+      sources: [{ query: "query\nforged\tfield", rank: 1, weight: 1, bm25: -1 }],
       relevance: 0.9,
     })),
     index: { indexed: 20, unchanged: 0, removed: 0, skipped: 0 },
@@ -174,7 +176,7 @@ test("tool results strip terminal controls and bound model text and structured e
     requests: 4,
     inputTokens: 100,
     outputTokens: 20,
-    model: "jev-test",
+    model: "jev-test\nforged\tmodel",
     fileMapsEvaluated: 20,
     candidatesEvaluated: 20,
   };
@@ -186,6 +188,12 @@ test("tool results strip terminal controls and bound model text and structured e
   assert.equal(text.includes("\u001b"), false);
   assert.equal(text.includes("\u0007"), false);
   assert.equal(result.details.truncated, true);
+  assert.doesNotMatch(text, /\nforged/);
+  assert.ok(result.details.matches.every((match) => !/[\t\r\n]/u.test(match.path)));
+  assert.ok(
+    result.details.matches.every((match) => match.retrievalSources.every((source) => !/[\t\r\n]/u.test(source.query))),
+  );
+  assert.doesNotMatch(result.details.model ?? "", /[\t\r\n]/u);
   assert.ok(result.details.matches.every((match) => Buffer.byteLength(match.excerpt, "utf8") <= 2_048));
 });
 

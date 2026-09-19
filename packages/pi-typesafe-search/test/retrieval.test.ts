@@ -55,6 +55,11 @@ function addFile(database: SearchDatabase, filePath: string, title: string, chun
 test("normalization splits identifiers, protects FTS syntax, and creates CJK bigrams", () => {
   assert.deepEqual(searchTerms("refreshToken snake_case kebab-case"), ["refresh", "token", "snake", "case", "kebab"]);
   assert.deepEqual(searchTerms("使用者登入"), ["使用", "用者", "者登", "登入"]);
+  assert.equal(searchTerms("使".repeat(1_000)).length, 1);
+  assert.equal(
+    searchTerms(Array.from({ length: 1_000 }, (_, index) => String.fromCodePoint(0x4e00 + index)).join("")).length,
+    32,
+  );
   const expression = ftsExpression('auth" OR *');
   assert.ok(expression);
   assert.doesNotMatch(expression, / OR \*/);

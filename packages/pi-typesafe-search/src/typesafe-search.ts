@@ -90,7 +90,7 @@ export default function registerJevSearch(pi: ExtensionAPI): void {
             signal: operationSignal,
             onProgress: (_phase, detail) => {
               onUpdate?.({
-                content: [{ type: "text", text: safeDisplay(detail) }],
+                content: [{ type: "text", text: safeDisplayField(detail) }],
                 details: { phase: _phase },
               });
             },
@@ -99,12 +99,12 @@ export default function registerJevSearch(pi: ExtensionAPI): void {
           if (state.closed) throw new Error("jev_search session ended during the search");
           return formatToolResult(response);
         } finally {
-          state.operations.delete(operation.promise);
           operation.finish();
+          state.operations.delete(operation.promise);
         }
       } catch (error) {
         if (signal?.aborted || isAbortError(error)) throw error;
-        throw new Error(safeDisplay(formatError(error)), { cause: error });
+        throw new Error(safeDisplayField(formatError(error)), { cause: error });
       }
     },
   });
@@ -129,7 +129,7 @@ export default function registerJevSearch(pi: ExtensionAPI): void {
     if (state.closed || sessionStates.get(ctx.sessionManager) !== state) return;
     state.settings = settings;
     if (settings.kind === "invalid") {
-      ctx.ui.notify(safeDisplay(`pi-typesafe-search settings ignored: ${settings.reason}`), "warning");
+      ctx.ui.notify(safeDisplayField(`pi-typesafe-search settings ignored: ${settings.reason}`), "warning");
     }
   });
 
@@ -220,8 +220,8 @@ export function formatToolResult(response: SearchResponse) {
   for (const match of response.matches) {
     lines.push(
       "",
-      `${safeDisplay(match.filePath)}:${match.startLine}-${match.endLine} (Jev ${match.relevance.toFixed(3)})`,
-      safeDisplay(match.body),
+      `${safeDisplayField(match.filePath)}:${match.startLine}-${match.endLine} (Jev ${match.relevance.toFixed(3)})`,
+      safeDisplayMultiline(match.body),
     );
   }
   lines.push(
@@ -240,7 +240,7 @@ export function formatToolResult(response: SearchResponse) {
     content: [{ type: "text" as const, text }],
     details: {
       matches: response.matches.map((match) => ({
-        path: safeDisplay(match.filePath),
+        path: safeDisplayField(match.filePath),
         startLine: match.startLine,
         endLine: match.endLine,
         relevance: match.relevance,
@@ -249,9 +249,9 @@ export function formatToolResult(response: SearchResponse) {
         fileScore: match.fileScore,
         retrievalSources: match.sources.slice(0, MAX_ALTERNATIVES + 1).map((source) => ({
           ...source,
-          query: boundedDisplay(source.query, 500, 5),
+          query: boundedDisplayField(source.query, 500),
         })),
-        excerpt: boundedDisplay(match.body, 2_048, 50),
+        excerpt: boundedDisplayMultiline(match.body, 2_048, 50),
       })),
       index: response.index,
       scannedFiles: response.scannedFiles,
@@ -260,7 +260,7 @@ export function formatToolResult(response: SearchResponse) {
       requests: response.requests,
       inputTokens: response.inputTokens,
       outputTokens: response.outputTokens,
-      model: response.model ? boundedDisplay(response.model, 200, 1) : undefined,
+      model: response.model ? boundedDisplayField(response.model, 200) : undefined,
       truncated: truncation.truncated,
     },
   };
@@ -278,11 +278,19 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "APIUserAbortError");
 }
 
-function boundedDisplay(value: string, maxBytes: number, maxLines: number): string {
-  return truncateHead(safeDisplay(value), { maxBytes, maxLines }).content;
+function boundedDisplayField(value: string, maxBytes: number): string {
+  return truncateHead(safeDisplayField(value), { maxBytes, maxLines: 1 }).content;
 }
 
-function safeDisplay(value: string): string {
+function boundedDisplayMultiline(value: string, maxBytes: number, maxLines: number): string {
+  return truncateHead(safeDisplayMultiline(value), { maxBytes, maxLines }).content;
+}
+
+function safeDisplayField(value: string): string {
+  return safeDisplayMultiline(value).replace(/[\t\r\n\u2028\u2029]+/gu, " ");
+}
+
+function safeDisplayMultiline(value: string): string {
   return [...stripVTControlCharacters(value)]
     .filter((character) => {
       const code = character.codePointAt(0) ?? 0;

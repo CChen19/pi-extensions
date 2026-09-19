@@ -55,7 +55,10 @@ export async function searchIndexedWorkspace(options: {
   onProgress?.("index", `Refreshing index for ${discovery.files.length} files`);
   const index = await refreshIndex(database, discovery, signal, (progress) => {
     if (progress.current === 1 || progress.current === progress.total || progress.current % 25 === 0) {
-      onProgress?.("index", `Indexing ${progress.current}/${progress.total}: ${progress.path}`);
+      onProgress?.(
+        "index",
+        `Indexing ${progress.current}/${progress.total}: ${workspacePath(discovery.workspacePrefix, progress.path)}`,
+      );
     }
   });
   signal?.throwIfAborted();
@@ -115,7 +118,9 @@ export async function searchIndexedWorkspace(options: {
     target = Math.min(candidates.length, target + RERANK_WIDENING_BATCH);
   }
 
-  const matches = acceptedMatches(candidates, evaluated, scores).slice(0, request.limit);
+  const matches = acceptedMatches(candidates, evaluated, scores)
+    .slice(0, request.limit)
+    .map((match) => ({ ...match, filePath: workspacePath(discovery.workspacePrefix, match.filePath) }));
 
   return {
     matches,
@@ -153,51 +158,82 @@ function acceptedMatches(
 }
 
 export function mergeOverlappingMatches(matches: readonly SearchMatch[]): SearchMatch[] {
-  const merged: SearchMatch[] = [];
-  for (const match of matches) {
-    const existing = merged.find(
-      (candidate) =>
-        candidate.filePath === match.filePath &&
-        candidate.startLine <= match.endLine &&
-        match.startLine <= candidate.endLine,
-    );
-    if (!existing) {
-      merged.push({ ...match, sources: [...match.sources] });
-      continue;
-    }
-    existing.body = mergeBodies(existing, match);
-    existing.startLine = Math.min(existing.startLine, match.startLine);
-    existing.endLine = Math.max(existing.endLine, match.endLine);
-    existing.relevance = Math.max(existing.relevance, match.relevance);
-    existing.rrfScore = Math.max(existing.rrfScore, match.rrfScore);
-    existing.fileScore = Math.max(existing.fileScore ?? 0, match.fileScore ?? 0) || undefined;
-    existing.lexicalRank = Math.min(
-      existing.lexicalRank ?? Number.POSITIVE_INFINITY,
-      match.lexicalRank ?? Number.POSITIVE_INFINITY,
-    );
-    if (!Number.isFinite(existing.lexicalRank)) existing.lexicalRank = undefined;
-    existing.sources.push(...match.sources);
-  }
-  return merged.sort(
+  const positioned = [...matches].sort(
     (left, right) =>
-      right.relevance - left.relevance ||
       left.filePath.localeCompare(right.filePath) ||
-      left.startLine - right.startLine,
+      left.startLine - right.startLine ||
+      left.endLine - right.endLine ||
+      left.sequence - right.sequence,
   );
+  const components: SearchMatch[][] = [];
+  for (const match of positioned) {
+    const current = components.at(-1);
+    const currentEnd = current ? Math.max(...current.map((candidate) => candidate.endLine)) : -1;
+    if (!current || current[0]?.filePath !== match.filePath || match.startLine > currentEnd) {
+      components.push([match]);
+    } else {
+      current.push(match);
+    }
+  }
+
+  return components
+    .map(mergeMatchComponent)
+    .sort(
+      (left, right) =>
+        right.relevance - left.relevance ||
+        left.filePath.localeCompare(right.filePath) ||
+        left.startLine - right.startLine,
+    );
 }
 
-function mergeBodies(left: SearchMatch, right: SearchMatch): string {
-  const lines = new Map<number, string>();
-  for (const match of [left, right]) {
-    for (const [offset, text] of match.body.split("\n").entries()) {
-      const line = match.startLine + offset;
-      const previous = lines.get(line);
-      if (previous === undefined || text.length > previous.length) lines.set(line, text);
+function mergeMatchComponent(component: readonly SearchMatch[]): SearchMatch {
+  const ranked = [...component].sort(
+    (left, right) =>
+      right.relevance - left.relevance ||
+      (left.lexicalRank ?? Number.POSITIVE_INFINITY) - (right.lexicalRank ?? Number.POSITIVE_INFINITY) ||
+      left.sequence - right.sequence,
+  );
+  const primary = ranked[0];
+  if (!primary) throw new Error("Cannot merge an empty search match component");
+  const positioned = [...component].sort((left, right) => left.sequence - right.sequence);
+  let body = positioned[0]?.body ?? "";
+  let coveredEnd = positioned[0]?.endLine ?? primary.endLine;
+  const sameLongLine = positioned.every(
+    (candidate) =>
+      candidate.startLine === candidate.endLine &&
+      candidate.startLine === positioned[0]?.startLine &&
+      candidate.endLine === positioned[0]?.endLine,
+  );
+  for (const match of positioned.slice(1)) {
+    if (sameLongLine) {
+      body += match.body;
+    } else {
+      const overlapLines = Math.max(0, coveredEnd - match.startLine + 1);
+      const remainingLines = match.body.split("\n").slice(overlapLines);
+      if (remainingLines.length > 0) {
+        body += `${"\n".repeat(Math.max(1, match.startLine - coveredEnd))}${remainingLines.join("\n")}`;
+      }
     }
+    coveredEnd = Math.max(coveredEnd, match.endLine);
   }
-  const start = Math.min(left.startLine, right.startLine);
-  const end = Math.max(left.endLine, right.endLine);
-  return Array.from({ length: end - start + 1 }, (_, offset) => lines.get(start + offset) ?? "").join("\n");
+
+  const lexicalRank = Math.min(...component.map((match) => match.lexicalRank ?? Number.POSITIVE_INFINITY));
+  return {
+    ...primary,
+    sequence: Math.min(...component.map((match) => match.sequence)),
+    startLine: Math.min(...component.map((match) => match.startLine)),
+    endLine: Math.max(...component.map((match) => match.endLine)),
+    body,
+    relevance: Math.max(...component.map((match) => match.relevance)),
+    rrfScore: Math.max(...component.map((match) => match.rrfScore)),
+    fileScore: Math.max(...component.map((match) => match.fileScore ?? 0)) || undefined,
+    lexicalRank: Number.isFinite(lexicalRank) ? lexicalRank : undefined,
+    sources: component.flatMap((match) => match.sources),
+  };
+}
+
+function workspacePath(prefix: string, filePath: string): string {
+  return prefix ? `${prefix}/${filePath}` : filePath;
 }
 
 function queryWithAlternatives(query: string, alternatives: readonly string[]): string {

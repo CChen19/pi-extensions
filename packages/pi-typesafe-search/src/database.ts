@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync } from "node:fs";
-import { chmod, lstat, mkdir, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SearchChunk } from "./chunks.js";
 import { INDEX_POLICY_VERSION, SCHEMA_VERSION } from "./constants.js";
@@ -11,6 +12,9 @@ import { searchableText } from "./text-normalization.js";
 const DATABASE_DIRECTORY_MODE = 0o700;
 const DATABASE_FILE_MODE = 0o600;
 const BUSY_TIMEOUT_MS = 5_000;
+const DATABASE_LOCK_WAIT_MS = 10_000;
+const DATABASE_LOCK_RETRY_MS = 25;
+const INCOMPLETE_LOCK_STALE_MS = 2_000;
 
 export interface IndexedFileRecord {
   path: string;
@@ -54,6 +58,28 @@ export function databasePathForRoot(root: string, agentDirectory = getAgentDir()
 export async function openSearchDatabase(root: string, agentDirectory = getAgentDir()): Promise<SearchDatabase> {
   const path = databasePathForRoot(root, agentDirectory);
   await ensurePrivateIndexDirectory(agentDirectory);
+  const release = await acquireDatabaseLock(path);
+  let database: SearchDatabase | undefined;
+  let openError: unknown;
+  try {
+    database = await openSearchDatabaseLocked(path, root);
+  } catch (error) {
+    openError = error;
+  }
+  try {
+    await release();
+  } catch (error) {
+    database?.close();
+    throw openError
+      ? new Error(`Cannot open search index (${formatError(openError)}) or release its lock: ${formatError(error)}`)
+      : error;
+  }
+  if (openError) throw openError;
+  if (!database) throw new Error("Search index did not open");
+  return database;
+}
+
+async function openSearchDatabaseLocked(path: string, root: string): Promise<SearchDatabase> {
   const state = await databasePathState(path);
   if (state === "unsafe") throw new Error(`Search index path is not a private regular file: ${path}`);
   if (state === "missing") {
@@ -188,6 +214,13 @@ export class SearchDatabase {
     });
   }
 
+  setUnavailableFiles(paths: readonly string[]): void {
+    this.assertOpen();
+    this.database.exec("DELETE FROM temp.unavailable_files");
+    const insert = this.database.prepare("INSERT OR IGNORE INTO temp.unavailable_files(path) VALUES (?)");
+    for (const path of paths) insert.run(path);
+  }
+
   searchFts(expression: string, limit: number, filePath?: string): FtsChunk[] {
     this.assertOpen();
     const filter = filePath === undefined ? "" : "AND c.file_path = ?";
@@ -196,7 +229,9 @@ export class SearchDatabase {
               bm25(chunks_fts, 3.0, 2.5, 2.0, 1.0) AS bm25
        FROM chunks_fts
        JOIN chunks c ON c.id = chunks_fts.rowid
-       WHERE chunks_fts MATCH ? ${filter}
+       WHERE chunks_fts MATCH ?
+         AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = c.file_path)
+         ${filter}
        ORDER BY bm25 ASC, c.file_path ASC, c.seq ASC
        LIMIT ?`,
     );
@@ -213,11 +248,18 @@ export class SearchDatabase {
     if (paths && paths.length === 0) return [];
     if (!paths) {
       return this.database
-        .prepare("SELECT path, title, outline FROM files ORDER BY path LIMIT ?")
+        .prepare(
+          `SELECT path, title, outline FROM files
+           WHERE NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = files.path)
+           ORDER BY path LIMIT ?`,
+        )
         .all(limit) as unknown as FileMapRecord[];
     }
     const selected: FileMapRecord[] = [];
-    const statement = this.database.prepare("SELECT path, title, outline FROM files WHERE path = ?");
+    const statement = this.database.prepare(
+      `SELECT path, title, outline FROM files
+       WHERE path = ? AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = files.path)`,
+    );
     for (const path of paths.slice(0, limit)) {
       const row = statement.get(path) as FileMapRecord | undefined;
       if (row) selected.push(row);
@@ -232,7 +274,9 @@ export class SearchDatabase {
         `WITH ranked AS (
            SELECT c.*, COUNT(*) OVER () AS total,
                   ROW_NUMBER() OVER (ORDER BY seq) AS position
-           FROM chunks c WHERE file_path = ?
+           FROM chunks c
+           WHERE file_path = ?
+             AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = c.file_path)
          )
          SELECT id, file_path, seq, start_line, end_line, heading, body, hash
          FROM ranked
@@ -313,6 +357,9 @@ function configureDatabase(database: DatabaseSync): void {
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
     PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
+    CREATE TEMP TABLE unavailable_files (
+      path TEXT PRIMARY KEY
+    ) STRICT;
   `);
 }
 
@@ -391,6 +438,68 @@ async function rebuildDatabase(path: string, root: string): Promise<void> {
   } finally {
     replacement?.close();
     await removeDatabaseArtifacts(temporaryPath);
+  }
+}
+
+async function acquireDatabaseLock(path: string): Promise<() => Promise<void>> {
+  const lockPath = `${path}.lock`;
+  const owner = `${process.pid}:${randomUUID()}`;
+  const deadline = Date.now() + DATABASE_LOCK_WAIT_MS;
+  while (true) {
+    try {
+      await mkdir(lockPath, { mode: DATABASE_DIRECTORY_MODE });
+      try {
+        await writeFile(join(lockPath, "owner"), `${owner}\n${Date.now()}\n`, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: DATABASE_FILE_MODE,
+        });
+      } catch (error) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        const currentOwner = await readFile(join(lockPath, "owner"), "utf8").catch(() => "");
+        if (currentOwner.startsWith(`${owner}\n`)) await rm(lockPath, { recursive: true, force: true });
+      };
+    } catch (error: unknown) {
+      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+      if (await isStaleDatabaseLock(lockPath)) {
+        await rm(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for search index initialization: ${path}`);
+      await delay(DATABASE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+async function isStaleDatabaseLock(lockPath: string): Promise<boolean> {
+  let stats: Awaited<ReturnType<typeof lstat>>;
+  try {
+    stats = await lstat(lockPath);
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`Search index lock is not a private regular directory: ${lockPath}`);
+  }
+  const owner = await readFile(join(lockPath, "owner"), "utf8").catch(() => "");
+  const pid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
+  if (Number.isSafeInteger(pid) && pid > 0) return !isProcessAlive(pid);
+  return Date.now() - stats.mtimeMs >= INCOMPLETE_LOCK_STALE_MS;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    return !isNodeError(error) || error.code !== "ESRCH";
   }
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -63,6 +63,24 @@ test("database creates a private per-workspace FTS5 index and persists chunks", 
       assert.equal((await stat(path.dirname(dbPath))).mode & 0o777, 0o700);
       assert.equal((await stat(dbPath)).mode & 0o777, 0o600);
     }
+  });
+});
+
+test("concurrent first opens serialize initialization and leave no lock artifact", async () => {
+  await withTempAgent(async (agentDirectory) => {
+    const root = path.join(agentDirectory, "concurrent-workspace");
+    const databases = await Promise.all(Array.from({ length: 12 }, () => openSearchDatabase(root, agentDirectory)));
+    try {
+      assert.ok(databases.every((database) => database.listFiles().length === 0));
+      databases[0]?.replaceFile(file, [chunk("shared initialized index")]);
+      assert.ok(databases.every((database) => database.listFiles().length === 1));
+    } finally {
+      for (const database of databases) database.close();
+    }
+
+    await assert.rejects(lstat(`${databasePathForRoot(root, agentDirectory)}.lock`), (error: unknown) =>
+      Boolean(error instanceof Error && "code" in error && error.code === "ENOENT"),
+    );
   });
 });
 

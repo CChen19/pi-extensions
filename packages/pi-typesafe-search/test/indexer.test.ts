@@ -6,6 +6,7 @@ import { test } from "vitest";
 import { openSearchDatabase } from "../src/database.js";
 import { discoverSearchFiles } from "../src/files.js";
 import { refreshIndex } from "../src/indexer.js";
+import { ftsExpression } from "../src/text-normalization.js";
 
 async function withFixture(fn: (workspace: string, agentDirectory: string) => Promise<void>) {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-jev-indexer-"));
@@ -89,6 +90,21 @@ test("failed or cancelled refreshes keep complete prior file versions and queues
     const [first, second] = await Promise.all([refreshIndex(database, discovery), refreshIndex(database, discovery)]);
     assert.equal(first.indexed + second.indexed, 1);
     assert.match(database.representativeChunks("source.txt", 1)[0]?.body ?? "", /next version/);
+
+    const retainedHash = database.getFile("source.txt")?.hash;
+    await writeFile(sourcePath, "third version discovered before another change\n");
+    const failedDiscovery = await discoverSearchFiles(workspace, ".");
+    await writeFile(sourcePath, "fourth version changes size before loading and must hide stale content\n");
+    const failed = await refreshIndex(database, failedDiscovery);
+    assert.equal(failed.skipped, 1);
+    assert.equal(database.getFile("source.txt")?.hash, retainedHash);
+    assert.deepEqual(database.representativeChunks("source.txt", 1), []);
+    assert.deepEqual(database.listFileMaps(10), []);
+    assert.deepEqual(database.searchFts(ftsExpression("next version") ?? "", 10), []);
+
+    const recovered = await refreshIndex(database, await discoverSearchFiles(workspace, "."));
+    assert.equal(recovered.indexed, 1);
+    assert.match(database.representativeChunks("source.txt", 1)[0]?.body ?? "", /fourth version/);
     database.close();
   });
 });
