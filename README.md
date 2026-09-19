@@ -61,6 +61,14 @@ These extensions are part of my daily Pi setup:
 | [`pi-plan-mode`](./packages/pi-plan-mode) | Codex-like, read-only `/plan` collaboration before implementation begins. | `pi install npm:@narumitw/pi-plan-mode` |
 | [`pi-subagents`](./packages/pi-subagents) | Start bounded background Pi jobs with authenticated main-agent messaging. | [Install from source](./packages/pi-subagents#-install) |
 
+### TypeSafe AI
+
+| Package | Use it for | Install |
+| --- | --- | --- |
+| [`pi-typesafe`](./packages/pi-typesafe) | Make typed Jev decisions with validated probabilities for yes-or-no, fixed-choice, and ordered-score questions. | `pi install npm:@narumitw/pi-typesafe` |
+| [`pi-typesafe-compact`](./packages/pi-typesafe-compact) | Use Jev to select older history before summarizing it with Pi's native compaction flow and active model. | `pi install npm:@narumitw/pi-typesafe-compact` |
+| [`pi-typesafe-search`](./packages/pi-typesafe-search) | Search workspace files with SQLite FTS5 and Jev semantic reranking, without embeddings or a vector database. | `pi install npm:@narumitw/pi-typesafe-search` |
+
 ### Browser and research
 
 | Package | Use it for | Install |
