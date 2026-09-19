@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
+import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
-import type { HistoryUnit } from "../src/history-units.js";
-import { summarizeWithActiveModel } from "../src/summary.js";
+import type { HistoryUnit, HistoryUnitSource } from "../src/history-units.js";
+import { type PiCompactionPreparation, type PiNativeCompactor, summarizeWithPiNativeCompact } from "../src/summary.js";
 
 const model = {
   provider: "provider",
@@ -22,187 +23,191 @@ const usage: Usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function unit(index = 0, content = "selected fact"): HistoryUnit {
+function unit(index = 0, content = "selected fact", source: HistoryUnitSource = "history"): HistoryUnit {
   return {
     id: `unit-${index}`,
     order: index,
     kind: "assistant-text",
-    source: "history",
+    source,
     label: "Assistant",
     content,
   };
 }
 
-function response(overrides: Record<string, unknown> = {}) {
+function preparation(): PiCompactionPreparation {
   return {
-    role: "assistant",
-    content: [{ type: "text", text: "## Goal\nContinue safely" }],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage,
-    stopReason: "stop",
-    timestamp: Date.now(),
+    firstKeptEntryId: "kept",
+    messagesToSummarize: [],
+    turnPrefixMessages: [],
+    isSplitTurn: false,
+    tokensBefore: 12_345,
+    previousSummary: "Earlier compressed work",
+    fileOps: {
+      read: new Set(["src/read.ts"]),
+      written: new Set<string>(),
+      edited: new Set(["src/changed.ts"]),
+    },
+    settings: { enabled: true, reserveTokens: 10_000, keepRecentTokens: 20_000 },
+  };
+}
+
+type SummaryOptions = Parameters<typeof summarizeWithPiNativeCompact>[1];
+
+function summaryOptions(overrides: Partial<SummaryOptions> = {}): SummaryOptions {
+  return {
+    model,
+    thinkingLevel: "high",
+    selectedUnits: [unit()],
+    preparation: preparation(),
+    customInstructions: "Focus on the parser",
+    signal: new AbortController().signal,
+    isCurrent: () => true,
     ...overrides,
   };
 }
 
-test("uses the exact active model, thinking level, prior summary, and custom instructions", async () => {
-  let observedModel: unknown;
-  let observedContext: unknown;
-  let observedOptions: Record<string, unknown> | undefined;
-  const { ctx } = createMockContext({
-    model,
-    thinkingLevel: "high",
-    modelRegistry: {
-      async complete(currentModel: unknown, context: unknown, options: Record<string, unknown>) {
-        observedModel = currentModel;
-        observedContext = context;
-        observedOptions = options;
-        return response();
-      },
-    },
-  });
-  const result = await summarizeWithActiveModel(ctx, {
-    model,
-    thinkingLevel: "high",
-    selectedUnits: [unit()],
-    previousSummary: "Earlier compressed work",
-    customInstructions: "Focus on the parser",
-    reserveTokens: 10_000,
-    signal: new AbortController().signal,
-  });
-  assert.equal(observedModel, model);
-  assert.equal((observedContext as { tools?: unknown }).tools, undefined);
-  const prompt = JSON.stringify(observedContext);
-  assert.match(prompt, /selected fact/u);
-  assert.match(prompt, /Earlier compressed work/u);
-  assert.match(prompt, /Focus on the parser/u);
-  assert.equal(observedOptions?.reasoning, "high");
-  assert.equal(observedOptions?.cacheRetention, "none");
-  assert.equal(observedOptions?.maxTokens, 8_000);
-  assert.equal(typeof observedOptions?.sessionId, "string");
-  assert.deepEqual(result, { text: "## Goal\nContinue safely", usage });
-});
+function compactResult(summary = "Pi-native compact summary"): CompactionResult {
+  return {
+    summary,
+    firstKeptEntryId: "kept",
+    tokensBefore: 12_345,
+    usage,
+    details: { readFiles: ["src/read.ts"], modifiedFiles: ["src/changed.ts"] },
+  };
+}
 
-test("non-reasoning models omit reasoning and use the reserve output limit", async () => {
-  const plainModel = { ...model, reasoning: false, maxTokens: 20_000 } as Model<Api>;
-  let observedOptions: Record<string, unknown> | undefined;
-  const { ctx } = createMockContext({
-    model: plainModel,
-    modelRegistry: {
-      async complete(_model: unknown, _context: unknown, options: Record<string, unknown>) {
-        observedOptions = options;
-        return response();
-      },
-    },
-  });
-  await summarizeWithActiveModel(ctx, {
-    model: plainModel,
-    thinkingLevel: "high",
-    selectedUnits: [unit()],
-    reserveTokens: 10_000,
-    signal: new AbortController().signal,
-  });
-  assert.equal(observedOptions?.reasoning, undefined);
-  assert.equal(observedOptions?.maxTokens, 8_000);
-});
-
-test("empty selections preserve only the prior compressed summary without a model request", async () => {
-  let calls = 0;
+test("passes only JEV-selected context through Pi's native compact function", async () => {
+  let observed: Parameters<PiNativeCompactor>[0] | undefined;
   const { ctx } = createMockContext({
     model,
     modelRegistry: {
-      async complete() {
-        calls += 1;
-        return response();
+      async getApiKeyAndHeaders(currentModel: unknown) {
+        assert.equal(currentModel, model);
+        return {
+          ok: true,
+          apiKey: "provider-key",
+          headers: { "x-provider": "header", "x-removed": null },
+          env: { PROVIDER_MODE: "test" },
+        };
       },
     },
   });
-  assert.deepEqual(
-    await summarizeWithActiveModel(ctx, {
-      model,
-      thinkingLevel: "off",
-      selectedUnits: [],
-      previousSummary: "prior",
-      reserveTokens: 1_000,
-      signal: new AbortController().signal,
+  const runCompact: PiNativeCompactor = async (request) => {
+    observed = request;
+    return compactResult();
+  };
+
+  const result = await summarizeWithPiNativeCompact(
+    ctx,
+    summaryOptions({
+      selectedUnits: [unit(0, "selected history"), unit(1, "selected turn prefix", "turn-prefix")],
     }),
-    { text: "prior" },
+    runCompact,
   );
-  assert.equal(calls, 0);
+
+  assert.equal(observed?.model, model);
+  assert.equal(observed?.thinkingLevel, "high");
+  assert.equal(observed?.customInstructions, "Focus on the parser");
+  assert.equal(observed?.apiKey, "provider-key");
+  assert.deepEqual(observed?.headers, { "x-provider": "header" });
+  assert.deepEqual(observed?.env, { PROVIDER_MODE: "test" });
+  const nativePreparation = observed?.preparation;
+  assert.equal(nativePreparation?.firstKeptEntryId, "kept");
+  assert.equal(nativePreparation?.tokensBefore, 12_345);
+  assert.equal(nativePreparation?.previousSummary, "Earlier compressed work");
+  assert.equal(nativePreparation?.settings.reserveTokens, 10_000);
+  assert.equal(nativePreparation?.isSplitTurn, true);
+  assert.equal(nativePreparation?.messagesToSummarize.length, 1);
+  assert.equal(nativePreparation?.turnPrefixMessages.length, 1);
+  assert.match(JSON.stringify(nativePreparation?.messagesToSummarize), /selected history/u);
+  assert.doesNotMatch(JSON.stringify(nativePreparation?.messagesToSummarize), /selected turn prefix/u);
+  assert.match(JSON.stringify(nativePreparation?.turnPrefixMessages), /selected turn prefix/u);
+  assert.deepEqual(result, { text: "Pi-native compact summary", usage });
 });
 
-test("empty selections still honor explicit compaction instructions", async () => {
-  let observedContext: unknown;
+test("empty selections still invoke Pi compact with empty selected context", async () => {
+  let observed: Parameters<PiNativeCompactor>[0] | undefined;
   const { ctx } = createMockContext({
-    model,
     modelRegistry: {
-      async complete(_model: unknown, context: unknown) {
-        observedContext = context;
-        return response();
+      async getApiKeyAndHeaders() {
+        return { ok: true };
       },
     },
   });
-  const result = await summarizeWithActiveModel(ctx, {
-    model,
-    thinkingLevel: "off",
-    selectedUnits: [],
-    previousSummary: "prior",
-    customInstructions: "Focus on unresolved tests",
-    reserveTokens: 1_000,
-    signal: new AbortController().signal,
-  });
-  assert.match(JSON.stringify(observedContext), /prior/u);
-  assert.match(JSON.stringify(observedContext), /Focus on unresolved tests/u);
-  assert.deepEqual(result, { text: "## Goal\nContinue safely", usage });
+
+  await summarizeWithPiNativeCompact(
+    ctx,
+    summaryOptions({ selectedUnits: [], customInstructions: undefined }),
+    async (request) => {
+      observed = request;
+      return compactResult("empty-context summary");
+    },
+  );
+  assert.deepEqual(observed?.preparation.messagesToSummarize, []);
+  assert.deepEqual(observed?.preparation.turnPrefixMessages, []);
+  assert.equal(observed?.preparation.isSplitTurn, false);
 });
 
-test.each([
-  ["length", response({ stopReason: "length" }), /token limit/u],
-  ["provider error", response({ stopReason: "error", errorMessage: "bad" }), /failed: bad/u],
-  [
-    "tool call",
-    response({ content: [{ type: "toolCall", id: "1", name: "read", arguments: {} }], stopReason: "stop" }),
-    /attempted to call/u,
-  ],
-  ["empty", response({ content: [{ type: "text", text: "  " }] }), /no text/u],
-  ["unexpected stop", response({ stopReason: "aborted" }), /stopped unexpectedly/u],
-])("rejects %s summary responses", async (_label, assistantResponse, pattern) => {
+test("authentication failures do not start Pi compact", async () => {
+  let compactCalls = 0;
   const { ctx } = createMockContext({
-    model,
-    modelRegistry: { complete: async () => assistantResponse },
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return { ok: false, error: "provider auth missing" };
+      },
+    },
   });
   await assert.rejects(
-    summarizeWithActiveModel(ctx, {
-      model,
-      thinkingLevel: "off",
-      selectedUnits: [unit()],
-      reserveTokens: 1_000,
-      signal: new AbortController().signal,
+    summarizeWithPiNativeCompact(ctx, summaryOptions(), async () => {
+      compactCalls += 1;
+      return compactResult();
     }),
-    pattern,
+    /provider auth missing/u,
   );
+  assert.equal(compactCalls, 0);
 });
 
-test("cancellation after provider completion prevents publication", async () => {
+test("stale ownership after authentication prevents Pi compact", async () => {
+  let current = true;
+  let compactCalls = 0;
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        current = false;
+        return { ok: true };
+      },
+    },
+  });
+  await assert.rejects(
+    summarizeWithPiNativeCompact(ctx, summaryOptions({ isCurrent: () => current }), async () => {
+      compactCalls += 1;
+      return compactResult();
+    }),
+    /ownership changed/u,
+  );
+  assert.equal(compactCalls, 0);
+});
+
+test("Pi compact failures and cancellation remain observable", async () => {
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return { ok: true };
+      },
+    },
+  });
+  await assert.rejects(
+    summarizeWithPiNativeCompact(ctx, summaryOptions(), async () => {
+      throw new Error("Pi native compact failed");
+    }),
+    /Pi native compact failed/u,
+  );
+
   const controller = new AbortController();
-  const { ctx } = createMockContext({
-    model,
-    modelRegistry: {
-      async complete() {
-        controller.abort();
-        return response();
-      },
-    },
-  });
   await assert.rejects(
-    summarizeWithActiveModel(ctx, {
-      model,
-      thinkingLevel: "off",
-      selectedUnits: [unit()],
-      reserveTokens: 1_000,
-      signal: controller.signal,
+    summarizeWithPiNativeCompact(ctx, summaryOptions({ signal: controller.signal }), async () => {
+      controller.abort();
+      return compactResult("stale");
     }),
     /abort/iu,
   );

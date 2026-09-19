@@ -5,10 +5,16 @@ import type { SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent"
 import { test } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
 import type { TypeSafeSystemOneClient } from "../src/evaluator.js";
-import { JEV_COMPACT_DETAILS_KIND, JEV_COMPACT_DETAILS_VERSION, type JevCompactDetails } from "../src/history-units.js";
+import {
+  appendFileOperations,
+  fileOperationLists,
+  JEV_COMPACT_DETAILS_KIND,
+  JEV_COMPACT_DETAILS_VERSION,
+  type JevCompactDetails,
+} from "../src/history-units.js";
 import { createJevCompactExtension } from "../src/jev-compact.js";
 import type { JevCompactSettingsRuntime, JevCompactSettingsState } from "../src/settings.js";
-import type { ActiveModelSummary, summarizeWithActiveModel } from "../src/summary.js";
+import type { ActiveModelSummary, summarizeWithPiNativeCompact } from "../src/summary.js";
 
 const model = {
   provider: "provider",
@@ -110,7 +116,7 @@ function setup(
   options: {
     runtime?: JevCompactSettingsRuntime;
     client?: TypeSafeSystemOneClient;
-    summarize?: (options: Parameters<typeof summarizeWithActiveModel>[1]) => Promise<ActiveModelSummary>;
+    summarize?: (options: Parameters<typeof summarizeWithPiNativeCompact>[1]) => Promise<ActiveModelSummary>;
     context?: Record<string, unknown>;
   } = {},
 ) {
@@ -122,7 +128,12 @@ function setup(
     clientFactory: () => options.client ?? evaluator([1]),
     summarize: async (_ctx, summaryOptions) => {
       selected.push(summaryOptions.selectedUnits.map((unit) => unit.content));
-      return options.summarize ? options.summarize(summaryOptions) : { text: "active model summary", usage };
+      if (options.summarize) return options.summarize(summaryOptions);
+      const { readFiles, modifiedFiles } = fileOperationLists(summaryOptions.preparation.fileOps);
+      return {
+        text: appendFileOperations("Pi-native compact summary", readFiles, modifiedFiles),
+        usage,
+      };
     },
   })(mock.pi);
   const context = createMockContext({
@@ -162,7 +173,7 @@ test.each([
   assert.equal(result.compaction.firstKeptEntryId, "kept");
   assert.equal(result.compaction.tokensBefore, 12_345);
   assert.deepEqual(result.compaction.usage, usage);
-  assert.match(result.compaction.summary, /active model summary/u);
+  assert.match(result.compaction.summary, /Pi-native compact summary/u);
   assert.match(result.compaction.summary, /<read-files>\nsrc\/read.ts/u);
   assert.match(result.compaction.summary, /<modified-files>\nsrc\/new.ts\nsrc\/changed.ts/u);
   assert.equal(result.compaction.details.evaluator.summarized, 1);
@@ -238,7 +249,7 @@ test("repeated compaction reevaluates prior retained units and uses only the pri
   const state = setup({
     client: evaluator([1, 0]),
     summarize: async (options) => {
-      previousSummary = options.previousSummary;
+      previousSummary = options.preparation.previousSummary;
       return { text: "updated" };
     },
   });

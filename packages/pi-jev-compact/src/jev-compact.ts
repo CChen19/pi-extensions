@@ -7,7 +7,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { createTypeSafeClient, evaluateHistoryUnits, type TypeSafeClientFactory } from "./evaluator.js";
 import {
-  appendFileOperations,
   assertRetainedUnitsBounded,
   combineHistoryUnits,
   composeCompactionSummary,
@@ -21,10 +20,10 @@ import {
 } from "./history-units.js";
 import { showJevCompactMenu } from "./menu.js";
 import { createJevCompactSettingsRuntime, type JevCompactSettingsRuntime } from "./settings.js";
-import { summarizeWithActiveModel } from "./summary.js";
+import { summarizeWithPiNativeCompact } from "./summary.js";
 
 const STATUS_KEY = "jev-compact";
-type Summarize = typeof summarizeWithActiveModel;
+type Summarize = typeof summarizeWithPiNativeCompact;
 
 export interface JevCompactExtensionOptions {
   settingsRuntime?: JevCompactSettingsRuntime;
@@ -114,28 +113,29 @@ async function compactWithJev(
       .map((decision) => decision.unit);
     assertRetainedUnitsBounded(retainedUnits);
 
-    if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `Summarizing ${selectedUnits.length} JEV-selected units…`);
+    const fileOps = {
+      read: new Set([...(prior?.readFiles ?? []), ...event.preparation.fileOps.read]),
+      written: new Set(event.preparation.fileOps.written),
+      edited: new Set([...(prior?.modifiedFiles ?? []), ...event.preparation.fileOps.edited]),
+    };
+    const { readFiles, modifiedFiles } = fileOperationLists(fileOps);
+    if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `Pi compacting ${selectedUnits.length} JEV-selected units…`);
     const generated = await options.summarize(ctx, {
       model,
       thinkingLevel,
       selectedUnits,
-      previousSummary: prior?.compressedSummary ?? event.preparation.previousSummary,
+      preparation: {
+        ...event.preparation,
+        previousSummary: prior?.compressedSummary ?? event.preparation.previousSummary,
+        fileOps,
+      },
       customInstructions: event.customInstructions,
-      reserveTokens: event.preparation.settings.reserveTokens,
       signal,
+      isCurrent,
     });
     if (!isCurrent()) return { cancel: true as const };
 
-    const { readFiles, modifiedFiles } = fileOperationLists({
-      read: new Set([...(prior?.readFiles ?? []), ...event.preparation.fileOps.read]),
-      written: new Set(event.preparation.fileOps.written),
-      edited: new Set([...(prior?.modifiedFiles ?? []), ...event.preparation.fileOps.edited]),
-    });
-    const summary = appendFileOperations(
-      composeCompactionSummary(generated.text, retainedUnits),
-      readFiles,
-      modifiedFiles,
-    );
+    const summary = composeCompactionSummary(generated.text, retainedUnits);
     if (Buffer.byteLength(summary, "utf8") > MAX_COMPACTION_SUMMARY_BYTES) {
       throw new Error("Final JEV compaction summary exceeds the 512 KiB limit");
     }
@@ -184,7 +184,7 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
   return (pi) => {
     const runtime = options.settingsRuntime ?? createJevCompactSettingsRuntime();
     const clientFactory = options.clientFactory ?? createTypeSafeClient;
-    const summarize = options.summarize ?? summarizeWithActiveModel;
+    const summarize = options.summarize ?? summarizeWithPiNativeCompact;
     let generation = 0;
     let sessionController = new AbortController();
 

@@ -2,4 +2,4 @@
 "@narumitw/pi-jev-compact": minor
 ---
 
-Add JEV-guided selective history compaction with masked TypeSafe credential setup and active-model summaries.
+Add JEV-guided context selection before Pi's native compact function, with masked TypeSafe credential setup and portable retained history.

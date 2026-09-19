@@ -2,15 +2,15 @@
 
 [![npm](https://img.shields.io/npm/v/@narumitw/pi-jev-compact)](https://www.npmjs.com/package/@narumitw/pi-jev-compact) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-Use TypeSafe AI's JEV Noul evaluator to decide which older Pi history units should be summarized, then let the model already active in Pi write the actual compaction summary.
-Pi still owns compaction timing, recent-history retention, `/compact`, and overflow recovery.
+Use TypeSafe AI's JEV Noul evaluator to choose older Pi history units, then pass only that selected context through Pi's native `compact()` function and the model already active in Pi.
+Pi still owns compaction timing, recent-history retention, `/compact`, summary generation, and overflow recovery.
 
 ## ✨ Features
 
 - Evaluates old user, assistant, thinking, tool-call, tool-result, shell, custom, and summary content as independent units.
 - Does not force a tool call and its tool result to share one decision.
 - Uses explicit `jev-latest` Noul probabilities with a fixed `0.5` summarize threshold.
-- Uses the exact Pi model and thinking level active when compaction starts to produce the summary.
+- Calls Pi's native `compact()` function with the exact model and thinking level active when compaction starts.
 - Retains rejected units as bounded labelled JSON inside a portable Pi compaction summary.
 - Reevaluates previously retained units during repeated extension compaction.
 - Falls back to Pi-native compaction when configuration, evaluation, bounds, or summarization fails.
@@ -58,16 +58,16 @@ If no valid key is configured, Pi-native compaction remains active.
 flowchart LR
     A[Pi old history] --> B[Independent history units]
     B --> C[TypeSafe JEV Noul]
-    C -->|at least 0.5| D[Active Pi model summarizes]
+    C -->|at least 0.5| D[Pi native compact function]
     C -->|below 0.5| E[Labelled retained history]
     D --> F[Portable compaction summary]
     E --> F
     F --> G[Pi keeps its normal recent suffix]
 ```
 
-JEV decides only whether each unit belongs in the compressed portion.
-It does not write the summary.
-The active Pi model receives the selected units, the previous compressed summary when present, and any custom `/compact` instructions.
+JEV decides only whether each unit belongs in the compressed portion; it does not define the summary prompt or write the summary.
+Pi's native `compact()` function receives the selected units as canonical labelled context, plus the previous compressed summary, file-operation state, split-turn grouping, and any custom `/compact` instructions.
+Compared with Pi-native compaction, the selected context is the only compaction input policy this extension replaces.
 Provider-native tool messages are not replayed across the boundary; retained tool calls and results become independently labelled data so either can survive without creating an invalid provider conversation.
 
 ## 💬 Commands
@@ -126,7 +126,7 @@ Image bytes are not sent by this extension; image units use MIME type and size p
 | One ordinary unit | 32 KiB characters |
 | Serialized tool-result text | 2,000 characters plus a truncation marker |
 | One TypeSafe batch | 24 units and 96 KiB serialized |
-| Active-model summary request | 512 KiB |
+| Pi-native summary input | 512 KiB |
 | Retained structured history | 256 KiB |
 | Final model-visible summary | 512 KiB |
 | Persisted extension details | 768 KiB |
@@ -154,7 +154,7 @@ packages/pi-jev-compact/
 │   ├── jev-compact.ts        # Lifecycle and compaction orchestration
 │   ├── evaluator.ts          # TypeSafe JEV Noul batching and decisions
 │   ├── history-units.ts      # Independent units, bounds, and persistence
-│   ├── summary.ts            # Active-model summary request
+│   ├── summary.ts            # Pi native compact adapter
 │   ├── settings.ts           # Private atomic credential settings
 │   └── menu.ts               # Manager and masked setup flow
 ├── test/                     # Settings, evaluation, lifecycle, UI, and loader tests
