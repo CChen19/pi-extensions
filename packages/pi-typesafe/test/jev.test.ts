@@ -94,7 +94,7 @@ function registeredTool(
 ) {
   const mock = createMockPi();
   jevExtension(mock.pi, { fetch: fetchImpl, env });
-  const tool = mock.tools.find((candidate) => candidate.name === "jev_decide");
+  const tool = mock.tools.find((candidate) => candidate.name === "typesafe_question");
   assert.ok(tool);
   return tool as {
     name: string;
@@ -114,10 +114,10 @@ function registeredTool(
 
 test("registers one stable Jev decision tool with all supported question types", () => {
   const tool = registeredTool(vi.fn<typeof fetch>());
-  assert.equal(tool.name, "jev_decide");
+  assert.equal(tool.name, "typesafe_question");
   assert.match(tool.description, /noul, choice, and score/);
   assert.match(tool.promptSnippet, /typed noul, choice, or score/);
-  assert.match(tool.promptGuidelines[0] ?? "", /Use jev_decide/);
+  assert.match(tool.promptGuidelines[0] ?? "", /Use typesafe_question/);
 
   const schema = JSON.stringify(tool.parameters);
   assert.match(schema, /"enum":\["noul","choice","score"\]/);

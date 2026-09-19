@@ -2,7 +2,7 @@
 name: typesafe-ai
 license: MIT
 description: >-
-  Build AI-powered software with TypeSafe and Jev, or use pi-typesafe's jev_decide tool for typed semantic judgments and probabilities.
+  Build AI-powered software with TypeSafe and Jev, or use pi-typesafe's typesafe_question tool for typed semantic judgments and probabilities.
   Use when a feature needs programmable common sense, when an LLM prompt-and-parse step could become a structured decision, or when designing, calling, evaluating, or troubleshooting TypeSafe workflows for routing, ranking, extraction, verification, scoring, and interactive experiences.
   Read the bundled references and relevant cookbook before composing production questions or integrations.
 ---
@@ -29,9 +29,9 @@ The live TypeSafe documentation remains authoritative when freshness matters.
 - If a snapshot appears stale or omits a needed detail, consult the upstream source recorded in the index or the installed SDK types.
 - State any access limitation and do not invent version-dependent fields, limits, retries, or model behavior.
 
-## Use `jev_decide`
+## Use `typesafe_question`
 
-When the `jev_decide` tool is active, prefer it for direct Jev judgments instead of constructing an HTTP request manually.
+When the `typesafe_question` tool is active, prefer it for direct Jev judgments instead of constructing an HTTP request manually.
 Read its active schema before the first call because the tool validates each primitive's request shape.
 Supply one shared `state` and a non-empty map of named `questions`.
 Do not add provider credentials, endpoints, or model fields to tool input.

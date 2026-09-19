@@ -46,7 +46,7 @@ test("package bundles a discoverable TypeSafe skill", () => {
   const skill = result.skills[0];
   assert.equal(skill?.name, "typesafe-ai");
   assert.match(skill?.description ?? "", /TypeSafe and Jev/u);
-  assert.match(skill?.description ?? "", /jev_decide/u);
+  assert.match(skill?.description ?? "", /typesafe_question/u);
   assert.match(skill?.description ?? "", /routing, ranking, extraction, verification, scoring/u);
 });
 

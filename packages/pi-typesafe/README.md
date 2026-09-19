@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@narumitw/pi-typesafe)](https://www.npmjs.com/package/@narumitw/pi-typesafe) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-Give Pi a `jev_decide` tool for narrow, structured decisions through TypeSafe's official Jev API, with OpenRouter as a fallback.
+Give Pi a `typesafe_question` tool for narrow, structured decisions through TypeSafe's official Jev API, with OpenRouter as a fallback.
 Jev returns probabilities instead of prose, while Pi or your application remains responsible for the workflow.
 
 ## ✨ Features
@@ -59,7 +59,7 @@ Pi's existing `OPENROUTER_API_KEY` provider authentication also works for that f
 Then ask Pi to use Jev for a typed decision:
 
 ```text
-Use jev_decide to decide whether this ticket is urgent, which team owns it,
+Use typesafe_question to decide whether this ticket is urgent, which team owns it,
 and how frustrated the customer is: "Help! My payouts have been failing for 3 days."
 ```
 
@@ -67,7 +67,7 @@ The tool returns validated JSON under the same question names supplied in the re
 
 ## 🛠️ Tools
 
-### `jev_decide`
+### `typesafe_question`
 
 The tool accepts one shared `state` and a non-empty `questions` map:
 
@@ -112,7 +112,7 @@ It does not switch providers after a request failure, retry failed requests auto
 
 ## 🧠 Skills
 
-The package bundles the `typesafe-ai` skill for designing, implementing, evaluating, and troubleshooting TypeSafe, Jev, and `jev_decide` workflows.
+The package bundles the `typesafe-ai` skill for designing, implementing, evaluating, and troubleshooting TypeSafe, Jev, and `typesafe_question` workflows.
 Pi discovers it with the package and loads it when a task matches; use `/skill:typesafe-ai` to load it explicitly.
 Its [reference index](./skills/typesafe-ai/references/index.md) links concise local snapshots for concepts, question design, composition, HTTP and SDK integration, migration, and applied cookbooks.
 The skill treats live TypeSafe documentation and installed SDK types as authoritative when freshness matters.

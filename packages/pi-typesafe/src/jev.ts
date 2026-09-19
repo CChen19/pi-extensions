@@ -49,12 +49,12 @@ export const jevToolParameters = Type.Object(
 
 export function createJevTool(options: JevExtensionOptions = {}) {
   return defineTool({
-    name: "jev_decide",
-    label: "Jev: Decide",
+    name: "typesafe_question",
+    label: "TypeSafe: Question",
     description: `Ask TypeSafe Jev narrow typed questions about shared state through the official TypeSafe API, with OpenRouter as a fallback. Supports noul, choice, and score questions in one request. Returns validated JSON and never performs workflow actions. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
     promptSnippet: "Make fast typed noul, choice, or score decisions with TypeSafe Jev",
     promptGuidelines: [
-      "Use jev_decide for narrow routing, classification, scoring, or verification decisions when calibrated probabilities are useful; keep workflow actions in code or other tools.",
+      "Use typesafe_question for narrow routing, classification, scoring, or verification decisions when calibrated probabilities are useful; keep workflow actions in code or other tools.",
     ],
     parameters: jevToolParameters,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
