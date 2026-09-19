@@ -16,22 +16,52 @@ export interface JevExtensionOptions {
 }
 
 const structuredValueDescription = "A string, JSON object, or JSON array.";
-const questionSchema = Type.Object(
-  {
-    type: StringEnum(["noul", "choice", "score"] as const, {
-      description: "noul returns yes probability; choice selects an option; score rates ordered levels.",
-    }),
-    instructions: Type.Any({
-      description: `The complete narrow question. ${structuredValueDescription}`,
-    }),
-    criteria: Type.Optional(
-      Type.Any({
-        description:
-          "noul: optional {true, false} descriptions; choice: 2-255 option descriptions; score: 2-10 ordered level descriptions.",
-      }),
+const structuredValueSchema = (description: string) =>
+  Type.Union([Type.String(), Type.Record(Type.String(), Type.Any()), Type.Array(Type.Any())], { description });
+const instructionsSchema = () => structuredValueSchema(`The complete narrow question. ${structuredValueDescription}`);
+const questionSchema = Type.Union(
+  [
+    Type.Object(
+      {
+        type: StringEnum(["noul"] as const, { description: "Return the probability of yes." }),
+        instructions: instructionsSchema(),
+        criteria: Type.Optional(
+          Type.Object(
+            {
+              true: Type.String({ description: "What a yes means." }),
+              false: Type.String({ description: "What a no means." }),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
     ),
-  },
-  { additionalProperties: false },
+    Type.Object(
+      {
+        type: StringEnum(["choice"] as const, { description: "Select one named option." }),
+        instructions: instructionsSchema(),
+        criteria: Type.Record(
+          Type.String({ minLength: 1 }),
+          Type.Union([structuredValueSchema("The option description."), Type.Null()]),
+          { minProperties: 2, maxProperties: 255 },
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    Type.Object(
+      {
+        type: StringEnum(["score"] as const, { description: "Rate one ordered dimension." }),
+        instructions: instructionsSchema(),
+        criteria: Type.Array(structuredValueSchema("One concrete ordered level."), {
+          minItems: 2,
+          maxItems: 10,
+        }),
+      },
+      { additionalProperties: false },
+    ),
+  ],
+  { description: "One narrow noul, choice, or score question." },
 );
 
 export const jevToolParameters = Type.Object(
@@ -51,7 +81,7 @@ export function createJevTool(options: JevExtensionOptions = {}) {
   return defineTool({
     name: "typesafe_question",
     label: "TypeSafe: Question",
-    description: `Ask TypeSafe Jev narrow typed questions about shared state through the official TypeSafe API, with OpenRouter as a fallback. Supports noul, choice, and score questions in one request. Returns validated JSON and never performs workflow actions. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
+    description: `Ask TypeSafe Jev narrow typed questions about shared state through the official TypeSafe API, with an explicitly enabled OpenRouter fallback. Supports noul, choice, and score questions in one request. Returns validated JSON and never performs workflow actions. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
     promptSnippet: "Make fast typed noul, choice, or score decisions with TypeSafe Jev",
     promptGuidelines: [
       "Use typesafe_question for narrow routing, classification, scoring, or verification decisions when calibrated probabilities are useful; keep workflow actions in code or other tools.",

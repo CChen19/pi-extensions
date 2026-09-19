@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@narumitw/pi-typesafe)](https://www.npmjs.com/package/@narumitw/pi-typesafe) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-Give Pi a `typesafe_question` tool for narrow, structured decisions through TypeSafe's official Jev API, with OpenRouter as a fallback.
+Give Pi a `typesafe_question` tool for narrow, structured decisions through TypeSafe's official Jev API, with an explicit opt-in OpenRouter fallback.
 Jev returns probabilities instead of prose, while Pi or your application remains responsible for the workflow.
 
 ## ✨ Features
@@ -10,7 +10,7 @@ Jev returns probabilities instead of prose, while Pi or your application remains
 - Asks multiple typed questions about one string, object, or array state in a single request.
 - Supports `noul` yes probabilities, fixed-option `choice` distributions, and ordered `score` distributions.
 - Uses TypeSafe's official API and `jev-latest` model when `TYPESAFE_API_KEY` is set.
-- Falls back to OpenRouter's Decisions API and `~typesafe/jev-latest` only when a TypeSafe key is absent.
+- Allows an explicit opt-in fallback to OpenRouter's Decisions API and `~typesafe/jev-latest` when a TypeSafe key is absent.
 - Reuses Pi's resolved OpenRouter authentication for the fallback without storing another credential.
 - Validates request semantics and response distributions before exposing answers to the model.
 - Bundles a `typesafe-ai` skill with TypeSafe concepts, question design, API and SDK references, composition patterns, and practical cookbooks.
@@ -37,7 +37,7 @@ pi -e ./packages/pi-typesafe
 ```
 
 Pi extensions run with the Pi process's user permissions, so install only trusted packages.
-This extension sends tool-provided state and questions to TypeSafe directly, or to OpenRouter and TypeSafe when using the fallback.
+This extension sends tool-provided state and questions to TypeSafe directly, or to OpenRouter and TypeSafe only when you explicitly enable the fallback.
 
 ## 🚀 Quick start
 
@@ -48,13 +48,15 @@ export TYPESAFE_API_KEY=...
 pi
 ```
 
-Without `TYPESAFE_API_KEY`, the extension can use Pi's OpenRouter authentication as a fallback:
+Without `TYPESAFE_API_KEY`, the tool fails before network access by default.
+To explicitly enable the experimental OpenRouter fallback, set:
 
-```text
-/login openrouter
+```bash
+export PI_TYPESAFE_OPENROUTER_FALLBACK=1
+pi
 ```
 
-Pi's existing `OPENROUTER_API_KEY` provider authentication also works for that fallback.
+Then configure OpenRouter through Pi with `/login openrouter`; Pi's existing `OPENROUTER_API_KEY` provider authentication also works.
 
 Then ask Pi to use Jev for a typed decision:
 
@@ -107,8 +109,21 @@ The tool accepts one shared `state` and a non-empty `questions` map:
 - `state`, instructions, choice descriptions, and score levels may use structured JSON when a string is insufficient.
 
 With `TYPESAFE_API_KEY`, the extension calls `https://api.typesafe.ai/v1/systemone` with `jev-latest`.
-When that key is absent, it falls back to `https://openrouter.ai/api/alpha/decisions` with `~typesafe/jev-latest`.
+When that key is absent and `PI_TYPESAFE_OPENROUTER_FALLBACK=1`, it uses `https://openrouter.ai/api/alpha/decisions` with `~typesafe/jev-latest`.
 It does not switch providers after a request failure, retry failed requests automatically, or act on returned decisions.
+
+## ⚙️ Settings
+
+The extension reads environment variables when each tool call begins:
+
+| Variable | Default | Behavior |
+| --- | --- | --- |
+| `TYPESAFE_API_KEY` | Unset | Uses the official TypeSafe API when set to a non-empty key. |
+| `PI_TYPESAFE_OPENROUTER_FALLBACK` | `0` | Set to `1` to allow the experimental OpenRouter fallback; unset or `0` keeps it disabled. Other values are rejected. |
+
+`TYPESAFE_API_KEY` takes precedence whenever it is present, regardless of the fallback flag.
+Without a TypeSafe key or an enabled fallback, the tool fails before resolving OpenRouter authentication or making a request.
+Restart Pi after changing its environment.
 
 ## 🧠 Skills
 
@@ -120,7 +135,7 @@ The skill treats live TypeSafe documentation and installed SDK types as authorit
 ## 🔒 Security and privacy
 
 The preferred path reads `TYPESAFE_API_KEY` from the environment and sends its Bearer authorization plus JSON content only to the official TypeSafe endpoint.
-When that key is absent, the extension resolves the `openrouter` credential through Pi's provider authentication and sends the request to the official OpenRouter endpoint.
+When that key is absent, the extension accesses Pi's `openrouter` credential and sends the request to OpenRouter only if `PI_TYPESAFE_OPENROUTER_FALLBACK=1` explicitly enables the experimental fallback.
 It refuses OpenRouter credentials associated with a custom or proxy base URL rather than forwarding them to `openrouter.ai`.
 Credential values are not included in tool results, logs, or API error messages.
 
@@ -130,7 +145,7 @@ Requests may incur charges according to the selected provider's account and mode
 
 ## 🚧 Limitations
 
-- OpenRouter labels its fallback Decisions endpoint `alpha`, so that route's request or response behavior can change.
+- OpenRouter labels its opt-in fallback Decisions endpoint `alpha`, so that route's request or response behavior can change.
 - `jev-latest` and `~typesafe/jev-latest` are moving aliases; decision behavior can change when TypeSafe publishes a new Jev version.
 - The extension validates response shape and probability ranges, not whether a decision is factually correct.
 - Large result sets are truncated in model-visible output; ask fewer questions or use fewer choice options when this occurs.

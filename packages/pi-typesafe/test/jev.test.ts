@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import type { Usage } from "@earendil-works/pi-ai";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
+import { Check } from "typebox/value";
 import { test, vi } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
 import {
   type JevProvider,
   OPENROUTER_ENDPOINT,
+  OPENROUTER_FALLBACK_ENV,
   OPENROUTER_MODEL,
   TYPESAFE_ENDPOINT,
   TYPESAFE_MODEL,
@@ -14,11 +16,14 @@ import jevExtension, {
   formatJevResult,
   type JevDecisionInput,
   type JevDecisionResponse,
+  type jevToolParameters,
   normalizeJevInput,
   normalizeJevResponse,
   requestJevDecision,
   resolveJevProvider,
 } from "../src/jev.js";
+
+const openRouterFallbackEnv = { [OPENROUTER_FALLBACK_ENV]: "1" };
 
 const decisionInput: JevDecisionInput = {
   state: "Help! My payouts have been failing for 3 days.",
@@ -101,7 +106,7 @@ function registeredTool(
     description: string;
     promptSnippet: string;
     promptGuidelines: string[];
-    parameters: unknown;
+    parameters: typeof jevToolParameters;
     execute(
       toolCallId: string,
       params: unknown,
@@ -119,9 +124,23 @@ test("registers one stable Jev decision tool with all supported question types",
   assert.match(tool.promptSnippet, /typed noul, choice, or score/);
   assert.match(tool.promptGuidelines[0] ?? "", /Use typesafe_question/);
 
-  const schema = JSON.stringify(tool.parameters);
-  assert.match(schema, /"enum":\["noul","choice","score"\]/);
-  assert.match(schema, /"minProperties":1/);
+  assert.equal(Check(tool.parameters, decisionInput), true);
+  for (const invalidQuestion of [
+    { type: "noul", instructions: "Q", criteria: { true: "yes" } },
+    { type: "choice", instructions: "Q" },
+    { type: "choice", instructions: "Q", criteria: { only: null } },
+    { type: "score", instructions: "Q" },
+    { type: "score", instructions: "Q", criteria: ["only"] },
+  ]) {
+    assert.equal(Check(tool.parameters, { state: "x", questions: { q: invalidQuestion } }), false);
+  }
+  assert.equal(
+    Check(tool.parameters, {
+      state: "x",
+      questions: { q: { type: "noul", instructions: "Q" } },
+    }),
+    true,
+  );
 
   const second = registeredTool(vi.fn<typeof fetch>());
   assert.deepEqual(
@@ -198,7 +217,7 @@ test("tool falls back to Pi-resolved OpenRouter auth only without a TypeSafe key
     });
     return new Response(JSON.stringify(decisionResponse), { status: 200 });
   });
-  const tool = registeredTool(fetchImpl, {});
+  const tool = registeredTool(fetchImpl, openRouterFallbackEnv);
 
   await tool.execute("call-1", decisionInput, new AbortController().signal, undefined, officialContext());
 
@@ -228,7 +247,7 @@ test("resolved OpenRouter Authorization header takes precedence over its API key
     apiKey: "unused-key",
     headers: { authorization: "Bearer runtime-token" },
   });
-  assert.deepEqual(await resolveJevProvider(ctx, {}), {
+  assert.deepEqual(await resolveJevProvider(ctx, openRouterFallbackEnv), {
     name: "OpenRouter",
     endpoint: OPENROUTER_ENDPOINT,
     model: OPENROUTER_MODEL,
@@ -237,23 +256,38 @@ test("resolved OpenRouter Authorization header takes precedence over its API key
   });
 });
 
-test("authentication fails closed before network access", async () => {
+test("authentication and the OpenRouter fallback fail closed before network access", async () => {
+  const getProviderAuth = vi.fn(async () => undefined);
   const missing = createMockContext({
     modelRegistry: {
-      getProviderAuth: async () => undefined,
+      getProviderAuth,
       getProvider: () => ({ baseUrl: "https://openrouter.ai/api/v1" }),
     },
   }).ctx;
-  await assert.rejects(() => resolveJevProvider(missing, {}), /TYPESAFE_API_KEY/);
+  await assert.rejects(() => resolveJevProvider(missing, {}), /explicitly enable/);
+  await assert.rejects(() => resolveJevProvider(missing, { [OPENROUTER_FALLBACK_ENV]: "0" }), /explicitly enable/);
   const fetchImpl = vi.fn<typeof fetch>();
   await assert.rejects(
     () =>
       registeredTool(fetchImpl, {}).execute("call-1", decisionInput, new AbortController().signal, undefined, missing),
-    /TYPESAFE_API_KEY/,
+    /explicitly enable/,
   );
+  assert.equal(getProviderAuth.mock.calls.length, 0);
   assert.equal(fetchImpl.mock.calls.length, 0);
 
+  await assert.rejects(() => resolveJevProvider(missing, { [OPENROUTER_FALLBACK_ENV]: "yes" }), /must be 0 or 1/);
   await assert.rejects(() => resolveJevProvider(missing, { TYPESAFE_API_KEY: "invalid key" }), /whitespace/);
+  assert.deepEqual(
+    await resolveJevProvider(missing, {
+      TYPESAFE_API_KEY: "ts-secret",
+      [OPENROUTER_FALLBACK_ENV]: "invalid-but-ignored",
+    }),
+    typeSafeProvider(),
+  );
+  assert.equal(getProviderAuth.mock.calls.length, 0);
+
+  await assert.rejects(() => resolveJevProvider(missing, openRouterFallbackEnv), /authentication is not configured/);
+  assert.equal(getProviderAuth.mock.calls.length, 1);
 
   for (const modelRegistry of [
     {
@@ -266,11 +300,11 @@ test("authentication fails closed before network access", async () => {
     },
   ]) {
     const ctx = createMockContext({ modelRegistry }).ctx;
-    await assert.rejects(() => resolveJevProvider(ctx, {}), /proxy base URL/);
+    await assert.rejects(() => resolveJevProvider(ctx, openRouterFallbackEnv), /proxy base URL/);
   }
 
   const incompatible = officialContext({ headers: { Authorization: "Basic secret" } });
-  await assert.rejects(() => resolveJevProvider(incompatible, {}), /Bearer credential/);
+  await assert.rejects(() => resolveJevProvider(incompatible, openRouterFallbackEnv), /Bearer credential/);
 });
 
 test("normalizes structured questions and enforces per-type criteria", () => {

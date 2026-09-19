@@ -9,6 +9,7 @@ export const TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const TYPESAFE_MODEL = "jev-latest";
 export const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
 export const OPENROUTER_MODEL = "~typesafe/jev-latest";
+export const OPENROUTER_FALLBACK_ENV = "PI_TYPESAFE_OPENROUTER_FALLBACK";
 const OPENROUTER_ORIGIN = "https://openrouter.ai";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -50,10 +51,20 @@ export async function resolveJevProvider(
     };
   }
 
+  const openRouterFallback = env[OPENROUTER_FALLBACK_ENV]?.trim();
+  if (openRouterFallback !== undefined && openRouterFallback !== "0" && openRouterFallback !== "1") {
+    throw new Error(`${OPENROUTER_FALLBACK_ENV} must be 0 or 1.`);
+  }
+  if (openRouterFallback !== "1") {
+    throw new Error(
+      `TypeSafe authentication is not configured. Set TYPESAFE_API_KEY, or explicitly enable the experimental OpenRouter fallback with ${OPENROUTER_FALLBACK_ENV}=1.`,
+    );
+  }
+
   const result = await ctx.modelRegistry.getProviderAuth("openrouter");
   if (!result) {
     throw new Error(
-      "TypeSafe authentication is not configured. Set TYPESAFE_API_KEY, or run /login openrouter to use the OpenRouter fallback.",
+      `The experimental OpenRouter fallback is enabled, but OpenRouter authentication is not configured. Run /login openrouter or set OPENROUTER_API_KEY.`,
     );
   }
 

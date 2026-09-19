@@ -1,7 +1,7 @@
 {
   "name": "@narumitw/pi-typesafe",
   "version": "0.0.0",
-  "description": "Pi extension for typed Jev decisions through TypeSafe, with OpenRouter fallback.",
+  "description": "Pi extension for typed Jev decisions through TypeSafe, with an opt-in OpenRouter fallback.",
   "type": "module",
   "license": "MIT",
   "private": false,
