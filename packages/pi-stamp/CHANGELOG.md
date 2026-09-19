@@ -1,5 +1,11 @@
 # @narumitw/pi-stamp
 
+## 0.51.1
+
+### Patch Changes
+
+- bae6fea: Reuse bounded date-time formatters and memoized stamp rendering to prevent transcript redraws from causing severe native memory growth.
+
 ## 0.51.0
 
 ### Minor Changes
