@@ -295,6 +295,59 @@ test("entry renderer reads live settings, uses the callback theme, and stays wid
   assert.equal(renderer({ data: { version: 99 } } as never, { expanded: false }, { fg: () => "" } as never), undefined);
 });
 
+test("entry renderer reuses stable output and invalidates width, settings, and themed caches", () => {
+  let settings: StampSettings = {
+    ...DEFAULT_STAMP_SETTINGS,
+    dateContext: "never",
+    timeZone: "UTC",
+  };
+  let prefix = "old:";
+  let styleCalls = 0;
+  const renderer = createStampEntryRenderer(() => settings);
+  const component = renderer(
+    {
+      data: {
+        version: 2,
+        role: "user",
+        timestamp: Date.UTC(2026, 6, 30, 0, 1, 2),
+      },
+    } as never,
+    { expanded: false },
+    {
+      fg(_color: string, text: string) {
+        styleCalls += 1;
+        return `${prefix}${text}`;
+      },
+    } as never,
+  );
+  assert.ok(component);
+
+  const initial = component.render(40);
+  assert.equal(initial[0]?.trim(), "old:00:01:02");
+  assert.equal(component.render(40), initial);
+  assert.equal(styleCalls, 1);
+
+  const narrower = component.render(20);
+  assert.notEqual(narrower, initial);
+  assert.equal(component.render(20), narrower);
+  assert.equal(styleCalls, 2);
+
+  settings = { ...settings, showSeconds: false };
+  const updated = component.render(20);
+  assert.notEqual(updated, narrower);
+  assert.equal(updated[0]?.trim(), "old:00:01");
+  assert.equal(styleCalls, 3);
+
+  prefix = "new:";
+  component.invalidate();
+  const invalidated = component.render(20);
+  assert.notEqual(invalidated, updated);
+  assert.equal(invalidated[0]?.trim(), "new:00:01");
+  assert.equal(styleCalls, 4);
+  assert.deepEqual(component.render(0), []);
+  assert.equal(component.render(20), invalidated);
+});
+
 test("entry renderer expands exact timelines from only the observations each version retains", () => {
   const renderer = createStampEntryRenderer(() => ({
     ...DEFAULT_STAMP_SETTINGS,

@@ -232,8 +232,7 @@ export function createStampEntryRenderer(getSettings: () => Readonly<StampSettin
       if (!getSettings().toolStamps) return undefined;
       const data = entry.data;
       return dynamicRightAlignedText(
-        () => {
-          const settings = getSettings();
+        memoizeStampLines(getSettings, (settings) => {
           if (!settings.toolStamps) return [];
           const label = formatToolStampLabel(data.toolName, data.completedAt - data.startedAt, data.outcome);
           if (!label) return [];
@@ -246,15 +245,14 @@ export function createStampEntryRenderer(getSettings: () => Readonly<StampSettin
                 ])
               : []),
           ];
-        },
+        }),
         (line) => theme.fg("dim", line),
       );
     }
     if (!isMessageStampData(entry.data)) return undefined;
     const data = entry.data;
     return dynamicRightAlignedText(
-      () => {
-        const settings = getSettings();
+      memoizeStampLines(getSettings, (settings) => {
         const hasAssistantTiming = data.version === 3 || data.version === 4 || data.version === 5 || data.version === 6;
         const label = formatMessageStampLabel(
           {
@@ -298,13 +296,46 @@ export function createStampEntryRenderer(getSettings: () => Readonly<StampSettin
               )
             : [];
         return [regularLine(label), ...timelineLines, ...metadataLines.map(regularLine)];
-      },
+      }),
       (line) => theme.fg("dim", line),
     );
   };
 }
 
 export const renderStampEntry = createStampEntryRenderer(() => DEFAULT_STAMP_SETTINGS);
+
+function memoizeStampLines(
+  getSettings: () => Readonly<StampSettings>,
+  createLines: (settings: Readonly<StampSettings>) => readonly RightAlignedLine[],
+): () => readonly RightAlignedLine[] {
+  let previousSettings: StampSettings | undefined;
+  let lines: readonly RightAlignedLine[] = [];
+  return () => {
+    const settings = getSettings();
+    if (!previousSettings || !haveSameStampSettings(previousSettings, settings)) {
+      previousSettings = { ...settings };
+      lines = createLines(settings);
+    }
+    return lines;
+  };
+}
+
+function haveSameStampSettings(left: Readonly<StampSettings>, right: Readonly<StampSettings>): boolean {
+  return (
+    left.hourCycle === right.hourCycle &&
+    left.showSeconds === right.showSeconds &&
+    left.dateContext === right.dateContext &&
+    left.locale === right.locale &&
+    left.timeZone === right.timeZone &&
+    left.responseTiming === right.responseTiming &&
+    left.assistantMetadata === right.assistantMetadata &&
+    left.showExactTimeline === right.showExactTimeline &&
+    left.showThinkingLevel === right.showThinkingLevel &&
+    left.showCompactAbnormalOutcome === right.showCompactAbnormalOutcome &&
+    left.showCostSinceUser === right.showCostSinceUser &&
+    left.toolStamps === right.toolStamps
+  );
+}
 
 function regularLine(text: string): RightAlignedLine {
   return { text, exact: false };
@@ -321,20 +352,32 @@ function dynamicRightAlignedText(
   getLines: () => readonly RightAlignedLine[],
   style: (text: string) => string,
 ): Component {
+  let cachedWidth: number | undefined;
+  let cachedLines: readonly RightAlignedLine[] | undefined;
+  let cachedOutput: string[] | undefined;
   return {
     render(width) {
       if (width < 1) return [];
-      return getLines().flatMap((source) => {
-        const lines = source.exact
+      const lines = getLines();
+      if (cachedOutput && cachedWidth === width && cachedLines === lines) return cachedOutput;
+      cachedWidth = width;
+      cachedLines = lines;
+      cachedOutput = lines.flatMap((source) => {
+        const wrapped = source.exact
           ? hardWrapExactText(source.text, width).map(style)
           : wrapTextWithAnsi(style(source.text), width);
-        return lines.map((line) => {
+        return wrapped.map((line) => {
           const leftPadding = " ".repeat(Math.max(0, width - visibleWidth(line)));
           return `${leftPadding}${line}`;
         });
       });
+      return cachedOutput;
     },
-    invalidate() {},
+    invalidate() {
+      cachedWidth = undefined;
+      cachedLines = undefined;
+      cachedOutput = undefined;
+    },
   };
 }
 

@@ -66,6 +66,15 @@ interface ZonedParts {
   second: string;
 }
 
+type FormatterSlot = "localized-date" | "localized-time" | "zoned-parts";
+
+interface CachedFormatter {
+  key: string;
+  formatter: Intl.DateTimeFormat;
+}
+
+const formatterCache: Partial<Record<FormatterSlot, CachedFormatter>> = {};
+
 export function canonicalizeLocale(value: string): string | undefined {
   if (value === "invariant" || value === "system") return value;
   try {
@@ -156,20 +165,30 @@ function formatLocalized(
   timeZone: string | undefined,
 ): string {
   const date = new Date(timestamp);
-  const time = new Intl.DateTimeFormat(locale, {
-    calendar: "gregory",
-    timeZone,
-    hour: "2-digit",
-    minute: "2-digit",
-    ...(settings.showSeconds ? { second: "2-digit" as const } : {}),
-    hourCycle: settings.hourCycle === "24h" ? "h23" : "h12",
-  }).format(date);
+  const time = cachedFormatter(
+    "localized-time",
+    JSON.stringify([locale, timeZone, settings.showSeconds, settings.hourCycle]),
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        calendar: "gregory",
+        timeZone,
+        hour: "2-digit",
+        minute: "2-digit",
+        ...(settings.showSeconds ? { second: "2-digit" as const } : {}),
+        hourCycle: settings.hourCycle === "24h" ? "h23" : "h12",
+      }),
+  ).format(date);
   if (!showDate) return time;
-  const formattedDate = new Intl.DateTimeFormat(locale, {
-    calendar: "gregory",
-    timeZone,
-    dateStyle: "medium",
-  }).format(date);
+  const formattedDate = cachedFormatter(
+    "localized-date",
+    JSON.stringify([locale, timeZone]),
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        calendar: "gregory",
+        timeZone,
+        dateStyle: "medium",
+      }),
+  ).format(date);
   return `${formattedDate} · ${time}`;
 }
 
@@ -190,22 +209,24 @@ function dateKey(timestamp: number, timeZone: string | undefined): string {
 }
 
 function zonedParts(timestamp: number, timeZone: string | undefined): ZonedParts {
-  const values = new Map(
-    new Intl.DateTimeFormat("en-CA-u-ca-gregory-nu-latn", {
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    })
-      .formatToParts(new Date(timestamp))
-      .map((part) => [part.type, part.value]),
+  const formatter = cachedFormatter(
+    "zoned-parts",
+    JSON.stringify([timeZone]),
+    () =>
+      new Intl.DateTimeFormat("en-CA-u-ca-gregory-nu-latn", {
+        calendar: "gregory",
+        numberingSystem: "latn",
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }),
   );
+  const values = new Map(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
   const year = values.get("year");
   const month = values.get("month");
   const day = values.get("day");
@@ -216,6 +237,14 @@ function zonedParts(timestamp: number, timeZone: string | undefined): ZonedParts
     throw new Error("Intl did not return complete Gregorian date/time parts.");
   }
   return { year, month, day, hour, minute, second };
+}
+
+function cachedFormatter(slot: FormatterSlot, key: string, create: () => Intl.DateTimeFormat): Intl.DateTimeFormat {
+  const cached = formatterCache[slot];
+  if (cached?.key === key) return cached.formatter;
+  const formatter = create();
+  formatterCache[slot] = { key, formatter };
+  return formatter;
 }
 
 function isValidTimestamp(value: number | undefined): value is number {
