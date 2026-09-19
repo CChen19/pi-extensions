@@ -133,7 +133,7 @@ async function saveApiKeyMutation(
   if (apiKey === undefined) delete document.apiKey;
   else document.apiKey = apiKey;
   const settings = normalizeTypeSafeCompactSettings(document);
-  if (!settings) throw new Error("Refusing to save invalid JEV compaction settings");
+  if (!settings) throw new Error("Refusing to save invalid TypeSafe compaction settings");
 
   const text = `${JSON.stringify(document, null, 2)}\n`;
   if (Buffer.byteLength(text, "utf8") > MAX_SETTINGS_BYTES) {

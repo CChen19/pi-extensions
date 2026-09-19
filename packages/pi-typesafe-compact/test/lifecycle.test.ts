@@ -181,6 +181,30 @@ test.each([
   assert.equal(state.statuses.get("typesafe-compact"), undefined);
 });
 
+test("post-compaction history that exceeds the active model budget falls back to Pi native", async () => {
+  const state = setup({
+    client: evaluator([0]),
+    context: { model: { ...model, contextWindow: 256, maxTokens: 64 } },
+  });
+  const event = compactEvent("overflow");
+  event.preparation.firstKeptEntryId = "suffix";
+  event.preparation.messagesToSummarize = [user("x".repeat(2_000))];
+  event.preparation.settings = { enabled: true, reserveTokens: 64, keepRecentTokens: 64 };
+  event.branchEntries = [
+    {
+      type: "message",
+      id: "suffix",
+      parentId: null,
+      timestamp: "2026-09-19T00:00:00.000Z",
+      message: user("kept suffix", 2),
+    },
+  ];
+
+  const handler = state.mock.events.get("session_before_compact")?.[0];
+  assert.equal(await handler?.(event, state.ctx), undefined);
+  assert.match(state.notifications[0]?.message ?? "", /active model token budget/u);
+});
+
 test("split-turn tool calls and results are independently selected and retained", async () => {
   const assistant = {
     role: "assistant",

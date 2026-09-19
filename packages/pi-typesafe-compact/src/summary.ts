@@ -69,7 +69,11 @@ function selectedPreparation(
     !history && turnPrefix && preparation.previousSummary !== undefined
       ? contextMessage(`## Previous compaction summary\n\n${preparation.previousSummary}`)
       : undefined;
-  const selectedBytes = (history?.bytes ?? 0) + (turnPrefix?.bytes ?? 0) + (previousSummary?.bytes ?? 0);
+  const forwardedPreviousSummaryBytes = previousSummary
+    ? 0
+    : Buffer.byteLength(preparation.previousSummary ?? "", "utf8");
+  const selectedBytes =
+    (history?.bytes ?? 0) + (turnPrefix?.bytes ?? 0) + (previousSummary?.bytes ?? 0) + forwardedPreviousSummaryBytes;
   if (selectedBytes > MAX_SELECTED_CONTEXT_BYTES) {
     throw new Error("Selected history exceeds the 512 KiB Pi-native compact request limit");
   }

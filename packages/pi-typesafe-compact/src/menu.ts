@@ -1,6 +1,6 @@
-import { stripVTControlCharacters } from "node:util";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { MenuDefinition } from "@narumitw/pi-tui-kit";
+import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import type { TypeSafeCompactSettingsRuntime, TypeSafeCompactSettingsState } from "./settings.js";
 
 export interface TypeSafeCompactMenuOwner {
@@ -13,13 +13,7 @@ type Action = "set-key" | "remove-key";
 type RequestedAction = Action | undefined;
 
 function displayText(value: unknown): string {
-  return [...stripVTControlCharacters(String(value))]
-    .map((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? " " : character;
-    })
-    .join("")
-    .trim();
+  return sanitizeTerminalText(String(value)).trim();
 }
 
 function redactedError(error: unknown, secret?: string): string {
@@ -35,7 +29,7 @@ function createMenu(requested: {
     screens: {
       main: ({ state }) => ({
         kind: "actions",
-        title: "JEV Compact",
+        title: "TypeSafe Compact",
         lines: [
           `TypeSafe API key: ${state.settings.apiKey ? "Configured" : "Missing"}`,
           `Evaluator: ${state.settings.apiKey && state.kind === "loaded" ? "JEV jev-latest" : "Pi-native fallback"}`,
@@ -50,7 +44,7 @@ function createMenu(requested: {
       }),
       settings: ({ state }) => ({
         kind: "actions",
-        title: "JEV Compact Settings",
+        title: "TypeSafe Compact Settings",
         lines: [
           `User settings: ${displayText(state.path)}`,
           state.kind === "invalid"
@@ -80,7 +74,7 @@ function createMenu(requested: {
       }),
       status: ({ state }) => ({
         kind: "detail",
-        title: "JEV Compact Status",
+        title: "TypeSafe Compact Status",
         lines: [
           `Settings file: ${displayText(state.path)}`,
           `Settings state: ${state.kind}`,
@@ -91,7 +85,7 @@ function createMenu(requested: {
       }),
       help: () => ({
         kind: "detail",
-        title: "JEV Compact Help",
+        title: "TypeSafe Compact Help",
         lines: [
           "Pi keeps its normal /compact command and automatic thresholds.",
           "JEV independently selects old history units for summarization.",
@@ -123,7 +117,7 @@ export async function showTypeSafeCompactMenu(
   const current = runtime.get();
   if (ctx.mode === "rpc" && ctx.hasUI) {
     ctx.ui.notify(
-      `TypeSafe API key: ${current.settings.apiKey ? "configured" : "missing"}. Edit JEV compaction settings at ${displayText(current.path)}.`,
+      `TypeSafe API key: ${current.settings.apiKey ? "configured" : "missing"}. Edit TypeSafe compaction settings at ${displayText(current.path)}.`,
       "info",
     );
     return;
@@ -131,9 +125,7 @@ export async function showTypeSafeCompactMenu(
   if (ctx.mode !== "tui") throw new Error("/typesafe-compact requires TUI or RPC UI support");
   if (owner.signal.aborted || !owner.isCurrent()) return;
 
-  const { defineMenu, runConfirmation, runMenu, runSecretInput, sanitizeTerminalText } = await import(
-    "@narumitw/pi-tui-kit"
-  );
+  const { defineMenu, runConfirmation, runMenu, runSecretInput } = await import("@narumitw/pi-tui-kit");
   if (owner.signal.aborted || !owner.isCurrent()) return;
   const requested: { value: RequestedAction } = { value: undefined };
   const result = await runMenu(ctx, defineMenu(createMenu(requested)), {
@@ -142,7 +134,7 @@ export async function showTypeSafeCompactMenu(
     isCurrent: owner.isCurrent,
     onError: (currentCtx, error) => {
       currentCtx.ui.notify(
-        `JEV compaction menu failed: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}`,
+        `TypeSafe compaction menu failed: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}`,
         "error",
       );
     },

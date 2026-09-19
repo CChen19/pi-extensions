@@ -1,9 +1,11 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  SessionBeforeCompactEvent,
-  SessionEntry,
+import {
+  type ExtensionAPI,
+  type ExtensionContext,
+  estimateTokens,
+  type SessionBeforeCompactEvent,
+  type SessionEntry,
+  sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import { createTypeSafeClient, evaluateHistoryUnits, type TypeSafeClientFactory } from "./evaluator.js";
 import {
@@ -59,6 +61,32 @@ function safeError(error: unknown, apiKey?: string): string {
     })
     .join("")
     .slice(0, 2_000);
+}
+
+function assertCompactedContextFits(
+  summary: string,
+  model: Model<Api>,
+  preparation: SessionBeforeCompactEvent["preparation"],
+  branchEntries: readonly SessionEntry[],
+): void {
+  const contextWindow = model.contextWindow ?? 0;
+  if (contextWindow <= 0) return;
+  const firstKeptIndex = branchEntries.findIndex((entry) => entry.id === preparation.firstKeptEntryId);
+  if (firstKeptIndex < 0) throw new Error("Could not locate the retained Pi context suffix");
+  const summaryTokens = estimateTokens({
+    role: "compactionSummary",
+    summary,
+    tokensBefore: preparation.tokensBefore,
+    timestamp: Date.now(),
+  });
+  const suffixTokens = branchEntries
+    .slice(firstKeptIndex)
+    .flatMap(sessionEntryToContextMessages)
+    .reduce((total, message) => total + estimateTokens(message), 0);
+  const tokenBudget = contextWindow - preparation.settings.reserveTokens;
+  if (summaryTokens + suffixTokens > tokenBudget) {
+    throw new Error("Compacted context exceeds the active model token budget");
+  }
 }
 
 function sessionOwned(
@@ -142,8 +170,9 @@ async function compactWithTypeSafe(
 
     const summary = composeCompactionSummary(generated.text, retainedUnits);
     if (Buffer.byteLength(summary, "utf8") > MAX_COMPACTION_SUMMARY_BYTES) {
-      throw new Error("Final JEV compaction summary exceeds the 512 KiB limit");
+      throw new Error("Final TypeSafe compaction summary exceeds the 512 KiB limit");
     }
+    assertCompactedContextFits(summary, model, event.preparation, event.branchEntries);
     const details: TypeSafeCompactDetails = {
       kind: TYPESAFE_COMPACT_DETAILS_KIND,
       version: TYPESAFE_COMPACT_DETAILS_VERSION,
@@ -161,7 +190,7 @@ async function compactWithTypeSafe(
       modifiedFiles,
     };
     if (Buffer.byteLength(JSON.stringify(details), "utf8") > MAX_COMPACTION_DETAILS_BYTES) {
-      throw new Error("JEV compaction details exceed the 768 KiB limit");
+      throw new Error("TypeSafe compaction details exceed the 768 KiB limit");
     }
     return {
       compaction: {
@@ -175,7 +204,7 @@ async function compactWithTypeSafe(
   } catch (error) {
     if (signal.aborted || !isCurrent()) return { cancel: true as const };
     if (ctx.hasUI) {
-      ctx.ui.notify(`JEV compaction failed; using Pi-native compaction. ${safeError(error, apiKey)}`, "warning");
+      ctx.ui.notify(`TypeSafe compaction failed; using Pi-native compaction. ${safeError(error, apiKey)}`, "warning");
     }
     return undefined;
   } finally {

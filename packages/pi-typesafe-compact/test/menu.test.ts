@@ -86,14 +86,16 @@ async function openSecretInput(tui: ReturnType<typeof createTuiHarness>, running
   await tui.waitForOpen();
   tui.send("c");
   await waitForOpenCount(tui, 2, running);
-  assert.match(tui.render().join("\n"), /JEV Compact Settings/u);
+  const settingsFrame = tui.render().join("\n");
+  assert.match(settingsFrame, /TypeSafe Compact Settings/u);
+  assert.equal(settingsFrame.includes("\u202e"), false);
   tui.send("c");
   await waitForOpenCount(tui, 3, running);
   tui.setFocused(true);
 }
 
 test("TUI saves pasted secrets through masked input with remapped keys and narrow rendering", async () => {
-  const runtime = memoryRuntime({ path: "/agent/\u001b[31mpi-typesafe-compact.json" });
+  const runtime = memoryRuntime({ path: "/agent/\u001b[31m\u202epi-typesafe-compact.json" });
   const tui = createTuiHarness({ width: 30, rows: 16, keybindings: remappedKeybindings() });
   const { ctx, notifications } = createMockContext({
     mode: "tui",
@@ -119,6 +121,7 @@ test("TUI saves pasted secrets through masked input with remapped keys and narro
   assert.equal(runtime.get().settings.apiKey, secret);
   assert.doesNotMatch(JSON.stringify(notifications), new RegExp(secret, "u"));
   assert.equal(JSON.stringify(notifications).includes("\u001b"), false);
+  assert.equal(JSON.stringify(notifications).includes("\u202e"), false);
   assert.match(notifications.at(-1)?.message ?? "", /saved to/u);
 });
 
@@ -221,7 +224,7 @@ test("stale ownership after secret entry prevents persistence", async () => {
 test("RPC reports only presence and path while print and JSON reject secret collection", async () => {
   const secret = "never-display-this";
   const runtime = memoryRuntime({
-    path: "/agent/\u001b[31mpi-typesafe-compact.json",
+    path: "/agent/\u001b[31m\u202epi-typesafe-compact.json",
     settings: { apiKey: secret },
     document: { apiKey: secret },
   });
@@ -234,6 +237,7 @@ test("RPC reports only presence and path while print and JSON reject secret coll
   assert.match(rpc.notifications[0]?.message ?? "", /pi-typesafe-compact\.json/u);
   assert.equal(JSON.stringify(rpc.notifications).includes(secret), false);
   assert.equal(JSON.stringify(rpc.notifications).includes("\u001b"), false);
+  assert.equal(JSON.stringify(rpc.notifications).includes("\u202e"), false);
 
   for (const mode of ["print", "json"] as const) {
     const context = createMockContext({ mode, hasUI: false });

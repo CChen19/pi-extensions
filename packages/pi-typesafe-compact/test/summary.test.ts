@@ -240,6 +240,23 @@ test("empty selections still invoke Pi compact with empty selected context", asy
   assert.equal(observed?.preparation.isSplitTurn, false);
 });
 
+test("forwarded previous summaries count toward the compact-input byte bound", async () => {
+  let compactCalls = 0;
+  const { ctx } = createMockContext();
+  await assert.rejects(
+    summarizeWithPiNativeCompact(
+      ctx,
+      summaryOptions({ preparation: { ...preparation(), previousSummary: "x".repeat(512 * 1024) } }),
+      async () => {
+        compactCalls += 1;
+        return compactResult();
+      },
+    ),
+    /Selected history exceeds the 512 KiB/u,
+  );
+  assert.equal(compactCalls, 0);
+});
+
 test("authentication failures do not start Pi compact", async () => {
   let compactCalls = 0;
   const { ctx } = createMockContext({
