@@ -126,7 +126,7 @@ Image bytes are not sent by this extension; image units use MIME type and size p
 | One ordinary unit | 32 KiB characters |
 | Serialized tool-result text | 2,000 characters plus a truncation marker |
 | One TypeSafe batch | 24 units and 96 KiB serialized |
-| Pi-native summary input | 512 KiB |
+| Pi-native summary input | Active model input budget, capped at 512 KiB |
 | Retained structured history | 256 KiB |
 | Final model-visible summary | 512 KiB |
 | Persisted extension details | 768 KiB |

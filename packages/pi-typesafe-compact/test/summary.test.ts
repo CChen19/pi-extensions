@@ -283,6 +283,39 @@ test("forwarded previous summaries count toward the compact-input byte bound", a
   assert.equal(compactCalls, 0);
 });
 
+test("selected input must fit the active model compaction budget", async () => {
+  let authCalls = 0;
+  let compactCalls = 0;
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        authCalls += 1;
+        return { ok: true };
+      },
+    },
+  });
+  await assert.rejects(
+    summarizeWithPiNativeCompact(
+      ctx,
+      summaryOptions({
+        model: { ...model, contextWindow: 256 } as Model<Api>,
+        selectedUnits: [unit(0, "x".repeat(800))],
+        preparation: {
+          ...preparation(),
+          settings: { enabled: true, reserveTokens: 64, keepRecentTokens: 64 },
+        },
+      }),
+      async () => {
+        compactCalls += 1;
+        return compactResult();
+      },
+    ),
+    /active model compaction input budget/u,
+  );
+  assert.equal(authCalls, 0);
+  assert.equal(compactCalls, 0);
+});
+
 test("authentication failures do not start Pi compact", async () => {
   let compactCalls = 0;
   const { ctx } = createMockContext({

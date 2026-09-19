@@ -350,12 +350,15 @@ test("evaluator and summarizer failures warn without secrets and fall back to Pi
 
   const summaryFailure = setup({
     summarize: async () => {
-      throw new Error("summary failed");
+      throw new Error("summary \u202efailed\u001b[31m");
     },
   });
   const summaryHandler = summaryFailure.mock.events.get("session_before_compact")?.[0];
   assert.equal(await summaryHandler?.(compactEvent(), summaryFailure.ctx), undefined);
-  assert.match(summaryFailure.notifications[0]?.message ?? "", /summary failed/u);
+  const lifecycleWarning = summaryFailure.notifications[0]?.message ?? "";
+  assert.match(lifecycleWarning, /summary failed/u);
+  assert.equal(lifecycleWarning.includes("\u202e"), false);
+  assert.equal(lifecycleWarning.includes("\u001b"), false);
 });
 
 test("model changes after evaluation cancel publication instead of using stale context", async () => {

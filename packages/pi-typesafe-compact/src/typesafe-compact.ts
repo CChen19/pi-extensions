@@ -7,6 +7,7 @@ import {
   type SessionEntry,
   sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
+import { sanitizeTerminalText } from "@narumitw/pi-tui-kit/terminal-text";
 import { createTypeSafeClient, evaluateHistoryUnits, type TypeSafeClientFactory } from "./evaluator.js";
 import {
   assertRetainedUnitsBounded,
@@ -54,13 +55,7 @@ function latestPriorDetails(entries: readonly SessionEntry[]): TypeSafeCompactDe
 function safeError(error: unknown, apiKey?: string): string {
   let message = error instanceof Error ? error.message : String(error);
   if (apiKey) message = message.split(apiKey).join("[REDACTED]");
-  return [...message]
-    .filter((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return code === 0x0a || (code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f));
-    })
-    .join("")
-    .slice(0, 2_000);
+  return sanitizeTerminalText(message).slice(0, 2_000);
 }
 
 function assertCompactedContextFits(

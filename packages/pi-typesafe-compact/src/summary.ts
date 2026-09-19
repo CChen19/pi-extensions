@@ -1,6 +1,6 @@
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ProviderHeaders, Usage } from "@earendil-works/pi-ai";
-import { type CompactionResult, compact, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type CompactionResult, compact, type ExtensionContext, estimateTokens } from "@earendil-works/pi-coding-agent";
 import { formatUnits, type HistoryUnit } from "./history-units.js";
 
 const MAX_SELECTED_CONTEXT_BYTES = 512 * 1024;
@@ -57,9 +57,36 @@ function selectedContextMessage(units: readonly HistoryUnit[]) {
   return contextMessage(formatUnits(units));
 }
 
+function estimatedTextTokens(text: string | undefined): number {
+  return text ? Math.ceil(text.length / 4) : 0;
+}
+
+function assertSelectedInputFitsModel(
+  preparation: PiCompactionPreparation,
+  model: Model<Api>,
+  customInstructions?: string,
+): void {
+  const contextWindow = model.contextWindow ?? 0;
+  if (contextWindow <= 0) return;
+  const inputBudget = contextWindow - preparation.settings.reserveTokens;
+  const historyTokens =
+    preparation.messagesToSummarize.reduce((total, message) => total + estimateTokens(message), 0) +
+    estimatedTextTokens(preparation.previousSummary) +
+    estimatedTextTokens(customInstructions);
+  const turnPrefixTokens = preparation.turnPrefixMessages.reduce(
+    (total, message) => total + estimateTokens(message),
+    0,
+  );
+  if (Math.max(historyTokens, turnPrefixTokens) > inputBudget) {
+    throw new Error("Selected history exceeds the active model compaction input budget");
+  }
+}
+
 function selectedPreparation(
   preparation: PiCompactionPreparation,
   units: readonly HistoryUnit[],
+  model: Model<Api>,
+  customInstructions?: string,
 ): PiCompactionPreparation {
   const historyUnits = units.filter((unit) => unit.source !== "turn-prefix");
   const turnPrefixUnits = units.filter((unit) => unit.source === "turn-prefix");
@@ -77,13 +104,15 @@ function selectedPreparation(
   if (selectedBytes > MAX_SELECTED_CONTEXT_BYTES) {
     throw new Error("Selected history exceeds the 512 KiB Pi-native compact request limit");
   }
-  return {
+  const selected = {
     ...preparation,
     messagesToSummarize: history ? [history.message] : previousSummary ? [previousSummary.message] : [],
     turnPrefixMessages: turnPrefix ? [turnPrefix.message] : [],
     isSplitTurn: turnPrefix !== undefined,
     previousSummary: previousSummary ? undefined : preparation.previousSummary,
   };
+  assertSelectedInputFitsModel(selected, model, customInstructions);
+  return selected;
 }
 
 function stringHeaders(headers: ProviderHeaders | undefined): Record<string, string> | undefined {
@@ -115,7 +144,12 @@ export async function summarizeWithPiNativeCompact(
       text: options.preparation.previousSummary?.trim() || "No history units were selected for summarization.",
     };
   }
-  const preparation = selectedPreparation(options.preparation, options.selectedUnits);
+  const preparation = selectedPreparation(
+    options.preparation,
+    options.selectedUnits,
+    options.model,
+    options.customInstructions,
+  );
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(options.model);
   options.signal.throwIfAborted();
   if (!options.isCurrent()) throw staleError();

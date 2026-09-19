@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { type FileHandle, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -70,6 +70,18 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
+async function readBoundedSettingsText(handle: FileHandle): Promise<string> {
+  const buffer = Buffer.alloc(MAX_SETTINGS_BYTES + 1);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+    if (result.bytesRead === 0) break;
+    bytesRead += result.bytesRead;
+  }
+  if (bytesRead > MAX_SETTINGS_BYTES) throw new Error("settings file exceeds 64 KiB");
+  return buffer.toString("utf8", 0, bytesRead);
+}
+
 export async function loadTypeSafeCompactSettings(
   path = typeSafeCompactSettingsPath(),
   signal?: AbortSignal,
@@ -87,7 +99,7 @@ export async function loadTypeSafeCompactSettings(
       throwIfAborted(signal);
       if (!stats.isFile()) throw new Error("settings path is not a regular file");
       if (stats.size > MAX_SETTINGS_BYTES) throw new Error("settings file exceeds 64 KiB");
-      text = await handle.readFile("utf8");
+      text = await readBoundedSettingsText(handle);
     } finally {
       await handle.close();
     }
