@@ -39,11 +39,10 @@ const compactWithPi: PiNativeCompactor = (request) =>
     request.env,
   );
 
-function selectedContextMessage(units: readonly HistoryUnit[]): {
+function contextMessage(text: string): {
   message: AgentMessage;
   bytes: number;
 } {
-  const text = formatUnits(units);
   return {
     message: {
       role: "user",
@@ -54,6 +53,10 @@ function selectedContextMessage(units: readonly HistoryUnit[]): {
   };
 }
 
+function selectedContextMessage(units: readonly HistoryUnit[]) {
+  return contextMessage(formatUnits(units));
+}
+
 function selectedPreparation(
   preparation: PiCompactionPreparation,
   units: readonly HistoryUnit[],
@@ -62,15 +65,20 @@ function selectedPreparation(
   const turnPrefixUnits = units.filter((unit) => unit.source === "turn-prefix");
   const history = historyUnits.length > 0 ? selectedContextMessage(historyUnits) : undefined;
   const turnPrefix = turnPrefixUnits.length > 0 ? selectedContextMessage(turnPrefixUnits) : undefined;
-  const selectedBytes = (history?.bytes ?? 0) + (turnPrefix?.bytes ?? 0);
+  const previousSummary =
+    !history && turnPrefix && preparation.previousSummary !== undefined
+      ? contextMessage(`## Previous compaction summary\n\n${preparation.previousSummary}`)
+      : undefined;
+  const selectedBytes = (history?.bytes ?? 0) + (turnPrefix?.bytes ?? 0) + (previousSummary?.bytes ?? 0);
   if (selectedBytes > MAX_SELECTED_CONTEXT_BYTES) {
     throw new Error("Selected history exceeds the 512 KiB Pi-native compact request limit");
   }
   return {
     ...preparation,
-    messagesToSummarize: history ? [history.message] : [],
+    messagesToSummarize: history ? [history.message] : previousSummary ? [previousSummary.message] : [],
     turnPrefixMessages: turnPrefix ? [turnPrefix.message] : [],
     isSplitTurn: turnPrefix !== undefined,
+    previousSummary: previousSummary ? undefined : preparation.previousSummary,
   };
 }
 

@@ -79,6 +79,7 @@ export async function loadJevCompactSettings(
     const pathStats = await lstat(path);
     throwIfAborted(signal);
     if (pathStats.isSymbolicLink()) throw new Error("symbolic links are not accepted");
+    if (!pathStats.isFile()) throw new Error("settings path is not a regular file");
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     let text: string;
     try {

@@ -352,6 +352,50 @@ test("model changes after evaluation cancel publication instead of using stale c
   assert.equal(summarizeCalls, 0);
 });
 
+test.each(["session_start", "session_shutdown"] as const)(
+  "%s in another session does not cancel active compaction",
+  async (eventName) => {
+    let releaseEvaluation = () => {};
+    const evaluationGate = new Promise<void>((resolve) => {
+      releaseEvaluation = resolve;
+    });
+    const baseClient = evaluator([1]);
+    const state = setup({
+      client: {
+        async systemOne(request, options) {
+          await evaluationGate;
+          return baseClient.systemOne(request, options);
+        },
+      },
+    });
+    const compact = state.mock.events.get("session_before_compact")?.[0];
+    const pending = compact?.(compactEvent(), state.ctx);
+    await Promise.resolve();
+
+    const { ctx: otherContext } = createMockContext({
+      hasUI: false,
+      mode: "rpc",
+      model,
+      sessionManager: {
+        getSessionId: () => "other-session",
+        getBranch: () => [],
+        getEntries: () => [],
+      },
+    });
+    if (eventName === "session_start") {
+      const start = state.mock.events.get("session_start")?.[0];
+      await start?.({ type: "session_start", reason: "startup" }, otherContext);
+    } else {
+      const shutdown = state.mock.events.get("session_shutdown")?.[0];
+      await shutdown?.({ type: "session_shutdown", reason: "quit" }, otherContext);
+    }
+
+    releaseEvaluation();
+    const result = (await pending) as { compaction?: { summary: string } } | undefined;
+    assert.match(result?.compaction?.summary ?? "", /Pi-native compact summary/u);
+  },
+);
+
 test("session replacement aborts evaluation and clears the old status", async () => {
   let sessionId = "session";
   const client = {

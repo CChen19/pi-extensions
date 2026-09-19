@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, test } from "vitest";
 import { createJevCompactSettingsRuntime, loadJevCompactSettings, MAX_SETTINGS_BYTES } from "../src/settings.js";
 
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -79,6 +82,16 @@ test("malformed, invalid, oversized, and symlinked settings remain invalid and u
   const linked = await loadJevCompactSettings(link);
   assert.equal(linked.kind, "invalid");
   assert.match(linked.issue ?? "", /symbolic links/u);
+});
+
+test.runIf(process.platform !== "win32")("non-regular settings paths are rejected before opening", async () => {
+  const path = await fixturePath();
+  await mkdir(dirname(path), { recursive: true });
+  await execFileAsync("mkfifo", [path]);
+
+  const state = await loadJevCompactSettings(path);
+  assert.equal(state.kind, "invalid");
+  assert.match(state.issue ?? "", /not a regular file/u);
 });
 
 test("oversized serialized saves preserve the previous file and effective state", async () => {

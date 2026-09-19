@@ -31,6 +31,11 @@ export interface JevCompactExtensionOptions {
   summarize?: Summarize;
 }
 
+interface SessionOwnership {
+  generation: number;
+  controller: AbortController;
+}
+
 function modelIdentity(model: Model<Api> | undefined): string | undefined {
   return model ? `${model.provider}\0${model.api}\0${model.id}` : undefined;
 }
@@ -185,34 +190,44 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
     const runtime = options.settingsRuntime ?? createJevCompactSettingsRuntime();
     const clientFactory = options.clientFactory ?? createTypeSafeClient;
     const summarize = options.summarize ?? summarizeWithPiNativeCompact;
-    let generation = 0;
-    let sessionController = new AbortController();
+    const sessionOwnership = new WeakMap<object, SessionOwnership>();
+    const ownershipFor = (ctx: ExtensionContext): SessionOwnership => {
+      let ownership = sessionOwnership.get(ctx.sessionManager);
+      if (!ownership) {
+        ownership = { generation: 0, controller: new AbortController() };
+        sessionOwnership.set(ctx.sessionManager, ownership);
+      }
+      return ownership;
+    };
 
     pi.registerCommand("jev-compact", {
       description: "Configure JEV-guided compaction",
       handler: async (args, ctx) => {
         if (args.trim()) throw new Error("Usage: /jev-compact");
-        const ownerGeneration = generation;
-        const ownerController = sessionController;
+        const ownership = ownershipFor(ctx);
+        const ownerGeneration = ownership.generation;
+        const ownerController = ownership.controller;
         await showJevCompactMenu(runtime, ctx, {
           signal: ownerController.signal,
-          isCurrent: () => ownerGeneration === generation && !ownerController.signal.aborted,
+          isCurrent: () => ownerGeneration === ownership.generation && !ownerController.signal.aborted,
         });
       },
     });
 
     pi.on("session_start", async (_event, ctx) => {
-      sessionController.abort();
+      const ownership = ownershipFor(ctx);
+      ownership.controller.abort();
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
-      sessionController = new AbortController();
-      generation += 1;
-      const ownerGeneration = generation;
+      ownership.controller = new AbortController();
+      ownership.generation += 1;
+      const ownerController = ownership.controller;
+      const ownerGeneration = ownership.generation;
       const sessionId = ctx.sessionManager.getSessionId();
       try {
-        const state = await runtime.reload(sessionController.signal);
+        const state = await runtime.reload(ownerController.signal);
         if (
-          sessionController.signal.aborted ||
-          ownerGeneration !== generation ||
+          ownerController.signal.aborted ||
+          ownerGeneration !== ownership.generation ||
           ctx.sessionManager.getSessionId() !== sessionId
         ) {
           return;
@@ -224,7 +239,7 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
           );
         }
       } catch (error) {
-        if (sessionController.signal.aborted || ownerGeneration !== generation) return;
+        if (ownerController.signal.aborted || ownerGeneration !== ownership.generation) return;
         if (ctx.hasUI) {
           ctx.ui.notify(
             `Could not load pi-jev-compact.json; Pi-native compaction remains active. ${safeError(error)}`,
@@ -234,20 +249,23 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
       }
     });
 
-    pi.on("session_before_compact", (event, ctx) =>
-      compactWithJev(event, ctx, {
+    pi.on("session_before_compact", (event, ctx) => {
+      const ownership = ownershipFor(ctx);
+      return compactWithJev(event, ctx, {
         runtime,
         clientFactory,
         summarize,
-        generation,
-        currentGeneration: () => generation,
-        ownerSignal: sessionController.signal,
-      }),
-    );
+        generation: ownership.generation,
+        currentGeneration: () => ownership.generation,
+        ownerSignal: ownership.controller.signal,
+      });
+    });
 
     pi.on("session_shutdown", async (_event, ctx) => {
-      generation += 1;
-      sessionController.abort();
+      const ownership = ownershipFor(ctx);
+      ownership.generation += 1;
+      ownership.controller.abort();
+      sessionOwnership.delete(ctx.sessionManager);
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
       await runtime.flush();
     });

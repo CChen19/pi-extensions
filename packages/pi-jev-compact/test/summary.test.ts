@@ -177,6 +177,45 @@ test("the default native compact path consumes the resolved provider stream", as
   assert.match(result.text, /summary from composed provider/u);
 });
 
+test("prefix-only selection explicitly carries the previous summary through native compact", async () => {
+  const prompts: string[] = [];
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return { ok: true };
+      },
+      getProvider: () =>
+        provider((requestModel, context) => {
+          prompts.push(JSON.stringify(context.messages));
+          const stream = createAssistantMessageEventStream();
+          stream.end({
+            role: "assistant",
+            content: [
+              { type: "text", text: prompts.length === 1 ? "preserved prior summary" : "selected prefix summary" },
+            ],
+            api: requestModel.api,
+            provider: requestModel.provider,
+            model: requestModel.id,
+            usage,
+            stopReason: "stop",
+            timestamp: 1,
+          });
+          return stream;
+        }),
+    },
+  });
+
+  const result = await summarizeWithPiNativeCompact(
+    ctx,
+    summaryOptions({ selectedUnits: [unit(0, "selected turn prefix", "turn-prefix")] }),
+  );
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0] ?? "", /Earlier compressed work/u);
+  assert.match(prompts[1] ?? "", /selected turn prefix/u);
+  assert.match(result.text, /preserved prior summary/u);
+  assert.match(result.text, /selected prefix summary/u);
+});
+
 test("empty selections still invoke Pi compact with empty selected context", async () => {
   let observed: Parameters<PiNativeCompactor>[0] | undefined;
   const { ctx } = createMockContext({
