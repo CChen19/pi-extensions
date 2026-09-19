@@ -40,6 +40,7 @@
       "./packages/pi-tool/src/index.ts",
       "./packages/pi-tui-kit-showcase/src/index.ts",
       "./packages/pi-typesafe/src/index.ts",
+      "./packages/pi-typesafe-compact/src/index.ts",
       "./packages/pi-usage/src/index.ts",
       "./packages/pi-worktree/src/index.ts"
     ],
