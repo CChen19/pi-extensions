@@ -166,8 +166,11 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       }
       return;
     }
+    const reportProviderId = outcome.state.report.providerId;
     const showCodexResetCountdown =
-      outcome.state.report.providerId === "openai-codex" && settingsRuntime.get().settings.codexStatusResetCountdown;
+      (reportProviderId === "openai-codex" && settingsRuntime.get().settings.codexStatusResetCountdown) ||
+      reportProviderId === "zai" ||
+      reportProviderId === "zai-coding-cn";
     const now = Date.now();
     const rawValue = formatUsageStatusline(outcome.state.report, model, now, showCodexResetCountdown);
     const value = rawValue ? fastRuntime.decorateStatus(model, rawValue) : undefined;

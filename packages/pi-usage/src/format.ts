@@ -78,7 +78,7 @@ export function formatUsageStatusline(
     return formatMiniMaxStatusline(report, model);
   }
   if (report.providerId === "zai" || report.providerId === "zai-coding-cn") {
-    return formatZaiStatusline(report);
+    return formatZaiStatusline(report, now, showCodexResetCountdown);
   }
   return undefined;
 }
@@ -433,18 +433,18 @@ function wildcardKeyMatches(pattern: string, value: string): boolean {
   return pattern.endsWith("*") || (last !== undefined && value.endsWith(last));
 }
 
-function formatZaiStatusline(report: UsageReport): string | undefined {
+function formatZaiStatusline(report: UsageReport, now = Date.now(), showResetCountdown = true): string | undefined {
   const selected = [
     report.buckets.find((bucket) => bucket.id === "five-hour"),
     report.buckets.find((bucket) => bucket.id === "weekly"),
   ];
-  const parts = ["zai"];
+  const parts: string[] = [];
   for (const bucket of selected) {
     if (!bucket?.limit || bucket.remaining === undefined) continue;
-    const fallback = bucket.id === "weekly" ? "weekly" : "5h";
-    parts.push(`${percentRemaining(bucket)}% ${formatWindowLabel(bucket.windowMinutes, fallback, true)}`);
+    const countdown = showResetCountdown ? formatResetCountdown(bucket.resetsAt, now) : undefined;
+    parts.push(`${percentRemaining(bucket)}%${countdown ? ` ↻ ${countdown}` : ""}`);
   }
-  return parts.length > 1 ? parts.join(" ") : undefined;
+  return parts.length > 0 ? `GLM ${parts.join(" │ ")}` : undefined;
 }
 
 function formatCurrencyMetric(metric: UsageReport["metrics"][number]): string {
