@@ -302,7 +302,7 @@ export async function searchFileStatus(
 ): Promise<SearchFileStatus> {
   signal?.throwIfAborted();
   if (isAbsolute(file.path)) return "changed";
-  const segments = file.path.split(/[\\/]/u);
+  const segments = file.path.split("/");
   if (segments.some((segment) => IGNORED_DIRECTORIES.has(segment)) || isSensitiveFileName(basename(file.path))) {
     return "changed";
   }

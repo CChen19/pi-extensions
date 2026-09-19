@@ -194,6 +194,28 @@ test("file replacement is transactional and removal clears FTS rows", async () =
   });
 });
 
+test("temporary unavailable state applies only to the recorded file version", async () => {
+  await withTempAgent(async (agentDirectory) => {
+    const root = "/workspace/versioned-unavailable";
+    const writer = await openSearchDatabase(root, agentDirectory);
+    const reader = await openSearchDatabase(root, agentDirectory);
+    writer.replaceFile(file, [chunk("old unavailable content")]);
+    const unavailable = reader.getFile(file.path);
+    assert.ok(unavailable);
+    reader.setUnavailableFiles([unavailable]);
+    assert.deepEqual(reader.representativeChunks(file.path, 1), []);
+    assert.deepEqual(reader.listFileMaps(10), []);
+    assert.deepEqual(reader.searchFts(ftsExpression("unavailable") ?? "", 10), []);
+
+    writer.replaceFile({ ...file, mtimeNs: "4", hash: "new-file-hash" }, [chunk("new current content")]);
+    assert.match(reader.representativeChunks(file.path, 1)[0]?.body ?? "", /new current/);
+    assert.equal(reader.listFileMaps(10)[0]?.path, file.path);
+    assert.equal(reader.searchFts(ftsExpression("current") ?? "", 10)[0]?.filePath, file.path);
+    reader.close();
+    writer.close();
+  });
+});
+
 test("database paths reject symbolic links", async () => {
   if (process.platform === "win32") return;
   await withTempAgent(async (agentDirectory) => {

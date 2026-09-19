@@ -245,11 +245,14 @@ export class SearchDatabase {
     return removed;
   }
 
-  setUnavailableFiles(paths: readonly string[]): void {
+  setUnavailableFiles(files: readonly StoredFileRecord[]): void {
     this.assertOpen();
     this.database.exec("DELETE FROM temp.unavailable_files");
-    const insert = this.database.prepare("INSERT OR IGNORE INTO temp.unavailable_files(path) VALUES (?)");
-    for (const path of paths) insert.run(path);
+    const insert = this.database.prepare(
+      `INSERT OR REPLACE INTO temp.unavailable_files(path, dev, ino, size, mtime_ns, hash)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const file of files) insert.run(file.path, file.dev, file.ino, file.size, file.mtimeNs, file.hash);
   }
 
   searchFts(expression: string, limit: number, filePath?: string): FtsChunk[] {
@@ -261,7 +264,13 @@ export class SearchDatabase {
        FROM chunks_fts
        JOIN chunks c ON c.id = chunks_fts.rowid
        WHERE chunks_fts MATCH ?
-         AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = c.file_path)
+         AND NOT EXISTS (
+           SELECT 1 FROM temp.unavailable_files u
+           JOIN files f ON f.path = u.path
+           WHERE u.path = c.file_path
+             AND u.dev = f.dev AND u.ino = f.ino AND u.size = f.size
+             AND u.mtime_ns = f.mtime_ns AND u.hash = f.hash
+         )
          ${filter}
        ORDER BY bm25 ASC, c.file_path ASC, c.seq ASC
        LIMIT ?`,
@@ -281,7 +290,12 @@ export class SearchDatabase {
       return this.database
         .prepare(
           `SELECT path, title, outline FROM files
-           WHERE NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = files.path)
+           WHERE NOT EXISTS (
+             SELECT 1 FROM temp.unavailable_files u
+             WHERE u.path = files.path
+               AND u.dev = files.dev AND u.ino = files.ino AND u.size = files.size
+               AND u.mtime_ns = files.mtime_ns AND u.hash = files.hash
+           )
            ORDER BY path LIMIT ?`,
         )
         .all(limit) as unknown as FileMapRecord[];
@@ -289,7 +303,12 @@ export class SearchDatabase {
     const selected: FileMapRecord[] = [];
     const statement = this.database.prepare(
       `SELECT path, title, outline FROM files
-       WHERE path = ? AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = files.path)`,
+       WHERE path = ? AND NOT EXISTS (
+         SELECT 1 FROM temp.unavailable_files u
+         WHERE u.path = files.path
+           AND u.dev = files.dev AND u.ino = files.ino AND u.size = files.size
+           AND u.mtime_ns = files.mtime_ns AND u.hash = files.hash
+       )`,
     );
     for (const path of paths.slice(0, limit)) {
       const row = statement.get(path) as FileMapRecord | undefined;
@@ -307,7 +326,13 @@ export class SearchDatabase {
                   ROW_NUMBER() OVER (ORDER BY seq) AS position
            FROM chunks c
            WHERE file_path = ?
-             AND NOT EXISTS (SELECT 1 FROM temp.unavailable_files u WHERE u.path = c.file_path)
+             AND NOT EXISTS (
+               SELECT 1 FROM temp.unavailable_files u
+               JOIN files f ON f.path = u.path
+               WHERE u.path = c.file_path
+                 AND u.dev = f.dev AND u.ino = f.ino AND u.size = f.size
+                 AND u.mtime_ns = f.mtime_ns AND u.hash = f.hash
+             )
          )
          SELECT id, file_path, seq, start_line, end_line, heading, body, hash
          FROM ranked
@@ -407,7 +432,12 @@ function configureDatabase(database: DatabaseSync): void {
     PRAGMA synchronous = NORMAL;
     PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
     CREATE TEMP TABLE unavailable_files (
-      path TEXT PRIMARY KEY
+      path TEXT PRIMARY KEY,
+      dev TEXT NOT NULL,
+      ino TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      mtime_ns TEXT NOT NULL,
+      hash TEXT NOT NULL
     ) STRICT;
   `);
 }

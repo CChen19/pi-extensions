@@ -158,6 +158,52 @@ test("stale discovery snapshots do not delete files indexed by another handle", 
   });
 });
 
+test("normalized POSIX paths preserve backslashes that are filename characters", async () => {
+  if (process.platform === "win32") return;
+  await withFixture(async (workspace, agentDirectory) => {
+    const staleDiscovery = await discoverSearchFiles(workspace, ".");
+    const staleHandle = await openSearchDatabase(workspace, agentDirectory);
+    const freshHandle = await openSearchDatabase(workspace, agentDirectory);
+    const filePath = String.raw`notes\node_modules\guide.md`;
+    await writeFile(path.join(workspace, filePath), "backslash filename content\n");
+    await refreshIndex(freshHandle, await discoverSearchFiles(workspace, "."));
+
+    const staleRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(staleRefresh.removed, 0);
+    assert.equal(staleHandle.getFile(filePath)?.path, filePath);
+    assert.match(staleHandle.representativeChunks(filePath, 1)[0]?.body ?? "", /backslash filename/);
+    freshHandle.close();
+    staleHandle.close();
+  });
+});
+
+test("failed stale loads preserve a concurrently indexed current row", async () => {
+  await withFixture(async (workspace, agentDirectory) => {
+    const sourcePath = path.join(workspace, "concurrent.txt");
+    await writeFile(sourcePath, "version one\n");
+    const staleDiscovery = await discoverSearchFiles(workspace, ".");
+    const staleHandle = await openSearchDatabase(workspace, agentDirectory);
+    const freshHandle = await openSearchDatabase(workspace, agentDirectory);
+    await refreshIndex(freshHandle, staleDiscovery);
+
+    await writeFile(sourcePath, "version two\n");
+    await utimes(sourcePath, new Date(), new Date(Date.now() + 1_000));
+    const freshDiscovery = await discoverSearchFiles(workspace, ".");
+    assert.equal(freshDiscovery.files[0]?.ino, staleDiscovery.files[0]?.ino);
+    assert.equal(freshDiscovery.files[0]?.size, staleDiscovery.files[0]?.size);
+    assert.notEqual(freshDiscovery.files[0]?.mtimeNs, staleDiscovery.files[0]?.mtimeNs);
+    await refreshIndex(freshHandle, freshDiscovery);
+    const currentHash = freshHandle.getFile("concurrent.txt")?.hash;
+
+    const staleRefresh = await refreshIndex(staleHandle, staleDiscovery);
+    assert.equal(staleRefresh.skipped, 1);
+    assert.equal(staleHandle.getFile("concurrent.txt")?.hash, currentHash);
+    assert.match(staleHandle.representativeChunks("concurrent.txt", 1)[0]?.body ?? "", /version two/);
+    freshHandle.close();
+    staleHandle.close();
+  });
+});
+
 test("filesystem revalidation errors preserve but hide indexed rows", async () => {
   if (process.platform === "win32") return;
   await withFixture(async (workspace, agentDirectory) => {
