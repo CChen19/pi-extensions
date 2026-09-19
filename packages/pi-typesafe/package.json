@@ -1,7 +1,7 @@
 {
-  "name": "@narumitw/pi-openrouter-jev",
+  "name": "@narumitw/pi-typesafe",
   "version": "0.0.0",
-  "description": "Pi extension for typed Jev decisions through OpenRouter.",
+  "description": "Pi extension for typed Jev decisions through TypeSafe, with OpenRouter fallback.",
   "type": "module",
   "license": "MIT",
   "private": false,
@@ -49,6 +49,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/narumiruna/pi-extensions",
-    "directory": "packages/pi-openrouter-jev"
+    "directory": "packages/pi-typesafe"
   }
 }

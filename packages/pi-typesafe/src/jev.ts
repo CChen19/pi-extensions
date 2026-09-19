@@ -7,11 +7,12 @@ import {
   formatSize,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { formatJevResult, formatJevToolError, requestJevDecision, resolveOpenRouterAuthorization } from "./client.js";
+import { formatJevResult, formatJevToolError, requestJevDecision, resolveJevProvider } from "./client.js";
 import { normalizeJevInput } from "./validation.js";
 
 export interface JevExtensionOptions {
   fetch?: typeof fetch;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 const structuredValueDescription = "A string, JSON object, or JSON array.";
@@ -50,8 +51,8 @@ export function createJevTool(options: JevExtensionOptions = {}) {
   return defineTool({
     name: "jev_decide",
     label: "Jev: Decide",
-    description: `Ask TypeSafe Jev narrow typed questions about shared state through OpenRouter. Supports noul, choice, and score questions in one request. Returns validated JSON and never performs workflow actions. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
-    promptSnippet: "Make fast typed noul, choice, or score decisions with TypeSafe Jev through OpenRouter",
+    description: `Ask TypeSafe Jev narrow typed questions about shared state through the official TypeSafe API, with OpenRouter as a fallback. Supports noul, choice, and score questions in one request. Returns validated JSON and never performs workflow actions. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
+    promptSnippet: "Make fast typed noul, choice, or score decisions with TypeSafe Jev",
     promptGuidelines: [
       "Use jev_decide for narrow routing, classification, scoring, or verification decisions when calibrated probabilities are useful; keep workflow actions in code or other tools.",
     ],
@@ -59,8 +60,8 @@ export function createJevTool(options: JevExtensionOptions = {}) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
         const input = normalizeJevInput(params);
-        const auth = await resolveOpenRouterAuthorization(ctx);
-        const response = await requestJevDecision(input, auth, signal, options.fetch);
+        const provider = await resolveJevProvider(ctx, options.env);
+        const response = await requestJevDecision(input, provider, signal, options.fetch);
         return formatJevResult(response);
       } catch (error) {
         if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
@@ -74,7 +75,8 @@ export default function jevExtension(pi: ExtensionAPI, options: JevExtensionOpti
   pi.registerTool(createJevTool(options));
 }
 
-export { formatJevResult, requestJevDecision, resolveOpenRouterAuthorization } from "./client.js";
+export type { JevProvider } from "./client.js";
+export { formatJevResult, requestJevDecision, resolveJevProvider } from "./client.js";
 export type {
   ChoiceAnswer,
   ChoiceQuestion,

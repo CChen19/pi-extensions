@@ -5,14 +5,19 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "
 import type { JevDecisionInput, JevDecisionResponse, JevUsage } from "./types.js";
 import { normalizeJevResponse } from "./validation.js";
 
-export const JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
-export const JEV_MODEL = "~typesafe/jev-latest";
+export const TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+export const TYPESAFE_MODEL = "jev-latest";
+export const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
+export const OPENROUTER_MODEL = "~typesafe/jev-latest";
 const OPENROUTER_ORIGIN = "https://openrouter.ai";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ERROR_BYTES = 2048;
 
-export interface OpenRouterAuthorization {
+export interface JevProvider {
+  name: "TypeSafe" | "OpenRouter";
+  endpoint: string;
+  model: string;
   authorization: string;
   secrets: string[];
 }
@@ -26,17 +31,35 @@ export interface JevResultDetails {
   outputBytes: number;
 }
 
-export async function resolveOpenRouterAuthorization(
+export async function resolveJevProvider(
   ctx: Pick<ExtensionContext, "modelRegistry">,
-): Promise<OpenRouterAuthorization> {
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<JevProvider> {
+  const typeSafeApiKey = env.TYPESAFE_API_KEY?.trim();
+  if (typeSafeApiKey) {
+    if (/\s/u.test(typeSafeApiKey)) {
+      throw new Error("TYPESAFE_API_KEY must not contain whitespace.");
+    }
+    const authorization = `Bearer ${typeSafeApiKey}`;
+    return {
+      name: "TypeSafe",
+      endpoint: TYPESAFE_ENDPOINT,
+      model: TYPESAFE_MODEL,
+      authorization,
+      secrets: [typeSafeApiKey, authorization],
+    };
+  }
+
   const result = await ctx.modelRegistry.getProviderAuth("openrouter");
   if (!result) {
-    throw new Error("OpenRouter authentication is not configured. Run /login openrouter or set OPENROUTER_API_KEY.");
+    throw new Error(
+      "TypeSafe authentication is not configured. Set TYPESAFE_API_KEY, or run /login openrouter to use the OpenRouter fallback.",
+    );
   }
 
   assertOfficialOpenRouterUrl(result.auth.baseUrl, "resolved OpenRouter authentication");
-  const provider = ctx.modelRegistry.getProvider("openrouter");
-  assertOfficialOpenRouterUrl(provider?.baseUrl, "configured OpenRouter provider");
+  const configuredProvider = ctx.modelRegistry.getProvider("openrouter");
+  assertOfficialOpenRouterUrl(configuredProvider?.baseUrl, "configured OpenRouter provider");
 
   const configuredHeader = headerValue(result.auth.headers, "authorization")?.trim();
   const apiKey = result.auth.apiKey?.trim();
@@ -47,6 +70,9 @@ export async function resolveOpenRouterAuthorization(
 
   const token = authorization.replace(/^Bearer\s+/iu, "");
   return {
+    name: "OpenRouter",
+    endpoint: OPENROUTER_ENDPOINT,
+    model: OPENROUTER_MODEL,
     authorization,
     secrets: [...new Set([apiKey, configuredHeader, authorization, token].filter(isNonEmptyString))],
   };
@@ -54,12 +80,12 @@ export async function resolveOpenRouterAuthorization(
 
 export async function requestJevDecision(
   input: JevDecisionInput,
-  auth: OpenRouterAuthorization,
+  provider: JevProvider,
   signal: AbortSignal | undefined,
   fetchImpl: typeof fetch = fetch,
 ): Promise<JevDecisionResponse> {
   const body = JSON.stringify({
-    model: JEV_MODEL,
+    model: provider.model,
     state: input.state,
     questions: input.questions,
   });
@@ -67,31 +93,31 @@ export async function requestJevDecision(
     throw new Error(`Jev request exceeds the ${formatSize(MAX_REQUEST_BYTES)} request limit.`);
   }
 
-  const response = await fetchImpl(JEV_ENDPOINT, {
+  const response = await fetchImpl(provider.endpoint, {
     method: "POST",
     headers: {
-      Authorization: auth.authorization,
+      Authorization: provider.authorization,
       "Content-Type": "application/json",
     },
     body,
     signal,
   });
-  const responseText = await readBoundedResponseText(response, signal);
+  const responseText = await readBoundedResponseText(response, signal, provider.name);
   if (!response.ok) {
-    const detail = formatErrorDetail(responseText, auth.secrets);
-    throw new Error(`OpenRouter Jev request failed (${response.status})${detail ? `: ${detail}` : ""}`);
+    const detail = formatErrorDetail(responseText, provider.secrets);
+    throw new Error(`${provider.name} Jev request failed (${response.status})${detail ? `: ${detail}` : ""}`);
   }
 
   let payload: unknown;
   try {
     payload = JSON.parse(responseText) as unknown;
   } catch {
-    throw new Error("OpenRouter Jev returned a non-JSON response.");
+    throw new Error(`${provider.name} Jev returned a non-JSON response.`);
   }
   try {
     return normalizeJevResponse(payload, input);
   } catch (error) {
-    throw new Error(`OpenRouter Jev returned an invalid response: ${errorMessage(error)}`);
+    throw new Error(`${provider.name} Jev returned an invalid response: ${errorMessage(error)}`);
   }
 }
 
@@ -159,7 +185,11 @@ function resultDetails(
   };
 }
 
-async function readBoundedResponseText(response: Response, signal: AbortSignal | undefined): Promise<string> {
+async function readBoundedResponseText(
+  response: Response,
+  signal: AbortSignal | undefined,
+  providerName: JevProvider["name"],
+): Promise<string> {
   if (signal?.aborted) {
     await cancelResponseBody(response, signal.reason);
     signal.throwIfAborted();
@@ -168,7 +198,7 @@ async function readBoundedResponseText(response: Response, signal: AbortSignal |
   const contentLength = response.headers.get("content-length");
   if (contentLength && /^\d+$/u.test(contentLength) && Number(contentLength) > MAX_RESPONSE_BYTES) {
     await cancelResponseBody(response);
-    throw new Error(`OpenRouter Jev response exceeds the ${formatSize(MAX_RESPONSE_BYTES)} response limit.`);
+    throw new Error(`${providerName} Jev response exceeds the ${formatSize(MAX_RESPONSE_BYTES)} response limit.`);
   }
   if (!response.body) return "";
 
@@ -190,7 +220,7 @@ async function readBoundedResponseText(response: Response, signal: AbortSignal |
       bytes += value.byteLength;
       if (bytes > MAX_RESPONSE_BYTES) {
         await reader.cancel().catch(() => {});
-        throw new Error(`OpenRouter Jev response exceeds the ${formatSize(MAX_RESPONSE_BYTES)} response limit.`);
+        throw new Error(`${providerName} Jev response exceeds the ${formatSize(MAX_RESPONSE_BYTES)} response limit.`);
       }
       text += decoder.decode(value, { stream: true });
     }

@@ -1,18 +1,19 @@
-# 🧭 pi-openrouter-jev — Typed Jev Decisions for Pi
+# 🧭 pi-typesafe — Typed Jev Decisions for Pi
 
-[![npm](https://img.shields.io/npm/v/@narumitw/pi-openrouter-jev)](https://www.npmjs.com/package/@narumitw/pi-openrouter-jev) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/@narumitw/pi-typesafe)](https://www.npmjs.com/package/@narumitw/pi-typesafe) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-Give Pi a `jev_decide` tool for narrow, structured decisions through OpenRouter's TypeSafe Jev Decisions API.
+Give Pi a `jev_decide` tool for narrow, structured decisions through TypeSafe's official Jev API, with OpenRouter as a fallback.
 Jev returns probabilities instead of prose, while Pi or your application remains responsible for the workflow.
 
 ## ✨ Features
 
 - Asks multiple typed questions about one string, object, or array state in a single request.
 - Supports `noul` yes probabilities, fixed-option `choice` distributions, and ordered `score` distributions.
-- Uses the moving `~typesafe/jev-latest` model alias through OpenRouter's Decisions API.
-- Reuses Pi's resolved OpenRouter authentication without storing another credential.
+- Uses TypeSafe's official API and `jev-latest` model when `TYPESAFE_API_KEY` is set.
+- Falls back to OpenRouter's Decisions API and `~typesafe/jev-latest` only when a TypeSafe key is absent.
+- Reuses Pi's resolved OpenRouter authentication for the fallback without storing another credential.
 - Validates request semantics and response distributions before exposing answers to the model.
-- Bundles a `typesafe-ai` skill that checks current TypeSafe guidance before designing or troubleshooting Jev judgments.
+- Bundles a `typesafe-ai` skill with TypeSafe concepts, question design, API and SDK references, composition patterns, and practical cookbooks.
 - Honors tool cancellation and bounds model-visible output to Pi's 50 KB or 2,000-line limits.
 
 ## 📦 Install
@@ -20,38 +21,40 @@ Jev returns probabilities instead of prose, while Pi or your application remains
 Install the extension permanently:
 
 ```bash
-pi install npm:@narumitw/pi-openrouter-jev
+pi install npm:@narumitw/pi-typesafe
 ```
 
 Try it without installing permanently:
 
 ```bash
-pi -e npm:@narumitw/pi-openrouter-jev
+pi -e npm:@narumitw/pi-typesafe
 ```
 
 Try this package locally from the repository root:
 
 ```bash
-pi -e ./packages/pi-openrouter-jev
+pi -e ./packages/pi-typesafe
 ```
 
 Pi extensions run with the Pi process's user permissions, so install only trusted packages.
-This extension sends tool-provided state and questions to OpenRouter and TypeSafe for inference.
+This extension sends tool-provided state and questions to TypeSafe directly, or to OpenRouter and TypeSafe when using the fallback.
 
 ## 🚀 Quick start
 
-Configure OpenRouter through Pi:
+Create a TypeSafe API key, then expose it to Pi:
+
+```bash
+export TYPESAFE_API_KEY=...
+pi
+```
+
+Without `TYPESAFE_API_KEY`, the extension can use Pi's OpenRouter authentication as a fallback:
 
 ```text
 /login openrouter
 ```
 
-Pi's existing `OPENROUTER_API_KEY` provider authentication also works:
-
-```bash
-export OPENROUTER_API_KEY=sk-or-v1-...
-pi
-```
+Pi's existing `OPENROUTER_API_KEY` provider authentication also works for that fallback.
 
 Then ask Pi to use Jev for a typed decision:
 
@@ -103,45 +106,50 @@ The tool accepts one shared `state` and a non-empty `questions` map:
 - `score` requires 2–10 ordered levels and returns a probability-weighted `score`, `legend`, `probabilities`, and `confidence`.
 - `state`, instructions, choice descriptions, and score levels may use structured JSON when a string is insufficient.
 
-The extension fixes the endpoint and model to `https://openrouter.ai/api/alpha/decisions` and `~typesafe/jev-latest`.
-It does not retry failed requests automatically or act on returned decisions.
+With `TYPESAFE_API_KEY`, the extension calls `https://api.typesafe.ai/v1/systemone` with `jev-latest`.
+When that key is absent, it falls back to `https://openrouter.ai/api/alpha/decisions` with `~typesafe/jev-latest`.
+It does not switch providers after a request failure, retry failed requests automatically, or act on returned decisions.
 
 ## 🧠 Skills
 
-The package bundles the `typesafe-ai` skill for building or directly using TypeSafe, Jev, and `jev_decide` judgments.
+The package bundles the `typesafe-ai` skill for designing, implementing, evaluating, and troubleshooting TypeSafe, Jev, and `jev_decide` workflows.
 Pi discovers it with the package and loads it when a task matches; use `/skill:typesafe-ai` to load it explicitly.
-The skill requires reading the relevant live TypeSafe primitive documentation before composing a request and distinguishes schema validation from model or provider failures.
+Its [reference index](./skills/typesafe-ai/references/index.md) links concise local snapshots for concepts, question design, composition, HTTP and SDK integration, migration, and applied cookbooks.
+The skill treats live TypeSafe documentation and installed SDK types as authoritative when freshness matters.
 
 ## 🔒 Security and privacy
 
-The extension resolves the `openrouter` credential through Pi's provider authentication and sends only its Bearer authorization plus JSON content to the official OpenRouter endpoint.
-It refuses credentials associated with a custom or proxy OpenRouter base URL rather than forwarding them to `openrouter.ai`.
+The preferred path reads `TYPESAFE_API_KEY` from the environment and sends its Bearer authorization plus JSON content only to the official TypeSafe endpoint.
+When that key is absent, the extension resolves the `openrouter` credential through Pi's provider authentication and sends the request to the official OpenRouter endpoint.
+It refuses OpenRouter credentials associated with a custom or proxy base URL rather than forwarding them to `openrouter.ai`.
 Credential values are not included in tool results, logs, or API error messages.
 
-Every tool call sends its complete `state`, instructions, and criteria to OpenRouter and the selected TypeSafe provider.
-Do not include secrets or regulated data unless that transfer is appropriate for your OpenRouter and TypeSafe account policies.
-Requests use paid OpenRouter inference according to the active account and model pricing.
+Every tool call sends its complete `state`, instructions, and criteria to TypeSafe, either directly or through OpenRouter.
+Do not include secrets or regulated data unless that transfer is appropriate for the applicable TypeSafe and OpenRouter account policies.
+Requests may incur charges according to the selected provider's account and model pricing.
 
 ## 🚧 Limitations
 
-- OpenRouter labels the Decisions endpoint `alpha`, so upstream request or response behavior can change.
-- `~typesafe/jev-latest` is a moving alias; decision behavior can change when TypeSafe publishes a new Jev version.
+- OpenRouter labels its fallback Decisions endpoint `alpha`, so that route's request or response behavior can change.
+- `jev-latest` and `~typesafe/jev-latest` are moving aliases; decision behavior can change when TypeSafe publishes a new Jev version.
 - The extension validates response shape and probability ranges, not whether a decision is factually correct.
 - Large result sets are truncated in model-visible output; ask fewer questions or use fewer choice options when this occurs.
-- Pi must have official OpenRouter provider authentication even when the active chat model uses another provider.
+- The OpenRouter fallback requires official OpenRouter provider authentication even when the active chat model uses another provider.
 
 ## 🗂️ Package layout
 
 ```text
-packages/pi-openrouter-jev/
+packages/pi-typesafe/
 ├── src/
 │   ├── index.ts        # Thin Pi entrypoint
 │   ├── jev.ts          # Tool registration and public exports
-│   ├── client.ts       # OpenRouter authentication, request, and bounded output
+│   ├── client.ts       # TypeSafe-first provider selection, requests, and bounded output
 │   ├── validation.ts   # Request and response semantic validation
 │   └── types.ts        # Typed Jev questions and answers
 ├── skills/
-│   └── typesafe-ai/    # TypeSafe and Jev design and troubleshooting guidance
+│   └── typesafe-ai/
+│       ├── SKILL.md    # TypeSafe and Jev workflow guidance
+│       └── references/ # Concepts, APIs, SDKs, patterns, and cookbooks
 ├── test/               # Tool, authentication, validation, and output coverage
 ├── package.json
 ├── README.md

@@ -3,7 +3,13 @@ import type { Usage } from "@earendil-works/pi-ai";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { test, vi } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
-import { JEV_ENDPOINT, JEV_MODEL } from "../src/client.js";
+import {
+  type JevProvider,
+  OPENROUTER_ENDPOINT,
+  OPENROUTER_MODEL,
+  TYPESAFE_ENDPOINT,
+  TYPESAFE_MODEL,
+} from "../src/client.js";
 import jevExtension, {
   formatJevResult,
   type JevDecisionInput,
@@ -11,7 +17,7 @@ import jevExtension, {
   normalizeJevInput,
   normalizeJevResponse,
   requestJevDecision,
-  resolveOpenRouterAuthorization,
+  resolveJevProvider,
 } from "../src/jev.js";
 
 const decisionInput: JevDecisionInput = {
@@ -72,9 +78,22 @@ function officialContext(auth: Record<string, unknown> = { apiKey: "sk-or-secret
   }).ctx;
 }
 
-function registeredTool(fetchImpl: typeof fetch) {
+function typeSafeProvider(apiKey = "ts-secret"): JevProvider {
+  return {
+    name: "TypeSafe",
+    endpoint: TYPESAFE_ENDPOINT,
+    model: TYPESAFE_MODEL,
+    authorization: `Bearer ${apiKey}`,
+    secrets: [apiKey, `Bearer ${apiKey}`],
+  };
+}
+
+function registeredTool(
+  fetchImpl: typeof fetch,
+  env: Readonly<Record<string, string | undefined>> = { TYPESAFE_API_KEY: "ts-secret" },
+) {
   const mock = createMockPi();
-  jevExtension(mock.pi, { fetch: fetchImpl });
+  jevExtension(mock.pi, { fetch: fetchImpl, env });
   const tool = mock.tools.find((candidate) => candidate.name === "jev_decide");
   assert.ok(tool);
   return tool as {
@@ -123,18 +142,25 @@ test("registers one stable Jev decision tool with all supported question types",
   );
 });
 
-test("tool sends a fixed-model request with Pi-resolved OpenRouter auth and returns validated JSON", async () => {
+test("tool prefers the official TypeSafe API and returns validated JSON", async () => {
   const controller = new AbortController();
+  const getProviderAuth = vi.fn(async () => ({ auth: { apiKey: "sk-or-secret" } }));
+  const ctx = createMockContext({
+    modelRegistry: {
+      getProviderAuth,
+      getProvider: () => ({ baseUrl: "https://openrouter.ai/api/v1" }),
+    },
+  }).ctx;
   const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-    assert.equal(input, JEV_ENDPOINT);
+    assert.equal(input, TYPESAFE_ENDPOINT);
     assert.equal(init?.method, "POST");
     assert.equal(init?.signal, controller.signal);
     assert.deepEqual(init?.headers, {
-      Authorization: "Bearer sk-or-secret",
+      Authorization: "Bearer ts-secret",
       "Content-Type": "application/json",
     });
     assert.deepEqual(JSON.parse(String(init?.body)), {
-      model: JEV_MODEL,
+      model: TYPESAFE_MODEL,
       state: decisionInput.state,
       questions: decisionInput.questions,
     });
@@ -142,8 +168,9 @@ test("tool sends a fixed-model request with Pi-resolved OpenRouter auth and retu
   });
   const tool = registeredTool(fetchImpl);
 
-  const result = await tool.execute("call-1", decisionInput, controller.signal, undefined, officialContext());
+  const result = await tool.execute("call-1", decisionInput, controller.signal, undefined, ctx);
 
+  assert.equal(getProviderAuth.mock.calls.length, 0);
   assert.equal(fetchImpl.mock.calls.length, 1);
   assert.deepEqual(JSON.parse(result.content[0]?.text ?? ""), decisionResponse);
   assert.equal(result.details.truncated, false);
@@ -157,12 +184,54 @@ test("tool sends a fixed-model request with Pi-resolved OpenRouter auth and retu
   });
 });
 
-test("resolved Authorization header takes precedence over the API key", async () => {
+test("tool falls back to Pi-resolved OpenRouter auth only without a TypeSafe key", async () => {
+  const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+    assert.equal(input, OPENROUTER_ENDPOINT);
+    assert.deepEqual(init?.headers, {
+      Authorization: "Bearer sk-or-secret",
+      "Content-Type": "application/json",
+    });
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      model: OPENROUTER_MODEL,
+      state: decisionInput.state,
+      questions: decisionInput.questions,
+    });
+    return new Response(JSON.stringify(decisionResponse), { status: 200 });
+  });
+  const tool = registeredTool(fetchImpl, {});
+
+  await tool.execute("call-1", decisionInput, new AbortController().signal, undefined, officialContext());
+
+  assert.equal(fetchImpl.mock.calls.length, 1);
+});
+
+test("a TypeSafe request failure does not switch providers", async () => {
+  const getProviderAuth = vi.fn(async () => ({ auth: { apiKey: "sk-or-secret" } }));
+  const ctx = createMockContext({
+    modelRegistry: {
+      getProviderAuth,
+      getProvider: () => ({ baseUrl: "https://openrouter.ai/api/v1" }),
+    },
+  }).ctx;
+  const fetchImpl = vi.fn<typeof fetch>(async () => new Response("overloaded", { status: 529 }));
+
+  await assert.rejects(
+    () => registeredTool(fetchImpl).execute("call-1", decisionInput, new AbortController().signal, undefined, ctx),
+    /TypeSafe Jev request failed \(529\)/,
+  );
+  assert.equal(getProviderAuth.mock.calls.length, 0);
+  assert.equal(fetchImpl.mock.calls.length, 1);
+});
+
+test("resolved OpenRouter Authorization header takes precedence over its API key", async () => {
   const ctx = officialContext({
     apiKey: "unused-key",
     headers: { authorization: "Bearer runtime-token" },
   });
-  assert.deepEqual(await resolveOpenRouterAuthorization(ctx), {
+  assert.deepEqual(await resolveJevProvider(ctx, {}), {
+    name: "OpenRouter",
+    endpoint: OPENROUTER_ENDPOINT,
+    model: OPENROUTER_MODEL,
     authorization: "Bearer runtime-token",
     secrets: ["unused-key", "Bearer runtime-token", "runtime-token"],
   });
@@ -175,13 +244,16 @@ test("authentication fails closed before network access", async () => {
       getProvider: () => ({ baseUrl: "https://openrouter.ai/api/v1" }),
     },
   }).ctx;
-  await assert.rejects(() => resolveOpenRouterAuthorization(missing), /not configured/);
+  await assert.rejects(() => resolveJevProvider(missing, {}), /TYPESAFE_API_KEY/);
   const fetchImpl = vi.fn<typeof fetch>();
   await assert.rejects(
-    () => registeredTool(fetchImpl).execute("call-1", decisionInput, new AbortController().signal, undefined, missing),
-    /not configured/,
+    () =>
+      registeredTool(fetchImpl, {}).execute("call-1", decisionInput, new AbortController().signal, undefined, missing),
+    /TYPESAFE_API_KEY/,
   );
   assert.equal(fetchImpl.mock.calls.length, 0);
+
+  await assert.rejects(() => resolveJevProvider(missing, { TYPESAFE_API_KEY: "invalid key" }), /whitespace/);
 
   for (const modelRegistry of [
     {
@@ -194,11 +266,11 @@ test("authentication fails closed before network access", async () => {
     },
   ]) {
     const ctx = createMockContext({ modelRegistry }).ctx;
-    await assert.rejects(() => resolveOpenRouterAuthorization(ctx), /proxy base URL/);
+    await assert.rejects(() => resolveJevProvider(ctx, {}), /proxy base URL/);
   }
 
   const incompatible = officialContext({ headers: { Authorization: "Basic secret" } });
-  await assert.rejects(() => resolveOpenRouterAuthorization(incompatible), /Bearer credential/);
+  await assert.rejects(() => resolveJevProvider(incompatible, {}), /Bearer credential/);
 });
 
 test("normalizes structured questions and enforces per-type criteria", () => {
@@ -487,13 +559,7 @@ test("HTTP failures are bounded, terminal-safe, and redact credentials", async (
   const fetchImpl = vi.fn<typeof fetch>(async () => new Response(responseText, { status: 422 }));
 
   await assert.rejects(
-    () =>
-      requestJevDecision(
-        decisionInput,
-        { authorization: `Bearer ${secret}`, secrets: [secret, `Bearer ${secret}`] },
-        undefined,
-        fetchImpl,
-      ),
+    () => requestJevDecision(decisionInput, typeSafeProvider(secret), undefined, fetchImpl),
     (error: Error) => {
       assert.match(error.message, /failed \(422\)/);
       assert.match(error.message, /\[redacted\]/);
@@ -506,16 +572,16 @@ test("HTTP failures are bounded, terminal-safe, and redact credentials", async (
 });
 
 test("non-JSON, invalid, oversized, and oversized-request responses fail observably", async () => {
-  const auth = { authorization: "Bearer secret", secrets: ["secret"] };
+  const provider = typeSafeProvider("secret");
   await assert.rejects(
-    () => requestJevDecision(decisionInput, auth, undefined, async () => new Response("not json", { status: 200 })),
+    () => requestJevDecision(decisionInput, provider, undefined, async () => new Response("not json", { status: 200 })),
     /non-JSON response/,
   );
   await assert.rejects(
     () =>
       requestJevDecision(
         decisionInput,
-        auth,
+        provider,
         undefined,
         async () => new Response(JSON.stringify({ model: "jev", answers: {} }), { status: 200 }),
       ),
@@ -525,7 +591,7 @@ test("non-JSON, invalid, oversized, and oversized-request responses fail observa
     () =>
       requestJevDecision(
         decisionInput,
-        auth,
+        provider,
         undefined,
         async () => new Response("x".repeat(1024 * 1024 + 1), { status: 200 }),
       ),
@@ -536,7 +602,7 @@ test("non-JSON, invalid, oversized, and oversized-request responses fail observa
     () =>
       requestJevDecision(
         { state: "x".repeat(1024 * 1024), questions: decisionInput.questions },
-        auth,
+        provider,
         undefined,
         fetchImpl,
       ),
@@ -546,7 +612,7 @@ test("non-JSON, invalid, oversized, and oversized-request responses fail observa
 });
 
 test("response limits reject declared and streamed overflow before buffering the complete body", async () => {
-  const auth = { authorization: "Bearer secret", secrets: ["secret"] };
+  const provider = typeSafeProvider("secret");
   let declaredBodyCancelled = false;
   const declaredBody = new ReadableStream<Uint8Array>({
     cancel() {
@@ -557,7 +623,7 @@ test("response limits reject declared and streamed overflow before buffering the
     () =>
       requestJevDecision(
         decisionInput,
-        auth,
+        provider,
         undefined,
         async () =>
           new Response(declaredBody, {
@@ -582,7 +648,8 @@ test("response limits reject declared and streamed overflow before buffering the
     },
   });
   await assert.rejects(
-    () => requestJevDecision(decisionInput, auth, undefined, async () => new Response(streamedBody, { status: 200 })),
+    () =>
+      requestJevDecision(decisionInput, provider, undefined, async () => new Response(streamedBody, { status: 200 })),
     /response exceeds the (?:1|1\.0)MB/,
   );
   assert.equal(streamedBodyCancelled, true);
@@ -597,13 +664,7 @@ test("fetch cancellation is preserved", async () => {
     throw new DOMException("cancelled", "AbortError");
   });
   await assert.rejects(
-    () =>
-      requestJevDecision(
-        decisionInput,
-        { authorization: "Bearer secret", secrets: ["secret"] },
-        controller.signal,
-        fetchImpl,
-      ),
+    () => requestJevDecision(decisionInput, typeSafeProvider("secret"), controller.signal, fetchImpl),
     (error: Error) => error.name === "AbortError",
   );
 });
@@ -623,7 +684,7 @@ test("response body reading preserves cancellation and releases the stream", asy
     () =>
       requestJevDecision(
         decisionInput,
-        { authorization: "Bearer secret", secrets: ["secret"] },
+        typeSafeProvider("secret"),
         controller.signal,
         async () => new Response(body, { status: 200 }),
       ),

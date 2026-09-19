@@ -27,7 +27,7 @@
       "./packages/pi-herdr/src/index.ts",
       "./packages/pi-langfuse/src/index.ts",
       "./packages/pi-lsp/src/index.ts",
-      "./packages/pi-openrouter-jev/src/index.ts",
+      "./packages/pi-typesafe/src/index.ts",
       "./packages/pi-plan-mode/src/index.ts",
       "./packages/pi-recall/src/index.ts",
       "./packages/pi-stamp/src/index.ts",
@@ -44,7 +44,7 @@
     ],
     "skills": [
       "./packages/pi-herdr/skills",
-      "./packages/pi-openrouter-jev/skills",
+      "./packages/pi-typesafe/skills",
       "./packages/pi-starship/skills"
     ]
   },
