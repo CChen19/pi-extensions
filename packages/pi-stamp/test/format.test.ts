@@ -94,6 +94,66 @@ test("system and explicit locales use Intl formatting with bounded semantic opti
   assert.match(localized, /2026.*12:01:02\sAM/u);
 });
 
+test("date-time formatter construction stays constant across repeated formatting", () => {
+  const descriptor = Object.getOwnPropertyDescriptor(Intl, "DateTimeFormat");
+  assert.ok(descriptor);
+  const OriginalDateTimeFormat = Intl.DateTimeFormat;
+  let constructions = 0;
+  Object.defineProperty(Intl, "DateTimeFormat", {
+    ...descriptor,
+    value: new Proxy(OriginalDateTimeFormat, {
+      construct(target, argumentsList, newTarget) {
+        constructions += 1;
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    }),
+  });
+
+  try {
+    const invariant = {
+      ...DEFAULT_STAMP_SETTINGS,
+      timeZone: "Indian/Chagos",
+    } as const;
+    for (let index = 0; index < 20; index += 1) {
+      assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, BEFORE_MIDNIGHT_UTC, invariant), "06:01:02");
+    }
+    assert.equal(constructions, 1);
+
+    const localized = {
+      ...invariant,
+      locale: "en-GB",
+      dateContext: "always",
+    } as const;
+    for (let index = 0; index < 20; index += 1) {
+      assert.ok(formatStampLabel(AFTER_MIDNIGHT_UTC, BEFORE_MIDNIGHT_UTC, localized));
+    }
+    assert.equal(constructions, 3);
+
+    const withoutSeconds = { ...localized, showSeconds: false } as const;
+    assert.ok(formatStampLabel(AFTER_MIDNIGHT_UTC, BEFORE_MIDNIGHT_UTC, withoutSeconds));
+    assert.equal(constructions, 4);
+    assert.ok(formatStampLabel(AFTER_MIDNIGHT_UTC, BEFORE_MIDNIGHT_UTC, withoutSeconds));
+    assert.equal(constructions, 4);
+  } finally {
+    Object.defineProperty(Intl, "DateTimeFormat", descriptor);
+  }
+});
+
+test("local time formatting follows time-zone changes during the process lifetime", () => {
+  const originalTimeZone = process.env.TZ;
+  const settings = { ...DEFAULT_STAMP_SETTINGS, dateContext: "never" } as const;
+  try {
+    process.env.TZ = "UTC";
+    assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, settings), "00:01:02");
+
+    process.env.TZ = "Pacific/Honolulu";
+    assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, settings), "14:01:02");
+  } finally {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+  }
+});
+
 test("locale and time-zone values canonicalize or reject exactly", () => {
   assert.equal(canonicalizeLocale("invariant"), "invariant");
   assert.equal(canonicalizeLocale("system"), "system");

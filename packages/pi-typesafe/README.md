@@ -49,14 +49,16 @@ pi
 ```
 
 Without `TYPESAFE_API_KEY`, the tool fails before network access by default.
-To explicitly enable the experimental OpenRouter fallback, set:
+To explicitly enable the experimental OpenRouter fallback, create `~/.pi/agent/pi-typesafe.json`:
 
-```bash
-export PI_TYPESAFE_OPENROUTER_FALLBACK=1
-pi
+```json
+{
+  "openRouterFallback": true
+}
 ```
 
-Then configure OpenRouter through Pi with `/login openrouter`; Pi's existing `OPENROUTER_API_KEY` provider authentication also works.
+Use the configured Pi agent directory instead of `~/.pi/agent` when it differs, then restart Pi or run `/reload`.
+Configure OpenRouter through Pi with `/login openrouter`; Pi's existing `OPENROUTER_API_KEY` provider authentication also works.
 
 Then ask Pi to use Jev for a typed decision:
 
@@ -109,21 +111,25 @@ The tool accepts one shared `state` and a non-empty `questions` map:
 - `state`, instructions, choice descriptions, and score levels may use structured JSON when a string is insufficient.
 
 With `TYPESAFE_API_KEY`, the extension calls `https://api.typesafe.ai/v1/systemone` with `jev-latest`.
-When that key is absent and `PI_TYPESAFE_OPENROUTER_FALLBACK=1`, it uses `https://openrouter.ai/api/alpha/decisions` with `~typesafe/jev-latest`.
+When that key is absent and `openRouterFallback` is `true` in `pi-typesafe.json`, it uses `https://openrouter.ai/api/alpha/decisions` with `~typesafe/jev-latest`.
 It does not switch providers after a request failure, retry failed requests automatically, or act on returned decisions.
 
 ## ⚙️ Settings
 
-The extension reads environment variables when each tool call begins:
+The extension reads the user settings file from `<agent-dir>/pi-typesafe.json`; the default path is `~/.pi/agent/pi-typesafe.json`.
+The file is optional and must contain a JSON object when present:
 
-| Variable | Default | Behavior |
-| --- | --- | --- |
-| `TYPESAFE_API_KEY` | Unset | Uses the official TypeSafe API when set to a non-empty key. |
-| `PI_TYPESAFE_OPENROUTER_FALLBACK` | `0` | Set to `1` to allow the experimental OpenRouter fallback; unset or `0` keeps it disabled. Other values are rejected. |
+```json
+{
+  "openRouterFallback": false
+}
+```
 
-`TYPESAFE_API_KEY` takes precedence whenever it is present, regardless of the fallback flag.
+`openRouterFallback` accepts a boolean and defaults to `false`.
+The extension loads it on session start and `/reload`, never creates or rewrites the file, and uses defaults if the file is malformed or invalid.
+It reports the settings problem through a warning in TUI and RPC modes or an extension lifecycle diagnostic on stderr in print and JSON modes.
+`TYPESAFE_API_KEY` takes precedence whenever it is present, regardless of the setting.
 Without a TypeSafe key or an enabled fallback, the tool fails before resolving OpenRouter authentication or making a request.
-Restart Pi after changing its environment.
 
 ## 🧠 Skills
 
@@ -135,7 +141,7 @@ The skill treats live TypeSafe documentation and installed SDK types as authorit
 ## 🔒 Security and privacy
 
 The preferred path reads `TYPESAFE_API_KEY` from the environment and sends its Bearer authorization plus JSON content only to the official TypeSafe endpoint.
-When that key is absent, the extension accesses Pi's `openrouter` credential and sends the request to OpenRouter only if `PI_TYPESAFE_OPENROUTER_FALLBACK=1` explicitly enables the experimental fallback.
+When that key is absent, the extension accesses Pi's `openrouter` credential and sends the request to OpenRouter only if `openRouterFallback: true` in `pi-typesafe.json` explicitly enables the experimental fallback.
 It refuses OpenRouter credentials associated with a custom or proxy base URL rather than forwarding them to `openrouter.ai`.
 Credential values are not included in tool results, logs, or API error messages.
 

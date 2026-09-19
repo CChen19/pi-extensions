@@ -4,15 +4,20 @@ import {
   DEFAULT_MAX_LINES,
   defineTool,
   type ExtensionAPI,
+  type ExtensionContext,
   formatSize,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { formatJevResult, formatJevToolError, requestJevDecision, resolveJevProvider } from "./client.js";
+import { DEFAULT_TYPESAFE_SETTINGS, loadSettings, settingsFilePath, type TypeSafeSettings } from "./settings.js";
 import { normalizeJevInput } from "./validation.js";
 
 export interface JevExtensionOptions {
   fetch?: typeof fetch;
   env?: Readonly<Record<string, string | undefined>>;
+  settingsPath?: string;
+  settings?: Partial<TypeSafeSettings>;
+  loadSettings?: typeof loadSettings;
 }
 
 const structuredValueDescription = "A string, JSON object, or JSON array.";
@@ -77,7 +82,10 @@ export const jevToolParameters = Type.Object(
   { additionalProperties: false },
 );
 
-export function createJevTool(options: JevExtensionOptions = {}) {
+export function createJevTool(
+  options: JevExtensionOptions = {},
+  getSettings: () => TypeSafeSettings = () => applyRuntimeSettings(DEFAULT_TYPESAFE_SETTINGS, options.settings),
+) {
   return defineTool({
     name: "typesafe_question",
     label: "TypeSafe: Question",
@@ -90,7 +98,7 @@ export function createJevTool(options: JevExtensionOptions = {}) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
         const input = normalizeJevInput(params);
-        const provider = await resolveJevProvider(ctx, options.env);
+        const provider = await resolveJevProvider(ctx, options.env, getSettings().openRouterFallback);
         const response = await requestJevDecision(input, provider, signal, options.fetch);
         return formatJevResult(response);
       } catch (error) {
@@ -102,7 +110,45 @@ export function createJevTool(options: JevExtensionOptions = {}) {
 }
 
 export default function jevExtension(pi: ExtensionAPI, options: JevExtensionOptions = {}): void {
-  pi.registerTool(createJevTool(options));
+  let generation = 0;
+  let activeSession: ExtensionContext["sessionManager"] | undefined;
+  let settings = applyRuntimeSettings(DEFAULT_TYPESAFE_SETTINGS, options.settings);
+  const runtimeSettings = options.settings;
+  const path = options.settingsPath ?? settingsFilePath();
+  const readSettings = options.loadSettings ?? loadSettings;
+
+  pi.registerTool(createJevTool(options, () => settings));
+  pi.on("session_start", async (_event, ctx) => {
+    const owner = ctx.sessionManager;
+    activeSession = owner;
+    const currentGeneration = ++generation;
+    const loaded = await readSettings(path);
+    if (currentGeneration !== generation || owner !== activeSession) return;
+    settings = applyRuntimeSettings(loaded.settings, runtimeSettings);
+    if (!loaded.warning) return;
+    const warning = formatJevToolError(loaded.warning);
+    if (ctx.hasUI) {
+      ctx.ui.notify(warning.message, "warning");
+      return;
+    }
+    throw warning;
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (ctx.sessionManager !== activeSession) return;
+    activeSession = undefined;
+    generation += 1;
+  });
+}
+
+function applyRuntimeSettings(
+  settings: Readonly<TypeSafeSettings>,
+  override: Partial<TypeSafeSettings> | undefined,
+): TypeSafeSettings {
+  const openRouterFallback =
+    override && Object.hasOwn(override, "openRouterFallback") && typeof override.openRouterFallback === "boolean"
+      ? override.openRouterFallback
+      : settings.openRouterFallback;
+  return { openRouterFallback };
 }
 
 export type { JevProvider } from "./client.js";

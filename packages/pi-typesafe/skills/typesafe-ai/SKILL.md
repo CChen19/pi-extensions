@@ -35,7 +35,7 @@ When the `typesafe_question` tool is active, prefer it for direct Jev judgments 
 Read its active schema before the first call because the tool validates each primitive's request shape.
 Supply one shared `state` and a non-empty map of named `questions`.
 Do not add provider credentials, endpoints, or model fields to tool input.
-The extension prefers the official TypeSafe API when `TYPESAFE_API_KEY` is available and uses its experimental OpenRouter fallback only when `PI_TYPESAFE_OPENROUTER_FALLBACK=1` explicitly enables it.
+The extension prefers the official TypeSafe API when `TYPESAFE_API_KEY` is available and uses its experimental OpenRouter fallback only when `openRouterFallback: true` in the package-owned `pi-typesafe.json` settings file explicitly enables it.
 A provider failure is not a reason to change a valid question or silently switch workflows.
 
 ## Find the useful shape
