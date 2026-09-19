@@ -90,6 +90,8 @@ test("reloads the settings on session start and warns about invalid settings", a
   );
   const getProviderAuth = vi.fn(async () => ({ auth: { apiKey: "sk-or-secret" } }));
   const context = createMockContext({
+    hasUI: true,
+    mode: "tui",
     modelRegistry: {
       getProviderAuth,
       getProvider: () => ({ baseUrl: "https://openrouter.ai/api/v1" }),
@@ -139,7 +141,7 @@ test("reloads the settings on session start and warns about invalid settings", a
   const unsafePath = join(unsafeDirectory, "pi-typesafe.json");
   await mkdir(unsafeDirectory, { recursive: true });
   await writeFile(unsafePath, "{ invalid\n");
-  const unsafeContext = createMockContext();
+  const unsafeContext = createMockContext({ hasUI: true, mode: "tui" });
   const unsafeMock = createMockPi();
   jevExtension(unsafeMock.pi, { settingsPath: unsafePath });
   await unsafeMock.events.get("session_start")?.[0]?.({ reason: "startup" }, unsafeContext.ctx);
@@ -147,4 +149,101 @@ test("reloads the settings on session start and warns about invalid settings", a
   assert.equal(warning.includes("\u001b"), false);
   assert.equal(warning.includes("\u0007"), false);
   assert.equal(warning.includes("owned"), false);
+});
+
+test("an unrelated session shutdown does not cancel the active settings load", async () => {
+  let resolveFirst!: (value: { settings: { openRouterFallback: boolean } }) => void;
+  let resolveSecond!: (value: { settings: { openRouterFallback: boolean } }) => void;
+  const firstLoad = new Promise<{ settings: { openRouterFallback: boolean } }>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const secondLoad = new Promise<{ settings: { openRouterFallback: boolean } }>((resolve) => {
+    resolveSecond = resolve;
+  });
+  let reads = 0;
+  const fetchImpl = vi.fn<typeof fetch>(async () =>
+    Response.json({
+      model: "typesafe/jev-1.13",
+      answers: { answer: { type: "noul", noul: 0.75 } },
+    }),
+  );
+  const getProviderAuth = vi.fn(async () => ({ auth: { apiKey: "sk-or-secret" } }));
+  const previous = createMockContext();
+  const active = createMockContext({
+    modelRegistry: {
+      getProviderAuth,
+      getProvider: () => ({ baseUrl: "https://openrouter.ai/api/v1" }),
+    },
+  });
+  const mock = createMockPi();
+  jevExtension(mock.pi, {
+    env: {},
+    fetch: fetchImpl,
+    loadSettings: async () => {
+      reads += 1;
+      return reads === 1 ? firstLoad : secondLoad;
+    },
+  });
+  const start = mock.events.get("session_start")?.[0];
+  const shutdown = mock.events.get("session_shutdown")?.[0];
+  const tool = mock.tools.find((candidate) => candidate.name === "typesafe_question") as {
+    execute(
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal,
+      onUpdate: undefined,
+      ctx: typeof active.ctx,
+    ): Promise<unknown>;
+  };
+  assert.ok(start);
+  assert.ok(shutdown);
+
+  const previousStart = Promise.resolve(start({ reason: "startup" }, previous.ctx));
+  await Promise.resolve();
+  const activeStart = Promise.resolve(start({ reason: "startup" }, active.ctx));
+  await Promise.resolve();
+  await shutdown({ reason: "quit" }, previous.ctx);
+  resolveSecond({ settings: { openRouterFallback: true } });
+  await activeStart;
+  resolveFirst({ settings: { openRouterFallback: false } });
+  await previousStart;
+
+  await tool.execute(
+    "active-session",
+    {
+      state: "x",
+      questions: { answer: { type: "noul", instructions: "Is this true?" } },
+    },
+    new AbortController().signal,
+    undefined,
+    active.ctx,
+  );
+  assert.equal(getProviderAuth.mock.calls.length, 1);
+  assert.equal(fetchImpl.mock.calls.length, 1);
+});
+
+test("reports sanitized settings warnings through the lifecycle in non-UI modes", async () => {
+  const mock = createMockPi();
+  jevExtension(mock.pi, {
+    loadSettings: async () => ({
+      settings: { openRouterFallback: false },
+      warning: "unsafe\u001b]0;owned\u0007 settings warning",
+    }),
+  });
+  const context = createMockContext({ hasUI: false, mode: "json" });
+  const start = mock.events.get("session_start")?.[0];
+  assert.ok(start);
+
+  await assert.rejects(
+    () => Promise.resolve(start({ reason: "startup" }, context.ctx)),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /unsafe settings warning/u);
+      assert.equal(error.message.includes("\u001b"), false);
+      assert.equal(error.message.includes("\u0007"), false);
+      assert.equal(error.message.includes("owned"), false);
+      return true;
+    },
+  );
+  assert.deepEqual(context.notifications, []);
 });

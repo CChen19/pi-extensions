@@ -126,7 +126,8 @@ The file is optional and must contain a JSON object when present:
 ```
 
 `openRouterFallback` accepts a boolean and defaults to `false`.
-The extension loads it on session start and `/reload`, never creates or rewrites the file, and warns while using defaults if the file is malformed or invalid.
+The extension loads it on session start and `/reload`, never creates or rewrites the file, and uses defaults if the file is malformed or invalid.
+It reports the settings problem through a warning in TUI and RPC modes or an extension lifecycle diagnostic on stderr in print and JSON modes.
 `TYPESAFE_API_KEY` takes precedence whenever it is present, regardless of the setting.
 Without a TypeSafe key or an enabled fallback, the tool fails before resolving OpenRouter authentication or making a request.
 

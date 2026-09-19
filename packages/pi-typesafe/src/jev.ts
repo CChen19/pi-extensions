@@ -4,6 +4,7 @@ import {
   DEFAULT_MAX_LINES,
   defineTool,
   type ExtensionAPI,
+  type ExtensionContext,
   formatSize,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -16,6 +17,7 @@ export interface JevExtensionOptions {
   env?: Readonly<Record<string, string | undefined>>;
   settingsPath?: string;
   settings?: Partial<TypeSafeSettings>;
+  loadSettings?: typeof loadSettings;
 }
 
 const structuredValueDescription = "A string, JSON object, or JSON array.";
@@ -109,19 +111,31 @@ export function createJevTool(
 
 export default function jevExtension(pi: ExtensionAPI, options: JevExtensionOptions = {}): void {
   let generation = 0;
+  let activeSession: ExtensionContext["sessionManager"] | undefined;
   let settings = applyRuntimeSettings(DEFAULT_TYPESAFE_SETTINGS, options.settings);
   const runtimeSettings = options.settings;
   const path = options.settingsPath ?? settingsFilePath();
+  const readSettings = options.loadSettings ?? loadSettings;
 
   pi.registerTool(createJevTool(options, () => settings));
   pi.on("session_start", async (_event, ctx) => {
+    const owner = ctx.sessionManager;
+    activeSession = owner;
     const currentGeneration = ++generation;
-    const loaded = await loadSettings(path);
-    if (currentGeneration !== generation) return;
+    const loaded = await readSettings(path);
+    if (currentGeneration !== generation || owner !== activeSession) return;
     settings = applyRuntimeSettings(loaded.settings, runtimeSettings);
-    if (loaded.warning) ctx.ui.notify(formatJevToolError(loaded.warning).message, "warning");
+    if (!loaded.warning) return;
+    const warning = formatJevToolError(loaded.warning);
+    if (ctx.hasUI) {
+      ctx.ui.notify(warning.message, "warning");
+      return;
+    }
+    throw warning;
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (ctx.sessionManager !== activeSession) return;
+    activeSession = undefined;
     generation += 1;
   });
 }
