@@ -515,7 +515,7 @@ async function waitForNoDatabaseLeases(path: string, signal?: AbortSignal): Prom
 }
 
 async function acquireDatabaseLock(path: string, signal?: AbortSignal): Promise<() => Promise<void>> {
-  const lockDatabase = openGuardDatabase(`${path}.lock`);
+  const lockDatabase = openGuardDatabase(`${path}.guard`);
   try {
     await acquireExclusiveTransaction(lockDatabase, path, signal, "search index initialization");
   } catch (error) {

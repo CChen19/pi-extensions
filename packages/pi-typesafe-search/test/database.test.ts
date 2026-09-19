@@ -92,7 +92,21 @@ test("concurrent first opens serialize initialization through the persistent gua
       for (const database of databases) database.close();
     }
 
-    assert.equal((await lstat(`${databasePathForRoot(root, agentDirectory)}.lock`)).isFile(), true);
+    assert.equal((await lstat(`${databasePathForRoot(root, agentDirectory)}.guard`)).isFile(), true);
+  });
+});
+
+test("stale legacy lock files cannot block the SQLite initialization guard", async () => {
+  await withTempAgent(async (agentDirectory) => {
+    const root = path.join(agentDirectory, "legacy-lock-workspace");
+    const initial = await openSearchDatabase(root, agentDirectory);
+    initial.close();
+    const databasePath = databasePathForRoot(root, agentDirectory);
+    await writeFile(`${databasePath}.lock`, `99999999:dead-owner\n${Date.now()}\n`, { mode: 0o600 });
+
+    const reopened = await openSearchDatabase(root, agentDirectory);
+    reopened.close();
+    assert.equal((await lstat(`${databasePath}.guard`)).isFile(), true);
   });
 });
 
@@ -101,8 +115,8 @@ test("a reacquired initialization guard cannot be removed by an earlier waiter",
     const root = path.join(agentDirectory, "reacquired-lock-workspace");
     const initial = await openSearchDatabase(root, agentDirectory);
     initial.close();
-    const lockPath = `${databasePathForRoot(root, agentDirectory)}.lock`;
-    const firstOwner = new DatabaseSync(lockPath);
+    const guardPath = `${databasePathForRoot(root, agentDirectory)}.guard`;
+    const firstOwner = new DatabaseSync(guardPath);
     firstOwner.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
 
     let settled = false;
@@ -114,7 +128,7 @@ test("a reacquired initialization guard cannot be removed by an earlier waiter",
 
     firstOwner.exec("ROLLBACK");
     firstOwner.close();
-    const nextOwner = new DatabaseSync(lockPath);
+    const nextOwner = new DatabaseSync(guardPath);
     nextOwner.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
     await delay(50);
     assert.equal(settled, false);
@@ -151,8 +165,8 @@ test("database lock waits honor cancellation", async () => {
     const root = path.join(agentDirectory, "cancel-lock-workspace");
     const initial = await openSearchDatabase(root, agentDirectory);
     initial.close();
-    const lockPath = `${databasePathForRoot(root, agentDirectory)}.lock`;
-    const owner = new DatabaseSync(lockPath);
+    const guardPath = `${databasePathForRoot(root, agentDirectory)}.guard`;
+    const owner = new DatabaseSync(guardPath);
     owner.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
     const controller = new AbortController();
     const pending = openSearchDatabase(root, agentDirectory, controller.signal);
@@ -215,7 +229,7 @@ test("schema recovery waits for live database handles before replacing the index
         settled = true;
       },
     );
-    await waitForPath(`${databasePath}.lock`);
+    await waitForPath(`${databasePath}.guard`);
     await delay(50);
     assert.equal(settled, false);
     assert.match(active.representativeChunks(file.path, 1)[0]?.body ?? "", /active handle/);
