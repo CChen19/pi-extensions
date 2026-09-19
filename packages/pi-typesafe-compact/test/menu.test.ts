@@ -3,16 +3,16 @@ import { type KeyId, visibleWidth } from "@earendil-works/pi-tui";
 import { createTuiHarness } from "@narumitw/pi-tui-kit/testing";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
-import { showJevCompactMenu } from "../src/menu.js";
-import type { JevCompactSettingsRuntime, JevCompactSettingsState } from "../src/settings.js";
+import { showTypeSafeCompactMenu } from "../src/menu.js";
+import type { TypeSafeCompactSettingsRuntime, TypeSafeCompactSettingsState } from "../src/settings.js";
 
 function memoryRuntime(
-  initial: Partial<JevCompactSettingsState> = {},
+  initial: Partial<TypeSafeCompactSettingsState> = {},
   saveError?: (value: string) => Error,
-): JevCompactSettingsRuntime & { saved: string[]; removals: number } {
-  let state: JevCompactSettingsState = {
+): TypeSafeCompactSettingsRuntime & { saved: string[]; removals: number } {
+  let state: TypeSafeCompactSettingsState = {
     kind: "loaded",
-    path: "/agent/pi-jev-compact.json",
+    path: "/agent/pi-typesafe-compact.json",
     settings: {},
     document: {},
     ...initial,
@@ -93,14 +93,14 @@ async function openSecretInput(tui: ReturnType<typeof createTuiHarness>, running
 }
 
 test("TUI saves pasted secrets through masked input with remapped keys and narrow rendering", async () => {
-  const runtime = memoryRuntime({ path: "/agent/\u001b[31mpi-jev-compact.json" });
+  const runtime = memoryRuntime({ path: "/agent/\u001b[31mpi-typesafe-compact.json" });
   const tui = createTuiHarness({ width: 30, rows: 16, keybindings: remappedKeybindings() });
   const { ctx, notifications } = createMockContext({
     mode: "tui",
     hasUI: true,
     custom: tui.custom,
   });
-  const running = showJevCompactMenu(runtime, ctx, {
+  const running = showTypeSafeCompactMenu(runtime, ctx, {
     signal: new AbortController().signal,
     isCurrent: () => true,
   });
@@ -130,7 +130,7 @@ test("failed saves preserve state and redact the submitted key from errors", asy
   );
   const tui = createTuiHarness({ keybindings: remappedKeybindings() });
   const { ctx, notifications } = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
-  const running = showJevCompactMenu(runtime, ctx, {
+  const running = showTypeSafeCompactMenu(runtime, ctx, {
     signal: new AbortController().signal,
     isCurrent: () => true,
   });
@@ -151,7 +151,7 @@ test("remove requires confirmation and cancellation or disposal cannot mutate se
   const runtime = memoryRuntime({ settings: { apiKey: key }, document: { apiKey: key } });
   const tui = createTuiHarness({ keybindings: remappedKeybindings() });
   const context = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
-  const running = showJevCompactMenu(runtime, context.ctx, {
+  const running = showTypeSafeCompactMenu(runtime, context.ctx, {
     signal: new AbortController().signal,
     isCurrent: () => true,
   });
@@ -169,7 +169,7 @@ test("remove requires confirmation and cancellation or disposal cannot mutate se
 
   const disposedTui = createTuiHarness({ keybindings: remappedKeybindings() });
   const disposedContext = createMockContext({ mode: "tui", hasUI: true, custom: disposedTui.custom });
-  const disposed = showJevCompactMenu(runtime, disposedContext.ctx, {
+  const disposed = showTypeSafeCompactMenu(runtime, disposedContext.ctx, {
     signal: new AbortController().signal,
     isCurrent: () => true,
   });
@@ -184,7 +184,7 @@ test("confirmed removal clears the key", async () => {
   const runtime = memoryRuntime({ settings: { apiKey: key }, document: { apiKey: key } });
   const tui = createTuiHarness({ keybindings: remappedKeybindings() });
   const context = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
-  const running = showJevCompactMenu(runtime, context.ctx, {
+  const running = showTypeSafeCompactMenu(runtime, context.ctx, {
     signal: new AbortController().signal,
     isCurrent: () => true,
   });
@@ -205,7 +205,7 @@ test("stale ownership after secret entry prevents persistence", async () => {
   const tui = createTuiHarness({ keybindings: remappedKeybindings() });
   const context = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
   let current = true;
-  const running = showJevCompactMenu(runtime, context.ctx, {
+  const running = showTypeSafeCompactMenu(runtime, context.ctx, {
     signal: new AbortController().signal,
     isCurrent: () => current,
   });
@@ -221,24 +221,24 @@ test("stale ownership after secret entry prevents persistence", async () => {
 test("RPC reports only presence and path while print and JSON reject secret collection", async () => {
   const secret = "never-display-this";
   const runtime = memoryRuntime({
-    path: "/agent/\u001b[31mpi-jev-compact.json",
+    path: "/agent/\u001b[31mpi-typesafe-compact.json",
     settings: { apiKey: secret },
     document: { apiKey: secret },
   });
   const rpc = createMockContext({ mode: "rpc", hasUI: true });
-  await showJevCompactMenu(runtime, rpc.ctx, {
+  await showTypeSafeCompactMenu(runtime, rpc.ctx, {
     signal: new AbortController().signal,
     isCurrent: () => true,
   });
   assert.match(rpc.notifications[0]?.message ?? "", /configured/u);
-  assert.match(rpc.notifications[0]?.message ?? "", /pi-jev-compact\.json/u);
+  assert.match(rpc.notifications[0]?.message ?? "", /pi-typesafe-compact\.json/u);
   assert.equal(JSON.stringify(rpc.notifications).includes(secret), false);
   assert.equal(JSON.stringify(rpc.notifications).includes("\u001b"), false);
 
   for (const mode of ["print", "json"] as const) {
     const context = createMockContext({ mode, hasUI: false });
     await assert.rejects(
-      showJevCompactMenu(runtime, context.ctx, {
+      showTypeSafeCompactMenu(runtime, context.ctx, {
         signal: new AbortController().signal,
         isCurrent: () => true,
       }),

@@ -1,6 +1,6 @@
-# 🧠 pi-jev-compact — Select History with JEV Before Pi Compacts It
+# 🧠 pi-typesafe-compact — Select History with TypeSafe Before Pi Compacts It
 
-[![npm](https://img.shields.io/npm/v/@narumitw/pi-jev-compact)](https://www.npmjs.com/package/@narumitw/pi-jev-compact) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/@narumitw/pi-typesafe-compact)](https://www.npmjs.com/package/@narumitw/pi-typesafe-compact) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
 Use TypeSafe AI's JEV Noul evaluator to choose older Pi history units, then pass only that selected context through Pi's native `compact()` function and the model already active in Pi.
 Pi still owns compaction timing, recent-history retention, `/compact`, summary generation, and overflow recovery.
@@ -21,20 +21,20 @@ Pi still owns compaction timing, recent-history retention, `/compact`, summary g
 Install persistently from npm:
 
 ```bash
-pi install npm:@narumitw/pi-jev-compact
+pi install npm:@narumitw/pi-typesafe-compact
 ```
 
 Try the published package without installing it:
 
 ```bash
-pi -e npm:@narumitw/pi-jev-compact
+pi -e npm:@narumitw/pi-typesafe-compact
 ```
 
 Try a local checkout from the repository root:
 
 ```bash
 npm install
-pi -e ./packages/pi-jev-compact
+pi -e ./packages/pi-typesafe-compact
 ```
 
 The TypeSafe SDK requires Node.js 20 or newer.
@@ -44,7 +44,7 @@ When loading this repository's root package, run `pi config` before setting a Ty
 
 ## 🚀 Quick start
 
-1. Run `/jev-compact` in Pi's TUI.
+1. Run `/typesafe-compact` in Pi's TUI.
 2. Open **Settings** and choose **Set TypeSafe API key**.
 3. Enter or paste the key in the masked input and submit it.
 4. Continue working normally or run Pi's built-in `/compact`.
@@ -72,7 +72,7 @@ Provider-native tool messages are not replayed across the boundary; retained too
 
 ## 💬 Commands
 
-`/jev-compact` opens the manager and accepts no arguments.
+`/typesafe-compact` opens the manager and accepts no arguments.
 In TUI mode it provides Settings, Status, Help, masked key replacement, and confirmed key removal.
 Escape returns from nested screens, and Ctrl+C closes the interaction without changing settings.
 
@@ -85,10 +85,10 @@ Pi's built-in `/compact [instructions]` remains the command that requests compac
 The extension uses one global-only file:
 
 ```text
-<getAgentDir()>/pi-jev-compact.json
+<getAgentDir()>/pi-typesafe-compact.json
 ```
 
-The normal path is `~/.pi/agent/pi-jev-compact.json`:
+The normal path is `~/.pi/agent/pi-typesafe-compact.json`:
 
 ```json
 {
@@ -148,10 +148,10 @@ When a bound cannot be satisfied safely, the extension warns in UI-capable modes
 ## 🗂️ Package layout
 
 ```text
-packages/pi-jev-compact/
+packages/pi-typesafe-compact/
 ├── src/
 │   ├── index.ts              # Thin Pi entrypoint
-│   ├── jev-compact.ts        # Lifecycle and compaction orchestration
+│   ├── typesafe-compact.ts   # Lifecycle and compaction orchestration
 │   ├── evaluator.ts          # TypeSafe JEV Noul batching and decisions
 │   ├── history-units.ts      # Independent units, bounds, and persistence
 │   ├── summary.ts            # Pi native compact adapter

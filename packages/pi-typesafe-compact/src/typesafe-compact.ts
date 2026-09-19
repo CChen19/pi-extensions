@@ -11,22 +11,22 @@ import {
   combineHistoryUnits,
   composeCompactionSummary,
   fileOperationLists,
-  JEV_COMPACT_DETAILS_KIND,
-  JEV_COMPACT_DETAILS_VERSION,
-  type JevCompactDetails,
   MAX_COMPACTION_DETAILS_BYTES,
   MAX_COMPACTION_SUMMARY_BYTES,
-  parseJevCompactDetails,
+  parseTypeSafeCompactDetails,
+  TYPESAFE_COMPACT_DETAILS_KIND,
+  TYPESAFE_COMPACT_DETAILS_VERSION,
+  type TypeSafeCompactDetails,
 } from "./history-units.js";
-import { showJevCompactMenu } from "./menu.js";
-import { createJevCompactSettingsRuntime, type JevCompactSettingsRuntime } from "./settings.js";
+import { showTypeSafeCompactMenu } from "./menu.js";
+import { createTypeSafeCompactSettingsRuntime, type TypeSafeCompactSettingsRuntime } from "./settings.js";
 import { summarizeWithPiNativeCompact } from "./summary.js";
 
-const STATUS_KEY = "jev-compact";
+const STATUS_KEY = "typesafe-compact";
 type Summarize = typeof summarizeWithPiNativeCompact;
 
-export interface JevCompactExtensionOptions {
-  settingsRuntime?: JevCompactSettingsRuntime;
+export interface TypeSafeCompactExtensionOptions {
+  settingsRuntime?: TypeSafeCompactSettingsRuntime;
   clientFactory?: TypeSafeClientFactory;
   summarize?: Summarize;
 }
@@ -40,11 +40,11 @@ function modelIdentity(model: Model<Api> | undefined): string | undefined {
   return model ? `${model.provider}\0${model.api}\0${model.id}` : undefined;
 }
 
-function latestPriorDetails(entries: readonly SessionEntry[]): JevCompactDetails | undefined {
+function latestPriorDetails(entries: readonly SessionEntry[]): TypeSafeCompactDetails | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.type !== "compaction") continue;
-    return parseJevCompactDetails(entry.details);
+    return parseTypeSafeCompactDetails(entry.details);
   }
   return undefined;
 }
@@ -71,11 +71,11 @@ function sessionOwned(
   return !ownerSignal.aborted && generation === currentGeneration() && ctx.sessionManager.getSessionId() === sessionId;
 }
 
-async function compactWithJev(
+async function compactWithTypeSafe(
   event: SessionBeforeCompactEvent,
   ctx: ExtensionContext,
   options: {
-    runtime: JevCompactSettingsRuntime;
+    runtime: TypeSafeCompactSettingsRuntime;
     clientFactory: TypeSafeClientFactory;
     summarize: Summarize;
     generation: number;
@@ -144,9 +144,9 @@ async function compactWithJev(
     if (Buffer.byteLength(summary, "utf8") > MAX_COMPACTION_SUMMARY_BYTES) {
       throw new Error("Final JEV compaction summary exceeds the 512 KiB limit");
     }
-    const details: JevCompactDetails = {
-      kind: JEV_COMPACT_DETAILS_KIND,
-      version: JEV_COMPACT_DETAILS_VERSION,
+    const details: TypeSafeCompactDetails = {
+      kind: TYPESAFE_COMPACT_DETAILS_KIND,
+      version: TYPESAFE_COMPACT_DETAILS_VERSION,
       compressedSummary: generated.text,
       retainedUnits,
       evaluator: {
@@ -185,9 +185,11 @@ async function compactWithJev(
   }
 }
 
-export function createJevCompactExtension(options: JevCompactExtensionOptions = {}): (pi: ExtensionAPI) => void {
+export function createTypeSafeCompactExtension(
+  options: TypeSafeCompactExtensionOptions = {},
+): (pi: ExtensionAPI) => void {
   return (pi) => {
-    const runtime = options.settingsRuntime ?? createJevCompactSettingsRuntime();
+    const runtime = options.settingsRuntime ?? createTypeSafeCompactSettingsRuntime();
     const clientFactory = options.clientFactory ?? createTypeSafeClient;
     const summarize = options.summarize ?? summarizeWithPiNativeCompact;
     const sessionOwnership = new WeakMap<object, SessionOwnership>();
@@ -200,14 +202,14 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
       return ownership;
     };
 
-    pi.registerCommand("jev-compact", {
-      description: "Configure JEV-guided compaction",
+    pi.registerCommand("typesafe-compact", {
+      description: "Configure TypeSafe JEV-guided compaction",
       handler: async (args, ctx) => {
-        if (args.trim()) throw new Error("Usage: /jev-compact");
+        if (args.trim()) throw new Error("Usage: /typesafe-compact");
         const ownership = ownershipFor(ctx);
         const ownerGeneration = ownership.generation;
         const ownerController = ownership.controller;
-        await showJevCompactMenu(runtime, ctx, {
+        await showTypeSafeCompactMenu(runtime, ctx, {
           signal: ownerController.signal,
           isCurrent: () => ownerGeneration === ownership.generation && !ownerController.signal.aborted,
         });
@@ -234,7 +236,7 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
         }
         if (state.kind === "invalid" && ctx.hasUI) {
           ctx.ui.notify(
-            `Invalid pi-jev-compact.json; Pi-native compaction remains active. ${safeError(state.issue ?? "unknown validation error")}`,
+            `Invalid pi-typesafe-compact.json; Pi-native compaction remains active. ${safeError(state.issue ?? "unknown validation error")}`,
             "warning",
           );
         }
@@ -242,7 +244,7 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
         if (ownerController.signal.aborted || ownerGeneration !== ownership.generation) return;
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `Could not load pi-jev-compact.json; Pi-native compaction remains active. ${safeError(error)}`,
+            `Could not load pi-typesafe-compact.json; Pi-native compaction remains active. ${safeError(error)}`,
             "warning",
           );
         }
@@ -251,7 +253,7 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
 
     pi.on("session_before_compact", (event, ctx) => {
       const ownership = ownershipFor(ctx);
-      return compactWithJev(event, ctx, {
+      return compactWithTypeSafe(event, ctx, {
         runtime,
         clientFactory,
         summarize,
@@ -272,4 +274,4 @@ export function createJevCompactExtension(options: JevCompactExtensionOptions = 
   };
 }
 
-export default createJevCompactExtension();
+export default createTypeSafeCompactExtension();

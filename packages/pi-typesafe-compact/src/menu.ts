@@ -1,9 +1,9 @@
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { MenuDefinition } from "@narumitw/pi-tui-kit";
-import type { JevCompactSettingsRuntime, JevCompactSettingsState } from "./settings.js";
+import type { TypeSafeCompactSettingsRuntime, TypeSafeCompactSettingsState } from "./settings.js";
 
-export interface JevCompactMenuOwner {
+export interface TypeSafeCompactMenuOwner {
   signal: AbortSignal;
   isCurrent(): boolean;
 }
@@ -29,7 +29,7 @@ function redactedError(error: unknown, secret?: string): string {
 
 function createMenu(requested: {
   value: RequestedAction;
-}): MenuDefinition<JevCompactSettingsState, Screen, Action, ExtensionCommandContext> {
+}): MenuDefinition<TypeSafeCompactSettingsState, Screen, Action, ExtensionCommandContext> {
   return {
     start: "main",
     screens: {
@@ -115,10 +115,10 @@ function createMenu(requested: {
   };
 }
 
-export async function showJevCompactMenu(
-  runtime: JevCompactSettingsRuntime,
+export async function showTypeSafeCompactMenu(
+  runtime: TypeSafeCompactSettingsRuntime,
   ctx: ExtensionCommandContext,
-  owner: JevCompactMenuOwner,
+  owner: TypeSafeCompactMenuOwner,
 ): Promise<void> {
   const current = runtime.get();
   if (ctx.mode === "rpc" && ctx.hasUI) {
@@ -128,7 +128,7 @@ export async function showJevCompactMenu(
     );
     return;
   }
-  if (ctx.mode !== "tui") throw new Error("/jev-compact requires TUI or RPC UI support");
+  if (ctx.mode !== "tui") throw new Error("/typesafe-compact requires TUI or RPC UI support");
   if (owner.signal.aborted || !owner.isCurrent()) return;
 
   const { defineMenu, runConfirmation, runMenu, runSecretInput, sanitizeTerminalText } = await import(
@@ -164,7 +164,7 @@ export async function showJevCompactMenu(
     } catch (error) {
       if (owner.signal.aborted || !owner.isCurrent()) return;
       ctx.ui.notify(
-        `Could not save pi-jev-compact.json: ${sanitizeTerminalText(redactedError(error, input.value))}`,
+        `Could not save pi-typesafe-compact.json: ${sanitizeTerminalText(redactedError(error, input.value))}`,
         "error",
       );
     }
@@ -187,7 +187,10 @@ export async function showJevCompactMenu(
       ctx.ui.notify("TypeSafe API key removed; Pi-native compaction is active.", "info");
     } catch (error) {
       if (owner.signal.aborted || !owner.isCurrent()) return;
-      ctx.ui.notify(`Could not update pi-jev-compact.json: ${sanitizeTerminalText(redactedError(error))}`, "error");
+      ctx.ui.notify(
+        `Could not update pi-typesafe-compact.json: ${sanitizeTerminalText(redactedError(error))}`,
+        "error",
+      );
     }
   }
 }

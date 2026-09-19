@@ -25,7 +25,6 @@
       "./packages/pi-github-pr/src/index.ts",
       "./packages/pi-goal/src/index.ts",
       "./packages/pi-herdr/src/index.ts",
-      "./packages/pi-jev-compact/src/index.ts",
       "./packages/pi-langfuse/src/index.ts",
       "./packages/pi-lsp/src/index.ts",
       "./packages/pi-plan-mode/src/index.ts",
@@ -39,6 +38,7 @@
       "./packages/pi-todo/src/index.ts",
       "./packages/pi-tool/src/index.ts",
       "./packages/pi-tui-kit-showcase/src/index.ts",
+      "./packages/pi-typesafe-compact/src/index.ts",
       "./packages/pi-usage/src/index.ts",
       "./packages/pi-worktree/src/index.ts"
     ],

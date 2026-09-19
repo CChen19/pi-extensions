@@ -1,7 +1,7 @@
 {
-  "name": "@narumitw/pi-jev-compact",
+  "name": "@narumitw/pi-typesafe-compact",
   "version": "0.0.0",
-  "description": "JEV-guided selective history compaction for Pi.",
+  "description": "TypeSafe JEV-guided selective history compaction for Pi.",
   "type": "module",
   "license": "MIT",
   "private": false,
@@ -48,6 +48,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/narumiruna/pi-extensions",
-    "directory": "packages/pi-jev-compact"
+    "directory": "packages/pi-typesafe-compact"
   }
 }

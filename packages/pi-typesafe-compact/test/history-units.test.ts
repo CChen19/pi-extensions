@@ -9,11 +9,11 @@ import {
   formatUnits,
   HistoryBoundsError,
   type HistoryUnit,
-  JEV_COMPACT_DETAILS_KIND,
-  JEV_COMPACT_DETAILS_VERSION,
   MAX_HISTORY_UNITS,
   MAX_UNIT_LABEL_CHARS,
-  parseJevCompactDetails,
+  parseTypeSafeCompactDetails,
+  TYPESAFE_COMPACT_DETAILS_KIND,
+  TYPESAFE_COMPACT_DETAILS_VERSION,
 } from "../src/history-units.js";
 
 const assistant = (content: unknown[]): AgentMessage =>
@@ -229,8 +229,8 @@ test("versioned details parse safely and reject malformed or oversized values", 
   const [unit] = buildHistoryUnits([{ role: "user", content: "keep", timestamp: 1 }], "history");
   assert.ok(unit);
   const details = {
-    kind: JEV_COMPACT_DETAILS_KIND,
-    version: JEV_COMPACT_DETAILS_VERSION,
+    kind: TYPESAFE_COMPACT_DETAILS_KIND,
+    version: TYPESAFE_COMPACT_DETAILS_VERSION,
     compressedSummary: "summary",
     retainedUnits: [unit],
     evaluator: {
@@ -244,9 +244,9 @@ test("versioned details parse safely and reject malformed or oversized values", 
     readFiles: ["src/a.ts"],
     modifiedFiles: [],
   };
-  assert.deepEqual(parseJevCompactDetails(details), details);
-  assert.equal(parseJevCompactDetails({ ...details, version: 2 }), undefined);
-  assert.equal(parseJevCompactDetails({ ...details, retainedUnits: [{ ...unit, kind: "forged" }] }), undefined);
+  assert.deepEqual(parseTypeSafeCompactDetails(details), details);
+  assert.equal(parseTypeSafeCompactDetails({ ...details, version: 2 }), undefined);
+  assert.equal(parseTypeSafeCompactDetails({ ...details, retainedUnits: [{ ...unit, kind: "forged" }] }), undefined);
   assert.throws(
     () => assertRetainedUnitsBounded(Array.from({ length: MAX_HISTORY_UNITS + 1 }, () => unit)),
     HistoryBoundsError,
