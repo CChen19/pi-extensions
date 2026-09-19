@@ -36,7 +36,6 @@
 - Keep deprecated references under `deprecated/`, which active checks exclude.
 - Keep each package's manifest, README, license, and TypeScript configuration inside that package.
 - Preserve each README's emoji title; npm, Pi, and license badges; and applicable `✨ Features`, `📦 Install`, `🚀 Quick start`, `⚙️ Settings`, `💬 Commands`, `🗂️ Package layout`, `🔎 Keywords`, and `📄 License` sections.
-- Treat every active packaged extension uniformly and do not add repository-specific lifecycle classifications.
 - Keep small repository-only extensions and their helpers, documentation, and requested tests under `.pi/extensions/<extension>/`, with `index.ts` as the entrypoint.
 - Treat `.pi/extensions/` as a self-contained project-resource boundary unrelated to packages under `packages/`.
 - Do not add package manifests, workspaces, Changesets, package tests, root test support, or shared TypeScript configuration for a project-local extension unless the user explicitly asks.
