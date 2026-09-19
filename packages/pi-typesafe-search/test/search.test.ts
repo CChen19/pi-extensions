@@ -35,7 +35,7 @@ class RelevanceClient implements SystemOneClient {
 }
 
 async function withFixture(fn: (workspace: string, agentDirectory: string) => Promise<void>) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-jev-search-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-typesafe-search-"));
   const workspace = path.join(root, "workspace");
   const agentDirectory = path.join(root, "agent");
   await Promise.all([mkdir(workspace), mkdir(agentDirectory)]);

@@ -5,8 +5,8 @@ import path from "node:path";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import { test, vi } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
-import { formatToolResult } from "../src/jev-search.js";
 import type { SearchResponse } from "../src/search.js";
+import { formatToolResult } from "../src/typesafe-search.js";
 
 async function withEnvironment(fn: (workspace: string, agentDirectory: string) => Promise<void>) {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-jev-tool-"));
@@ -49,15 +49,15 @@ function installFakeTypeSafeFetch(): () => void {
 
 test("extension registers one tool, loads private settings, searches, reports progress, and shuts down", async () => {
   await withEnvironment(async (workspace, agentDirectory) => {
-    await writeFile(path.join(agentDirectory, "pi-jev-search.json"), JSON.stringify({ apiKey: "test-key" }), {
+    await writeFile(path.join(agentDirectory, "pi-typesafe-search.json"), JSON.stringify({ apiKey: "test-key" }), {
       mode: 0o600,
     });
-    await chmod(path.join(agentDirectory, "pi-jev-search.json"), 0o600);
+    await chmod(path.join(agentDirectory, "pi-typesafe-search.json"), 0o600);
     await writeFile(path.join(workspace, "auth.md"), "# Authentication\nRefresh token restores sessions.\n");
     const restoreFetch = installFakeTypeSafeFetch();
     try {
       vi.resetModules();
-      const { default: register } = await import("../src/jev-search.js");
+      const { default: register } = await import("../src/typesafe-search.js");
       const mock = createMockPi();
       register(mock.pi);
       assert.deepEqual(
@@ -115,7 +115,7 @@ test("extension registers one tool, loads private settings, searches, reports pr
 
 test("session shutdown aborts and settles active Jev work before closing resources", async () => {
   await withEnvironment(async (workspace, agentDirectory) => {
-    await writeFile(path.join(agentDirectory, "pi-jev-search.json"), JSON.stringify({ apiKey: "test-key" }), {
+    await writeFile(path.join(agentDirectory, "pi-typesafe-search.json"), JSON.stringify({ apiKey: "test-key" }), {
       mode: 0o600,
     });
     await writeFile(path.join(workspace, "source.md"), "# Session\nRefresh token evidence.\n");
@@ -136,7 +136,7 @@ test("session shutdown aborts and settles active Jev work before closing resourc
 
     try {
       vi.resetModules();
-      const { default: register } = await import("../src/jev-search.js");
+      const { default: register } = await import("../src/typesafe-search.js");
       const mock = createMockPi();
       register(mock.pi);
       const sessionManager = { getSessionId: () => "active", getBranch: () => [], getEntries: () => [] };
@@ -192,7 +192,7 @@ test("tool results strip terminal controls and bound model text and structured e
 test("missing and invalid settings fail without exposing secrets", async () => {
   await withEnvironment(async (workspace, agentDirectory) => {
     vi.resetModules();
-    const { default: register } = await import("../src/jev-search.js");
+    const { default: register } = await import("../src/typesafe-search.js");
     const missingMock = createMockPi();
     register(missingMock.pi);
     const sessionManager = { getSessionId: () => "missing", getBranch: () => [], getEntries: () => [] };
@@ -204,7 +204,7 @@ test("missing and invalid settings fail without exposing secrets", async () => {
       /TypeSafe API key is missing/,
     );
 
-    await writeFile(path.join(agentDirectory, "pi-jev-search.json"), "{secret-key", { mode: 0o600 });
+    await writeFile(path.join(agentDirectory, "pi-typesafe-search.json"), "{secret-key", { mode: 0o600 });
     const invalidManager = { getSessionId: () => "invalid", getBranch: () => [], getEntries: () => [] };
     const { ctx: invalidContext, notifications } = createMockContext({
       cwd: workspace,

@@ -129,7 +129,7 @@ export default function registerJevSearch(pi: ExtensionAPI): void {
     if (state.closed || sessionStates.get(ctx.sessionManager) !== state) return;
     state.settings = settings;
     if (settings.kind === "invalid") {
-      ctx.ui.notify(safeDisplay(`pi-jev-search settings ignored: ${settings.reason}`), "warning");
+      ctx.ui.notify(safeDisplay(`pi-typesafe-search settings ignored: ${settings.reason}`), "warning");
     }
   });
 

@@ -1,5 +1,5 @@
 {
-  "name": "@narumitw/pi-jev-search",
+  "name": "@narumitw/pi-typesafe-search",
   "version": "0.0.0",
   "description": "Pi extension for SQLite FTS5 search with TypeSafe Jev semantic reranking.",
   "type": "module",
@@ -50,6 +50,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/narumiruna/pi-extensions",
-    "directory": "packages/pi-jev-search"
+    "directory": "packages/pi-typesafe-search"
   }
 }

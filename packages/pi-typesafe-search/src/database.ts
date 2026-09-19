@@ -48,7 +48,7 @@ export interface FileMapRecord {
 
 export function databasePathForRoot(root: string, agentDirectory = getAgentDir()): string {
   const digest = createHash("sha256").update(root, "utf8").digest("hex");
-  return join(agentDirectory, "pi-jev-search", "indexes", `${digest}.sqlite`);
+  return join(agentDirectory, "pi-typesafe-search", "indexes", `${digest}.sqlite`);
 }
 
 export async function openSearchDatabase(root: string, agentDirectory = getAgentDir()): Promise<SearchDatabase> {
@@ -406,7 +406,7 @@ async function databasePathState(path: string): Promise<"missing" | "regular" | 
 
 async function ensurePrivateIndexDirectory(agentDirectory: string): Promise<void> {
   let current = agentDirectory;
-  for (const segment of ["pi-jev-search", "indexes"]) {
+  for (const segment of ["pi-typesafe-search", "indexes"]) {
     current = join(current, segment);
     await mkdir(current, { mode: DATABASE_DIRECTORY_MODE }).catch((error: unknown) => {
       if (!isNodeError(error) || error.code !== "EEXIST") throw error;

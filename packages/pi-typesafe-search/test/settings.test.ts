@@ -16,7 +16,7 @@ async function withTempDirectory(fn: (directory: string) => Promise<void>) {
 
 test("settings loading is side-effect free and accepts a private API key file", async () => {
   await withTempDirectory(async (directory) => {
-    const settingsPath = path.join(directory, "pi-jev-search.json");
+    const settingsPath = path.join(directory, "pi-typesafe-search.json");
     assert.deepEqual(await loadSettings(settingsPath), { kind: "missing", path: settingsPath });
 
     await writeFile(settingsPath, '{"apiKey":"  secret-key  ","future":true}\n', { mode: 0o600 });

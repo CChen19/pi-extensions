@@ -1,4 +1,4 @@
-export const SETTINGS_FILE_NAME = "pi-jev-search.json";
+export const SETTINGS_FILE_NAME = "pi-typesafe-search.json";
 export const INDEX_POLICY_VERSION = "1";
 export const SCHEMA_VERSION = "1";
 

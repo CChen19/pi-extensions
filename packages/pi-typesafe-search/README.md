@@ -1,6 +1,6 @@
-# 🔎 pi-jev-search — FTS5 Search with Jev Semantic Reranking
+# 🔎 pi-typesafe-search — FTS5 Search with Jev Semantic Reranking
 
-[![npm](https://img.shields.io/npm/v/@narumitw/pi-jev-search)](https://www.npmjs.com/package/@narumitw/pi-jev-search) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/@narumitw/pi-typesafe-search)](https://www.npmjs.com/package/@narumitw/pi-typesafe-search) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
 Search workspace files through an incremental SQLite FTS5 index, then let TypeSafe Jev decide which source excerpts are semantically useful for the query.
 It stores no embeddings and requires no vector database or downloaded model.
@@ -20,22 +20,22 @@ It stores no embeddings and requires no vector database or downloaded model.
 Install the extension permanently:
 
 ```bash
-pi install npm:@narumitw/pi-jev-search
+pi install npm:@narumitw/pi-typesafe-search
 ```
 
 Try it without installing permanently:
 
 ```bash
-pi -e npm:@narumitw/pi-jev-search
+pi -e npm:@narumitw/pi-typesafe-search
 ```
 
 Try this package locally from the repository root:
 
 ```bash
-pi -e ./packages/pi-jev-search
+pi -e ./packages/pi-typesafe-search
 ```
 
-pi-jev-search requires the Node.js runtime supported by the current Pi release and its built-in SQLite FTS5 support.
+pi-typesafe-search requires the Node.js runtime supported by the current Pi release and its built-in SQLite FTS5 support.
 Pi extensions run with the Pi process's user permissions, so install only trusted packages.
 This extension reads workspace source, stores indexed copies locally, and sends selected file maps and candidate excerpts to TypeSafe.
 
@@ -46,14 +46,14 @@ Create the user settings file with private permissions:
 ```bash
 mkdir -p ~/.pi/agent
 umask 077
-cat > ~/.pi/agent/pi-jev-search.json <<'JSON'
+cat > ~/.pi/agent/pi-typesafe-search.json <<'JSON'
 {
   "apiKey": "YOUR_TYPESAFE_API_KEY"
 }
 JSON
 ```
 
-If Pi uses a custom agent directory, place `pi-jev-search.json` in the directory returned by Pi's agent configuration instead.
+If Pi uses a custom agent directory, place `pi-typesafe-search.json` in the directory returned by Pi's agent configuration instead.
 Restart Pi or run `/reload` after changing the file.
 
 Ask Pi to search a directory semantically, for example:
@@ -113,7 +113,7 @@ Escape or another Pi abort cancels filesystem and TypeSafe work between bounded 
 The extension reads one user settings file and never creates or modifies it:
 
 ```text
-<getAgentDir()>/pi-jev-search.json
+<getAgentDir()>/pi-typesafe-search.json
 ```
 
 Supported document:
@@ -150,7 +150,7 @@ Review both source sensitivity and TypeSafe's data-handling terms before searchi
 Each canonical search root selected inside the workspace receives a separate derived index:
 
 ```text
-<getAgentDir()>/pi-jev-search/indexes/<sha256-canonical-search-root>.sqlite
+<getAgentDir()>/pi-typesafe-search/indexes/<sha256-canonical-search-root>.sqlite
 ```
 
 The database stores file metadata, structural outlines, source chunks, FTS terms, and content hashes.
@@ -176,10 +176,10 @@ Deleting an index never deletes workspace source.
 ## 🗂️ Package layout
 
 ```text
-packages/pi-jev-search/
+packages/pi-typesafe-search/
 ├── src/
 │   ├── index.ts               # Thin Pi entrypoint
-│   ├── jev-search.ts          # Tool registration and session lifecycle
+│   ├── typesafe-search.ts     # Tool registration and session lifecycle
 │   ├── files.ts               # Safe workspace discovery and text loading
 │   ├── chunks.ts              # Natural-boundary chunks and file maps
 │   ├── database.ts            # Private SQLite FTS5 storage
