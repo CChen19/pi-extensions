@@ -108,6 +108,13 @@ export async function summarizeWithPiNativeCompact(
   },
   runCompact: PiNativeCompactor = compactWithPi,
 ): Promise<ActiveModelSummary> {
+  options.signal.throwIfAborted();
+  if (!options.isCurrent()) throw staleError();
+  if (options.selectedUnits.length === 0 && !options.customInstructions?.trim()) {
+    return {
+      text: options.preparation.previousSummary?.trim() || "No history units were selected for summarization.",
+    };
+  }
   const preparation = selectedPreparation(options.preparation, options.selectedUnits);
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(options.model);
   options.signal.throwIfAborted();

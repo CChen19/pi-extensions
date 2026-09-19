@@ -216,7 +216,32 @@ test("prefix-only selection explicitly carries the previous summary through nati
   assert.match(result.text, /selected prefix summary/u);
 });
 
-test("empty selections still invoke Pi compact with empty selected context", async () => {
+test("empty selections without custom instructions reuse the prior summary", async () => {
+  let authCalls = 0;
+  let compactCalls = 0;
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        authCalls += 1;
+        return { ok: true };
+      },
+    },
+  });
+
+  const result = await summarizeWithPiNativeCompact(
+    ctx,
+    summaryOptions({ selectedUnits: [], customInstructions: undefined }),
+    async () => {
+      compactCalls += 1;
+      return compactResult();
+    },
+  );
+  assert.deepEqual(result, { text: "Earlier compressed work" });
+  assert.equal(authCalls, 0);
+  assert.equal(compactCalls, 0);
+});
+
+test("empty selections with custom instructions still invoke Pi compact", async () => {
   let observed: Parameters<PiNativeCompactor>[0] | undefined;
   const { ctx } = createMockContext({
     modelRegistry: {
@@ -229,7 +254,7 @@ test("empty selections still invoke Pi compact with empty selected context", asy
 
   await summarizeWithPiNativeCompact(
     ctx,
-    summaryOptions({ selectedUnits: [], customInstructions: undefined }),
+    summaryOptions({ selectedUnits: [], customInstructions: "Focus on unresolved work" }),
     async (request) => {
       observed = request;
       return compactResult("empty-context summary");
@@ -238,6 +263,7 @@ test("empty selections still invoke Pi compact with empty selected context", asy
   assert.deepEqual(observed?.preparation.messagesToSummarize, []);
   assert.deepEqual(observed?.preparation.turnPrefixMessages, []);
   assert.equal(observed?.preparation.isSplitTurn, false);
+  assert.equal(observed?.customInstructions, "Focus on unresolved work");
 });
 
 test("forwarded previous summaries count toward the compact-input byte bound", async () => {
