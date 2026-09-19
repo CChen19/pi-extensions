@@ -63,6 +63,8 @@ These extensions are part of my daily Pi setup:
 
 ### TypeSafe AI
 
+These TypeSafe AI integrations are experimental and may change as they are evaluated in real workflows.
+
 | Package | Use it for | Install |
 | --- | --- | --- |
 | [`pi-typesafe`](./packages/pi-typesafe) | Make typed Jev decisions with validated probabilities for yes-or-no, fixed-choice, and ordered-score questions. | `pi install npm:@narumitw/pi-typesafe` |
