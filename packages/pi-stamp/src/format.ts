@@ -66,6 +66,27 @@ interface ZonedParts {
   second: string;
 }
 
+type FormatterSlot = "localized-date" | "localized-time" | "zoned-parts";
+
+interface CachedFormatter {
+  key: string;
+  formatter: Intl.DateTimeFormat;
+}
+
+interface CachedDefaultFormatEnvironment extends StampFormatEnvironment {
+  checkedAt: number;
+  tz: string | undefined;
+  lcAll: string | undefined;
+  lcTime: string | undefined;
+  lang: string | undefined;
+}
+
+// Host locale and time-zone settings can change without updating the process environment.
+const DEFAULT_ENVIRONMENT_REFRESH_MS = 60_000;
+const EMPTY_FORMAT_ENVIRONMENT: Readonly<StampFormatEnvironment> = Object.freeze({});
+const formatterCache: Partial<Record<FormatterSlot, CachedFormatter>> = {};
+let cachedDefaultFormatEnvironment: CachedDefaultFormatEnvironment | undefined;
+
 export function canonicalizeLocale(value: string): string | undefined {
   if (value === "invariant" || value === "system") return value;
   try {
@@ -85,20 +106,37 @@ export function canonicalizeTimeZone(value: string): string | undefined {
   }
 }
 
+export function resolveStampFormatEnvironment(
+  settings: Readonly<StampSettings>,
+  environment: Readonly<StampFormatEnvironment> = EMPTY_FORMAT_ENVIRONMENT,
+): Readonly<StampFormatEnvironment> {
+  const needsSystemLocale = settings.locale === "system" && environment.systemLocale === undefined;
+  const needsLocalTimeZone = settings.timeZone === "local" && environment.localTimeZone === undefined;
+  if (!needsSystemLocale && !needsLocalTimeZone) return environment;
+
+  const defaults = resolveDefaultFormatEnvironment();
+  if (environment === EMPTY_FORMAT_ENVIRONMENT) return defaults;
+  return {
+    systemLocale: environment.systemLocale ?? defaults.systemLocale,
+    localTimeZone: environment.localTimeZone ?? defaults.localTimeZone,
+  };
+}
+
 export function formatStampLabel(
   timestamp: number,
   previousTimestamp: number | undefined,
   settings: Readonly<StampSettings>,
-  environment: StampFormatEnvironment = {},
+  environment: Readonly<StampFormatEnvironment> = EMPTY_FORMAT_ENVIRONMENT,
 ): string | undefined {
   if (!isValidTimestamp(timestamp)) return undefined;
   try {
-    const timeZone = settings.timeZone === "local" ? environment.localTimeZone : settings.timeZone;
+    const resolvedEnvironment = resolveStampFormatEnvironment(settings, environment);
+    const timeZone = settings.timeZone === "local" ? resolvedEnvironment.localTimeZone : settings.timeZone;
     const showDate = shouldShowDate(timestamp, previousTimestamp, settings.dateContext, timeZone);
     if (settings.locale === "invariant") {
       return formatInvariant(timestamp, showDate, settings, timeZone);
     }
-    const locale = settings.locale === "system" ? environment.systemLocale : settings.locale;
+    const locale = settings.locale === "system" ? resolvedEnvironment.systemLocale : settings.locale;
     return formatLocalized(timestamp, showDate, settings, locale, timeZone);
   } catch {
     return undefined;
@@ -108,7 +146,7 @@ export function formatStampLabel(
 export function formatMessageStampLabel(
   input: Readonly<MessageStampFormatInput>,
   settings: Readonly<StampSettings>,
-  environment: StampFormatEnvironment = {},
+  environment: Readonly<StampFormatEnvironment> = EMPTY_FORMAT_ENVIRONMENT,
 ): string | undefined {
   const label = formatStampLabel(input.timestamp, input.previousTimestamp, settings, environment);
   if (!label || settings.responseTiming === "off") return label;
@@ -156,20 +194,30 @@ function formatLocalized(
   timeZone: string | undefined,
 ): string {
   const date = new Date(timestamp);
-  const time = new Intl.DateTimeFormat(locale, {
-    calendar: "gregory",
-    timeZone,
-    hour: "2-digit",
-    minute: "2-digit",
-    ...(settings.showSeconds ? { second: "2-digit" as const } : {}),
-    hourCycle: settings.hourCycle === "24h" ? "h23" : "h12",
-  }).format(date);
+  const time = cachedFormatter(
+    "localized-time",
+    JSON.stringify([locale, timeZone, settings.showSeconds, settings.hourCycle]),
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        calendar: "gregory",
+        timeZone,
+        hour: "2-digit",
+        minute: "2-digit",
+        ...(settings.showSeconds ? { second: "2-digit" as const } : {}),
+        hourCycle: settings.hourCycle === "24h" ? "h23" : "h12",
+      }),
+  ).format(date);
   if (!showDate) return time;
-  const formattedDate = new Intl.DateTimeFormat(locale, {
-    calendar: "gregory",
-    timeZone,
-    dateStyle: "medium",
-  }).format(date);
+  const formattedDate = cachedFormatter(
+    "localized-date",
+    JSON.stringify([locale, timeZone]),
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        calendar: "gregory",
+        timeZone,
+        dateStyle: "medium",
+      }),
+  ).format(date);
   return `${formattedDate} · ${time}`;
 }
 
@@ -190,22 +238,24 @@ function dateKey(timestamp: number, timeZone: string | undefined): string {
 }
 
 function zonedParts(timestamp: number, timeZone: string | undefined): ZonedParts {
-  const values = new Map(
-    new Intl.DateTimeFormat("en-CA-u-ca-gregory-nu-latn", {
-      calendar: "gregory",
-      numberingSystem: "latn",
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    })
-      .formatToParts(new Date(timestamp))
-      .map((part) => [part.type, part.value]),
+  const formatter = cachedFormatter(
+    "zoned-parts",
+    JSON.stringify([timeZone]),
+    () =>
+      new Intl.DateTimeFormat("en-CA-u-ca-gregory-nu-latn", {
+        calendar: "gregory",
+        numberingSystem: "latn",
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }),
   );
+  const values = new Map(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
   const year = values.get("year");
   const month = values.get("month");
   const day = values.get("day");
@@ -216,6 +266,47 @@ function zonedParts(timestamp: number, timeZone: string | undefined): ZonedParts
     throw new Error("Intl did not return complete Gregorian date/time parts.");
   }
   return { year, month, day, hour, minute, second };
+}
+
+function resolveDefaultFormatEnvironment(): CachedDefaultFormatEnvironment {
+  const now = Date.now();
+  const tz = process.env.TZ;
+  const lcAll = process.env.LC_ALL;
+  const lcTime = process.env.LC_TIME;
+  const lang = process.env.LANG;
+  const elapsed = cachedDefaultFormatEnvironment ? now - cachedDefaultFormatEnvironment.checkedAt : undefined;
+  if (
+    cachedDefaultFormatEnvironment &&
+    elapsed !== undefined &&
+    elapsed >= 0 &&
+    elapsed < DEFAULT_ENVIRONMENT_REFRESH_MS &&
+    cachedDefaultFormatEnvironment.tz === tz &&
+    cachedDefaultFormatEnvironment.lcAll === lcAll &&
+    cachedDefaultFormatEnvironment.lcTime === lcTime &&
+    cachedDefaultFormatEnvironment.lang === lang
+  ) {
+    return cachedDefaultFormatEnvironment;
+  }
+
+  const { locale, timeZone } = new Intl.DateTimeFormat().resolvedOptions();
+  cachedDefaultFormatEnvironment = {
+    checkedAt: now,
+    tz,
+    lcAll,
+    lcTime,
+    lang,
+    systemLocale: locale,
+    localTimeZone: timeZone,
+  };
+  return cachedDefaultFormatEnvironment;
+}
+
+function cachedFormatter(slot: FormatterSlot, key: string, create: () => Intl.DateTimeFormat): Intl.DateTimeFormat {
+  const cached = formatterCache[slot];
+  if (cached?.key === key) return cached.formatter;
+  const formatter = create();
+  formatterCache[slot] = { key, formatter };
+  return formatter;
 }
 
 function isValidTimestamp(value: number | undefined): value is number {
