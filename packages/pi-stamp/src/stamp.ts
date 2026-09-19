@@ -5,6 +5,8 @@ import {
   formatExactTimelineLine,
   formatMessageStampLabel,
   formatStampLabel,
+  resolveStampFormatEnvironment,
+  type StampFormatEnvironment,
   type StampSettings,
   type StampTimelineBoundary,
 } from "./format.js";
@@ -309,15 +311,34 @@ function memoizeStampLines(
   createLines: (settings: Readonly<StampSettings>) => readonly RightAlignedLine[],
 ): () => readonly RightAlignedLine[] {
   let previousSettings: StampSettings | undefined;
+  let previousEnvironment: Readonly<StampFormatEnvironment> | undefined;
   let lines: readonly RightAlignedLine[] = [];
   return () => {
     const settings = getSettings();
-    if (!previousSettings || !haveSameStampSettings(previousSettings, settings)) {
+    const environment = resolveStampFormatEnvironment(settings);
+    if (
+      !previousSettings ||
+      !haveSameStampSettings(previousSettings, settings) ||
+      !previousEnvironment ||
+      !haveSameStampFormatEnvironment(settings, previousEnvironment, environment)
+    ) {
       previousSettings = { ...settings };
+      previousEnvironment = environment;
       lines = createLines(settings);
     }
     return lines;
   };
+}
+
+function haveSameStampFormatEnvironment(
+  settings: Readonly<StampSettings>,
+  left: Readonly<StampFormatEnvironment>,
+  right: Readonly<StampFormatEnvironment>,
+): boolean {
+  return (
+    (settings.locale !== "system" || left.systemLocale === right.systemLocale) &&
+    (settings.timeZone !== "local" || left.localTimeZone === right.localTimeZone)
+  );
 }
 
 function haveSameStampSettings(left: Readonly<StampSettings>, right: Readonly<StampSettings>): boolean {

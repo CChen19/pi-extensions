@@ -73,7 +73,19 @@ interface CachedFormatter {
   formatter: Intl.DateTimeFormat;
 }
 
+interface CachedDefaultFormatEnvironment extends StampFormatEnvironment {
+  checkedAt: number;
+  tz: string | undefined;
+  lcAll: string | undefined;
+  lcTime: string | undefined;
+  lang: string | undefined;
+}
+
+// Host locale and time-zone settings can change without updating the process environment.
+const DEFAULT_ENVIRONMENT_REFRESH_MS = 60_000;
+const EMPTY_FORMAT_ENVIRONMENT: Readonly<StampFormatEnvironment> = Object.freeze({});
 const formatterCache: Partial<Record<FormatterSlot, CachedFormatter>> = {};
+let cachedDefaultFormatEnvironment: CachedDefaultFormatEnvironment | undefined;
 
 export function canonicalizeLocale(value: string): string | undefined {
   if (value === "invariant" || value === "system") return value;
@@ -94,20 +106,37 @@ export function canonicalizeTimeZone(value: string): string | undefined {
   }
 }
 
+export function resolveStampFormatEnvironment(
+  settings: Readonly<StampSettings>,
+  environment: Readonly<StampFormatEnvironment> = EMPTY_FORMAT_ENVIRONMENT,
+): Readonly<StampFormatEnvironment> {
+  const needsSystemLocale = settings.locale === "system" && environment.systemLocale === undefined;
+  const needsLocalTimeZone = settings.timeZone === "local" && environment.localTimeZone === undefined;
+  if (!needsSystemLocale && !needsLocalTimeZone) return environment;
+
+  const defaults = resolveDefaultFormatEnvironment();
+  if (environment === EMPTY_FORMAT_ENVIRONMENT) return defaults;
+  return {
+    systemLocale: environment.systemLocale ?? defaults.systemLocale,
+    localTimeZone: environment.localTimeZone ?? defaults.localTimeZone,
+  };
+}
+
 export function formatStampLabel(
   timestamp: number,
   previousTimestamp: number | undefined,
   settings: Readonly<StampSettings>,
-  environment: StampFormatEnvironment = {},
+  environment: Readonly<StampFormatEnvironment> = EMPTY_FORMAT_ENVIRONMENT,
 ): string | undefined {
   if (!isValidTimestamp(timestamp)) return undefined;
   try {
-    const timeZone = settings.timeZone === "local" ? environment.localTimeZone : settings.timeZone;
+    const resolvedEnvironment = resolveStampFormatEnvironment(settings, environment);
+    const timeZone = settings.timeZone === "local" ? resolvedEnvironment.localTimeZone : settings.timeZone;
     const showDate = shouldShowDate(timestamp, previousTimestamp, settings.dateContext, timeZone);
     if (settings.locale === "invariant") {
       return formatInvariant(timestamp, showDate, settings, timeZone);
     }
-    const locale = settings.locale === "system" ? environment.systemLocale : settings.locale;
+    const locale = settings.locale === "system" ? resolvedEnvironment.systemLocale : settings.locale;
     return formatLocalized(timestamp, showDate, settings, locale, timeZone);
   } catch {
     return undefined;
@@ -117,7 +146,7 @@ export function formatStampLabel(
 export function formatMessageStampLabel(
   input: Readonly<MessageStampFormatInput>,
   settings: Readonly<StampSettings>,
-  environment: StampFormatEnvironment = {},
+  environment: Readonly<StampFormatEnvironment> = EMPTY_FORMAT_ENVIRONMENT,
 ): string | undefined {
   const label = formatStampLabel(input.timestamp, input.previousTimestamp, settings, environment);
   if (!label || settings.responseTiming === "off") return label;
@@ -237,6 +266,39 @@ function zonedParts(timestamp: number, timeZone: string | undefined): ZonedParts
     throw new Error("Intl did not return complete Gregorian date/time parts.");
   }
   return { year, month, day, hour, minute, second };
+}
+
+function resolveDefaultFormatEnvironment(): CachedDefaultFormatEnvironment {
+  const now = Date.now();
+  const tz = process.env.TZ;
+  const lcAll = process.env.LC_ALL;
+  const lcTime = process.env.LC_TIME;
+  const lang = process.env.LANG;
+  const elapsed = cachedDefaultFormatEnvironment ? now - cachedDefaultFormatEnvironment.checkedAt : undefined;
+  if (
+    cachedDefaultFormatEnvironment &&
+    elapsed !== undefined &&
+    elapsed >= 0 &&
+    elapsed < DEFAULT_ENVIRONMENT_REFRESH_MS &&
+    cachedDefaultFormatEnvironment.tz === tz &&
+    cachedDefaultFormatEnvironment.lcAll === lcAll &&
+    cachedDefaultFormatEnvironment.lcTime === lcTime &&
+    cachedDefaultFormatEnvironment.lang === lang
+  ) {
+    return cachedDefaultFormatEnvironment;
+  }
+
+  const { locale, timeZone } = new Intl.DateTimeFormat().resolvedOptions();
+  cachedDefaultFormatEnvironment = {
+    checkedAt: now,
+    tz,
+    lcAll,
+    lcTime,
+    lang,
+    systemLocale: locale,
+    localTimeZone: timeZone,
+  };
+  return cachedDefaultFormatEnvironment;
 }
 
 function cachedFormatter(slot: FormatterSlot, key: string, create: () => Intl.DateTimeFormat): Intl.DateTimeFormat {

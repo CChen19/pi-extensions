@@ -139,6 +139,21 @@ test("date-time formatter construction stays constant across repeated formatting
   }
 });
 
+test("local time formatting follows time-zone changes during the process lifetime", () => {
+  const originalTimeZone = process.env.TZ;
+  const settings = { ...DEFAULT_STAMP_SETTINGS, dateContext: "never" } as const;
+  try {
+    process.env.TZ = "UTC";
+    assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, settings), "00:01:02");
+
+    process.env.TZ = "Pacific/Honolulu";
+    assert.equal(formatStampLabel(AFTER_MIDNIGHT_UTC, undefined, settings), "14:01:02");
+  } finally {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+  }
+});
+
 test("locale and time-zone values canonicalize or reject exactly", () => {
   assert.equal(canonicalizeLocale("invariant"), "invariant");
   assert.equal(canonicalizeLocale("system"), "system");

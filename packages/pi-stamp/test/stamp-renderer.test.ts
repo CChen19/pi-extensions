@@ -348,6 +348,39 @@ test("entry renderer reuses stable output and invalidates width, settings, and t
   assert.equal(component.render(20), invalidated);
 });
 
+test("entry renderer invalidates memoized local-time output after a time-zone change", () => {
+  const originalTimeZone = process.env.TZ;
+  try {
+    process.env.TZ = "UTC";
+    const renderer = createStampEntryRenderer(() => ({
+      ...DEFAULT_STAMP_SETTINGS,
+      dateContext: "never",
+    }));
+    const component = renderer(
+      {
+        data: {
+          version: 2,
+          role: "user",
+          timestamp: Date.UTC(2026, 6, 30, 0, 1, 2),
+        },
+      } as never,
+      { expanded: false },
+      { fg: (_color: string, text: string) => text } as never,
+    );
+    assert.ok(component);
+
+    const utc = component.render(20);
+    assert.equal(utc[0]?.trim(), "00:01:02");
+    process.env.TZ = "Pacific/Honolulu";
+    const honolulu = component.render(20);
+    assert.notEqual(honolulu, utc);
+    assert.equal(honolulu[0]?.trim(), "14:01:02");
+  } finally {
+    if (originalTimeZone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimeZone;
+  }
+});
+
 test("entry renderer expands exact timelines from only the observations each version retains", () => {
   const renderer = createStampEntryRenderer(() => ({
     ...DEFAULT_STAMP_SETTINGS,
