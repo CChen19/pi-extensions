@@ -142,6 +142,7 @@ When a bound cannot be satisfied safely, the extension warns in UI-capable modes
 - Retaining many units can save less context than Pi-native compaction; hard bounds eventually force native fallback.
 - A TypeSafe authentication or network failure is discovered at compaction time; setup does not make a validation request.
 - TypeSafe evaluation usage is stored as token counts in compaction details but is not added to Pi provider cost totals.
+- Extension-owned summary calls cannot inherit Pi's configured summarization retry policy because the public extension context does not expose it; a transient summary failure delegates the operation to Pi-native compaction.
 - Branch summaries created by `/tree` are not customized.
 - Multiple custom compaction routes can all perform remote work before Pi keeps only the last result. This extension cannot inspect another extension's state, so disable every other compaction extension with `pi config` before configuring its TypeSafe key.
 
