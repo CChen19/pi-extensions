@@ -150,7 +150,7 @@ export async function showTypeSafeCompactMenu(
     });
     if (input.kind !== "submitted" || owner.signal.aborted || !owner.isCurrent()) return;
     try {
-      await runtime.setApiKey(input.value, owner.signal);
+      await runtime.setApiKey(input.value);
       if (owner.signal.aborted || !owner.isCurrent()) return;
       ctx.ui.notify(`TypeSafe API key saved to ${displayText(runtime.get().path)}.`, "info");
     } catch (error) {
@@ -174,7 +174,7 @@ export async function showTypeSafeCompactMenu(
     });
     if (confirmation.kind !== "confirmed" || owner.signal.aborted || !owner.isCurrent()) return;
     try {
-      await runtime.removeApiKey(owner.signal);
+      await runtime.removeApiKey();
       if (owner.signal.aborted || !owner.isCurrent()) return;
       ctx.ui.notify("TypeSafe API key removed; Pi-native compaction is active.", "info");
     } catch (error) {

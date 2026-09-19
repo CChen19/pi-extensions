@@ -92,8 +92,11 @@ function selectedPreparation(
   const turnPrefixUnits = units.filter((unit) => unit.source === "turn-prefix");
   const history = historyUnits.length > 0 ? selectedContextMessage(historyUnits) : undefined;
   const turnPrefix = turnPrefixUnits.length > 0 ? selectedContextMessage(turnPrefixUnits) : undefined;
+  const routePrefixThroughHistory = !history && turnPrefix !== undefined && Boolean(customInstructions?.trim());
+  const historyRequest = history ?? (routePrefixThroughHistory ? turnPrefix : undefined);
+  const turnPrefixRequest = routePrefixThroughHistory ? undefined : turnPrefix;
   const previousSummary =
-    !history && turnPrefix && preparation.previousSummary !== undefined
+    !historyRequest && turnPrefixRequest && preparation.previousSummary !== undefined
       ? contextMessage(`## Previous compaction summary\n\n${preparation.previousSummary}`)
       : undefined;
   const forwardedPreviousSummaryBytes = previousSummary
@@ -106,9 +109,9 @@ function selectedPreparation(
   }
   const selected = {
     ...preparation,
-    messagesToSummarize: history ? [history.message] : previousSummary ? [previousSummary.message] : [],
-    turnPrefixMessages: turnPrefix ? [turnPrefix.message] : [],
-    isSplitTurn: turnPrefix !== undefined,
+    messagesToSummarize: historyRequest ? [historyRequest.message] : previousSummary ? [previousSummary.message] : [],
+    turnPrefixMessages: turnPrefixRequest ? [turnPrefixRequest.message] : [],
+    isSplitTurn: turnPrefixRequest !== undefined,
     previousSummary: previousSummary ? undefined : preparation.previousSummary,
   };
   assertSelectedInputFitsModel(selected, model, customInstructions);

@@ -207,13 +207,57 @@ test("prefix-only selection explicitly carries the previous summary through nati
 
   const result = await summarizeWithPiNativeCompact(
     ctx,
-    summaryOptions({ selectedUnits: [unit(0, "selected turn prefix", "turn-prefix")] }),
+    summaryOptions({
+      selectedUnits: [unit(0, "selected turn prefix", "turn-prefix")],
+      customInstructions: undefined,
+    }),
   );
   assert.equal(prompts.length, 2);
   assert.match(prompts[0] ?? "", /Earlier compressed work/u);
   assert.match(prompts[1] ?? "", /selected turn prefix/u);
   assert.match(result.text, /preserved prior summary/u);
   assert.match(result.text, /selected prefix summary/u);
+});
+
+test("prefix-only custom instructions apply to selected context on initial compaction", async () => {
+  const prompts: string[] = [];
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return { ok: true };
+      },
+      getProvider: () =>
+        provider((requestModel, context) => {
+          prompts.push(JSON.stringify(context.messages));
+          const stream = createAssistantMessageEventStream();
+          stream.end({
+            role: "assistant",
+            content: [{ type: "text", text: "instruction-aware prefix summary" }],
+            api: requestModel.api,
+            provider: requestModel.provider,
+            model: requestModel.id,
+            usage,
+            stopReason: "stop",
+            timestamp: 1,
+          });
+          return stream;
+        }),
+    },
+  });
+
+  const result = await summarizeWithPiNativeCompact(
+    ctx,
+    summaryOptions({
+      selectedUnits: [unit(0, "selected initial prefix", "turn-prefix")],
+      preparation: { ...preparation(), previousSummary: undefined },
+      customInstructions: "Focus on unresolved parser work",
+    }),
+  );
+
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? "", /selected initial prefix/u);
+  assert.match(prompts[0] ?? "", /Focus on unresolved parser work/u);
+  assert.match(result.text, /instruction-aware prefix summary/u);
 });
 
 test("empty selections without custom instructions reuse the prior summary", async () => {

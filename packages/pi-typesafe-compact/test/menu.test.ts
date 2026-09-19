@@ -9,7 +9,12 @@ import type { TypeSafeCompactSettingsRuntime, TypeSafeCompactSettingsState } fro
 function memoryRuntime(
   initial: Partial<TypeSafeCompactSettingsState> = {},
   saveError?: (value: string) => Error,
-): TypeSafeCompactSettingsRuntime & { saved: string[]; removals: number } {
+  beforeSave?: (value: string, signal?: AbortSignal) => Promise<void>,
+): TypeSafeCompactSettingsRuntime & {
+  saved: string[];
+  removals: number;
+  mutationSignals: Array<AbortSignal | undefined>;
+} {
   let state: TypeSafeCompactSettingsState = {
     kind: "loaded",
     path: "/agent/pi-typesafe-compact.json",
@@ -20,11 +25,14 @@ function memoryRuntime(
   const runtime = {
     saved: [] as string[],
     removals: 0,
+    mutationSignals: [] as Array<AbortSignal | undefined>,
     get: () => structuredClone(state),
     async reload() {
       return structuredClone(state);
     },
-    async setApiKey(apiKey: string) {
+    async setApiKey(apiKey: string, signal?: AbortSignal) {
+      runtime.mutationSignals.push(signal);
+      await beforeSave?.(apiKey, signal);
       const failure = saveError?.(apiKey);
       if (failure) throw failure;
       runtime.saved.push(apiKey);
@@ -36,7 +44,8 @@ function memoryRuntime(
       };
       return structuredClone(state);
     },
-    async removeApiKey() {
+    async removeApiKey(signal?: AbortSignal) {
+      runtime.mutationSignals.push(signal);
       runtime.removals += 1;
       const document = { ...(state.document ?? {}) };
       delete document.apiKey;
@@ -118,11 +127,50 @@ test("TUI saves pasted secrets through masked input with remapped keys and narro
   await running;
 
   assert.deepEqual(runtime.saved, [secret]);
+  assert.deepEqual(runtime.mutationSignals, [undefined]);
   assert.equal(runtime.get().settings.apiKey, secret);
   assert.doesNotMatch(JSON.stringify(notifications), new RegExp(secret, "u"));
   assert.equal(JSON.stringify(notifications).includes("\u001b"), false);
   assert.equal(JSON.stringify(notifications).includes("\u202e"), false);
   assert.match(notifications.at(-1)?.message ?? "", /saved to/u);
+});
+
+test("a submitted save finishes after UI ownership becomes stale", async () => {
+  let markSaveStarted = () => {};
+  const saveStarted = new Promise<void>((resolve) => {
+    markSaveStarted = resolve;
+  });
+  let releaseSave = () => {};
+  const saveGate = new Promise<void>((resolve) => {
+    releaseSave = resolve;
+  });
+  const runtime = memoryRuntime({}, undefined, async () => {
+    markSaveStarted();
+    await saveGate;
+  });
+  const tui = createTuiHarness({ keybindings: remappedKeybindings() });
+  const { ctx, notifications } = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
+  const controller = new AbortController();
+  const running = showTypeSafeCompactMenu(runtime, ctx, {
+    signal: controller.signal,
+    isCurrent: () => !controller.signal.aborted,
+  });
+
+  await openSecretInput(tui, running);
+  tui.type("durable-secret");
+  tui.send("s");
+  await saveStarted;
+  controller.abort();
+  releaseSave();
+  await running;
+
+  assert.deepEqual(runtime.saved, ["durable-secret"]);
+  assert.deepEqual(runtime.mutationSignals, [undefined]);
+  assert.equal(runtime.get().settings.apiKey, "durable-secret");
+  assert.equal(
+    notifications.some(({ message }) => message.includes("saved to")),
+    false,
+  );
 });
 
 test("failed saves preserve state and redact the submitted key from errors", async () => {
@@ -200,6 +248,7 @@ test("confirmed removal clears the key", async () => {
   tui.send("c");
   await running;
   assert.equal(runtime.removals, 1);
+  assert.deepEqual(runtime.mutationSignals, [undefined]);
   assert.equal(runtime.get().settings.apiKey, undefined);
 });
 

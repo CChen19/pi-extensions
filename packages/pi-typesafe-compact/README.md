@@ -34,6 +34,7 @@ Try a local checkout from the repository root:
 
 ```bash
 npm install
+npm run build --workspace @narumitw/pi-tui-kit
 pi -e ./packages/pi-typesafe-compact
 ```
 
