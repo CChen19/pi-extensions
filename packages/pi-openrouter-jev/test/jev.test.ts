@@ -364,6 +364,14 @@ test("response validation covers answer identity, ranges, distributions, and sel
       /requested options/,
     ],
     [
+      "choice contradicts probabilities",
+      (response) => {
+        const answer = response.answers.department;
+        if (answer?.type === "choice") answer.choice = "technical";
+      },
+      /highest-probability option/,
+    ],
+    [
       "missing probability",
       (response) => {
         const answer = response.answers.department;
@@ -418,6 +426,16 @@ test("response validation covers answer identity, ranges, distributions, and sel
     mutate(response);
     assert.throws(() => normalizeJevResponse(response, decisionInput), pattern, name);
   }
+});
+
+test("choice validation permits any option tied for highest probability", () => {
+  const response = structuredClone(decisionResponse);
+  const answer = response.answers.department;
+  assert.equal(answer?.type, "choice");
+  answer.choice = "technical";
+  answer.probabilities = { billing: 0.48, technical: 0.48, sales: 0.04 };
+
+  assert.deepEqual(normalizeJevResponse(response, decisionInput), response);
 });
 
 test("score legends compare structured criteria independent of object key order", () => {

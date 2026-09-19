@@ -145,10 +145,15 @@ function normalizeChoiceAnswer(answer: Record<string, unknown>, question: Choice
   if (typeof answer.choice !== "string" || !Object.hasOwn(question.criteria, answer.choice)) {
     throw new Error(`${path}.choice must name one of the requested options`);
   }
+  const probabilities = normalizeProbabilities(answer.probabilities, Object.keys(question.criteria), path);
+  const selectedProbability = probabilities[answer.choice] ?? 0;
+  if (Object.values(probabilities).some((probability) => probability > selectedProbability)) {
+    throw new Error(`${path}.choice must name a highest-probability option`);
+  }
   return {
     type: "choice",
     choice: answer.choice,
-    probabilities: normalizeProbabilities(answer.probabilities, Object.keys(question.criteria), path),
+    probabilities,
     confidence: requireProbability(answer.confidence, `${path}.confidence`),
   };
 }
