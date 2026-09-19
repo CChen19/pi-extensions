@@ -31,7 +31,7 @@ test("uses disabled defaults without creating a missing settings path", async ()
   await assert.rejects(stat(fixture.agentDirectory), { code: "ENOENT" });
 });
 
-test("loads the explicit OpenRouter fallback setting and ignores unknown fields", async () => {
+test("loads only an own OpenRouter fallback setting and ignores unknown fields", async () => {
   const fixture = await settingsFixture();
   await mkdir(fixture.agentDirectory, { recursive: true });
   await writeFile(fixture.path, '{"openRouterFallback":true,"futureOption":"preserved"}\n');
@@ -41,9 +41,27 @@ test("loads the explicit OpenRouter fallback setting and ignores unknown fields"
   });
 
   await writeFile(fixture.path, '{"futureOption":"preserved"}\n');
-  assert.deepEqual(await loadSettings(fixture.path), {
-    settings: { openRouterFallback: false },
+  Object.defineProperty(Object.prototype, "openRouterFallback", {
+    configurable: true,
+    value: true,
   });
+  try {
+    assert.deepEqual(await loadSettings(fixture.path), {
+      settings: { openRouterFallback: false },
+    });
+  } finally {
+    delete (Object.prototype as Record<string, unknown>).openRouterFallback;
+  }
+});
+
+test("reports the path and underlying settings read error", async () => {
+  const fixture = await settingsFixture();
+  await mkdir(fixture.path, { recursive: true });
+
+  const loaded = await loadSettings(fixture.path);
+  assert.deepEqual(loaded.settings, { openRouterFallback: false });
+  assert.ok(loaded.warning?.includes(fixture.path));
+  assert.match(loaded.warning ?? "", /EISDIR|directory/iu);
 });
 
 test("rejects malformed and invalid settings without changing the file", async () => {
@@ -116,4 +134,17 @@ test("reloads the settings on session start and warns about invalid settings", a
   await mock.events.get("session_start")?.[0]?.({ reason: "reload" }, context.ctx);
   assert.match(context.notifications.at(-1)?.message ?? "", /using defaults/);
   assert.equal(context.notifications.at(-1)?.level, "warning");
+
+  const unsafeDirectory = join(fixture.agentDirectory, "\u001b]0;owned\u0007agent");
+  const unsafePath = join(unsafeDirectory, "pi-typesafe.json");
+  await mkdir(unsafeDirectory, { recursive: true });
+  await writeFile(unsafePath, "{ invalid\n");
+  const unsafeContext = createMockContext();
+  const unsafeMock = createMockPi();
+  jevExtension(unsafeMock.pi, { settingsPath: unsafePath });
+  await unsafeMock.events.get("session_start")?.[0]?.({ reason: "startup" }, unsafeContext.ctx);
+  const warning = unsafeContext.notifications.at(-1)?.message ?? "";
+  assert.equal(warning.includes("\u001b"), false);
+  assert.equal(warning.includes("\u0007"), false);
+  assert.equal(warning.includes("owned"), false);
 });

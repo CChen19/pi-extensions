@@ -119,7 +119,7 @@ export default function jevExtension(pi: ExtensionAPI, options: JevExtensionOpti
     const loaded = await loadSettings(path);
     if (currentGeneration !== generation) return;
     settings = applyRuntimeSettings(loaded.settings, runtimeSettings);
-    if (loaded.warning) ctx.ui.notify(loaded.warning, "warning");
+    if (loaded.warning) ctx.ui.notify(formatJevToolError(loaded.warning).message, "warning");
   });
   pi.on("session_shutdown", () => {
     generation += 1;
@@ -130,9 +130,11 @@ function applyRuntimeSettings(
   settings: Readonly<TypeSafeSettings>,
   override: Partial<TypeSafeSettings> | undefined,
 ): TypeSafeSettings {
-  return {
-    openRouterFallback: override?.openRouterFallback ?? settings.openRouterFallback,
-  };
+  const openRouterFallback =
+    override && Object.hasOwn(override, "openRouterFallback") && typeof override.openRouterFallback === "boolean"
+      ? override.openRouterFallback
+      : settings.openRouterFallback;
+  return { openRouterFallback };
 }
 
 export type { JevProvider } from "./client.js";

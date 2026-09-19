@@ -29,22 +29,25 @@ export async function loadSettings(path = settingsFilePath()): Promise<LoadedTyp
     if (isNodeError(error) && error.code === "ENOENT") {
       return { settings: { ...DEFAULT_TYPESAFE_SETTINGS } };
     }
-    return invalidSettings("could not be read");
+    return invalidSettings(path, `could not be read: ${formatError(error)}`);
   }
 
   let document: unknown;
   try {
     document = JSON.parse(text) as unknown;
   } catch {
-    return invalidSettings("must contain valid JSON");
+    return invalidSettings(path, "must contain valid JSON");
   }
   if (!document || typeof document !== "object" || Array.isArray(document)) {
-    return invalidSettings("must be a JSON object");
+    return invalidSettings(path, "must be a JSON object");
   }
 
-  const openRouterFallback = (document as Record<string, unknown>).openRouterFallback;
+  const settingsDocument = document as Record<string, unknown>;
+  const openRouterFallback = Object.hasOwn(settingsDocument, "openRouterFallback")
+    ? settingsDocument.openRouterFallback
+    : undefined;
   if (openRouterFallback !== undefined && typeof openRouterFallback !== "boolean") {
-    return invalidSettings('field "openRouterFallback" must be a boolean');
+    return invalidSettings(path, 'field "openRouterFallback" must be a boolean');
   }
 
   return {
@@ -54,11 +57,15 @@ export async function loadSettings(path = settingsFilePath()): Promise<LoadedTyp
   };
 }
 
-function invalidSettings(reason: string): LoadedTypeSafeSettings {
+function invalidSettings(path: string, reason: string): LoadedTypeSafeSettings {
   return {
     settings: { ...DEFAULT_TYPESAFE_SETTINGS },
-    warning: `pi-typesafe settings ${reason}; using defaults without changing ${SETTINGS_FILE_NAME}.`,
+    warning: `pi-typesafe settings at ${path} ${reason}; using defaults without changing ${SETTINGS_FILE_NAME}.`,
   };
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
