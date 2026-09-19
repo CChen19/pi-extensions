@@ -1,5 +1,11 @@
 # @narumitw/pi-typesafe
 
+## 0.1.1
+
+### Patch Changes
+
+- afec31b: Use the official TypeSafe JavaScript SDK for direct TypeSafe requests while retaining the opt-in OpenRouter transport, strict response validation, bounded I/O, cancellation, and disabled automatic retries.
+
 ## 0.1.0
 
 ### Minor Changes
