@@ -62,6 +62,31 @@ test("search roots remain inside the canonical workspace", async () => {
   });
 });
 
+test("discovery excludes the Pi agent directory and extension settings", async () => {
+  await withWorkspace(async (workspace) => {
+    const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+    const agentDirectory = path.join(workspace, ".pi-agent");
+    process.env.PI_CODING_AGENT_DIR = agentDirectory;
+    try {
+      await mkdir(agentDirectory);
+      await writeFile(path.join(agentDirectory, "pi-typesafe-search.json"), '{"apiKey":"secret"}\n');
+      await writeFile(path.join(agentDirectory, "session.jsonl"), "private session\n");
+      await writeFile(path.join(workspace, "visible.txt"), "public source\n");
+
+      const discovery = await discoverSearchFiles(workspace, ".");
+      assert.deepEqual(
+        discovery.files.map((file) => file.path),
+        ["visible.txt"],
+      );
+      assert.equal(discovery.skippedDirectories, 1);
+      await assert.rejects(discoverSearchFiles(workspace, ".pi-agent"), /must not select the Pi agent directory/);
+    } finally {
+      if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+    }
+  });
+});
+
 test("safe loading decodes UTF-8, rejects unsupported or changed data, and honors cancellation", async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(path.join(workspace, "text.txt"), "alpha\r\nbeta\r\n");
@@ -85,6 +110,23 @@ test("safe loading decodes UTF-8, rejects unsupported or changed data, and honor
 
     await writeFile(path.join(workspace, "text.txt"), "changed size after discovery\n");
     await assert.rejects(loadTextFile(text, discovery.root), /changed size/);
+
+    if (process.platform !== "win32") {
+      await mkdir(path.join(workspace, "nested"));
+      await writeFile(path.join(workspace, "nested", "source.txt"), "inside source\n");
+      const nestedDiscovery = await discoverSearchFiles(workspace, "nested");
+      const nestedFile = nestedDiscovery.files[0];
+      assert.ok(nestedFile);
+      const outside = await mkdtemp(path.join(os.tmpdir(), "pi-jev-swap-"));
+      try {
+        await writeFile(path.join(outside, "source.txt"), "outside source\n");
+        await rm(path.join(workspace, "nested"), { recursive: true });
+        await symlink(outside, path.join(workspace, "nested"));
+        await assert.rejects(loadTextFile(nestedFile, nestedDiscovery.root), /changed path identity|escaped/);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    }
 
     const controller = new AbortController();
     controller.abort();
@@ -117,6 +159,7 @@ test("sensitive filename policy covers common credential material", () => {
     "id_rsa",
     "secrets.json",
     "token.secret",
+    "pi-typesafe-search.json",
   ]) {
     assert.equal(isSensitiveFileName(name), true, name);
   }

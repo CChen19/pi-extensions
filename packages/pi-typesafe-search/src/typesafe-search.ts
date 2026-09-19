@@ -78,7 +78,7 @@ export default function registerJevSearch(pi: ExtensionAPI): void {
           const discovery = await discoverSearchFiles(ctx.cwd, path, operationSignal);
           operationSignal.throwIfAborted();
           if (state.closed) throw new Error("jev_search session ended during file discovery");
-          const database = await sessionDatabase(state, discovery.root);
+          const database = await sessionDatabase(state, discovery.root, operationSignal);
           operationSignal.throwIfAborted();
           if (state.closed) throw new Error("jev_search session ended while opening its search index");
 
@@ -173,22 +173,45 @@ async function sessionState(ctx: ExtensionContext): Promise<SessionState> {
   return state;
 }
 
-async function sessionDatabase(state: SessionState, root: string): Promise<SearchDatabase> {
-  const existing = state.databases.get(root);
-  if (existing) return existing;
-  const pending = openSearchDatabase(root);
-  state.databases.set(root, pending);
-  try {
-    const database = await pending;
-    if (state.closed) {
-      database.close();
-      throw new Error("jev_search session ended while opening its search index");
-    }
-    return database;
-  } catch (error) {
-    if (state.databases.get(root) === pending) state.databases.delete(root);
-    throw error;
+async function sessionDatabase(state: SessionState, root: string, signal: AbortSignal): Promise<SearchDatabase> {
+  let pending = state.databases.get(root);
+  if (!pending) {
+    pending = openSearchDatabase(root, undefined, state.abortController.signal).then((database) => {
+      if (state.closed) {
+        database.close();
+        throw new Error("jev_search session ended while opening its search index");
+      }
+      return database;
+    });
+    state.databases.set(root, pending);
+    void pending.catch(() => {
+      if (state.databases.get(root) === pending) state.databases.delete(root);
+    });
   }
+  const database = await waitForPromise(pending, signal);
+  if (state.closed) throw new Error("jev_search session ended while opening its search index");
+  return database;
+}
+
+function waitForPromise<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function orderedAlternatives(query: string, alternatives: readonly string[]): string[] {

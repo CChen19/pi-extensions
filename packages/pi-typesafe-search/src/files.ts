@@ -1,7 +1,8 @@
 import { constants, type Dirent } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { MAX_CORPUS_BYTES, MAX_FILE_BYTES, MAX_FILES } from "./constants.js";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { MAX_CORPUS_BYTES, MAX_FILE_BYTES, MAX_FILES, SETTINGS_FILE_NAME } from "./constants.js";
 
 const IGNORED_DIRECTORIES = new Set([
   ".git",
@@ -34,6 +35,7 @@ const SENSITIVE_BASENAMES = new Set([
   "id_rsa",
   "secrets.json",
   "service-account.json",
+  SETTINGS_FILE_NAME,
 ]);
 const SENSITIVE_EXTENSIONS = new Set([".key", ".p12", ".pem", ".pfx"]);
 
@@ -89,6 +91,11 @@ export async function discoverSearchFiles(
   const canonicalCwd = await realpath(cwd);
   signal?.throwIfAborted();
   const workspacePrefix = toPosix(relative(canonicalCwd, root));
+  const agentDirectory = await canonicalAgentDirectory();
+  signal?.throwIfAborted();
+  if (agentDirectory && isInside(agentDirectory, root)) {
+    throw new Error("jev_search path must not select the Pi agent directory");
+  }
   const files: DiscoveredFile[] = [];
   const directories = [root];
   let skippedDirectories = 0;
@@ -100,8 +107,20 @@ export async function discoverSearchFiles(
     const directory = directories[directoryIndex];
     if (!directory) break;
     let entries: Dirent<string>[];
+    let before: Awaited<ReturnType<typeof lstat>>;
     try {
+      const canonicalDirectory = await realpath(directory);
+      signal?.throwIfAborted();
+      if (canonicalDirectory !== directory || !isInside(root, canonicalDirectory)) {
+        throw new Error("directory identity changed or escaped the search root");
+      }
+      before = await lstat(directory, { bigint: true });
+      if (!before.isDirectory() || before.isSymbolicLink()) throw new Error("directory is not safe to traverse");
       entries = await readdir(directory, { withFileTypes: true });
+      const after = await lstat(directory, { bigint: true });
+      if (!after.isDirectory() || after.dev !== before.dev || after.ino !== before.ino) {
+        throw new Error("directory identity changed while it was read");
+      }
     } catch (error: unknown) {
       if (directory === root) throw new Error(`Cannot read search directory: ${formatError(error)}`);
       skippedDirectories += 1;
@@ -129,7 +148,7 @@ export async function discoverSearchFiles(
         continue;
       }
       if (stats.isDirectory()) {
-        if (IGNORED_DIRECTORIES.has(entry.name)) {
+        if (IGNORED_DIRECTORIES.has(entry.name) || (agentDirectory && isInside(agentDirectory, absolutePath))) {
           skippedDirectories += 1;
           continue;
         }
@@ -186,6 +205,19 @@ export async function loadTextFile(file: DiscoveredFile, root: string, signal?: 
     const stats = await handle.stat({ bigint: true });
     signal?.throwIfAborted();
     if (!stats.isFile()) throw new Error(`${file.path} is not a regular file`);
+    const canonicalPath = await realpath(file.absolutePath);
+    signal?.throwIfAborted();
+    const pathStats = await lstat(file.absolutePath, { bigint: true });
+    if (
+      canonicalPath !== file.absolutePath ||
+      !isInside(root, canonicalPath) ||
+      !pathStats.isFile() ||
+      pathStats.isSymbolicLink() ||
+      pathStats.dev !== stats.dev ||
+      pathStats.ino !== stats.ino
+    ) {
+      throw new Error(`${file.path} changed path identity while it was being opened`);
+    }
     if (stats.dev.toString() !== file.dev || stats.ino.toString() !== file.ino) {
       throw new Error(`${file.path} changed identity while it was being opened`);
     }
@@ -217,6 +249,15 @@ export async function loadTextFile(file: DiscoveredFile, root: string, signal?: 
   }
 }
 
+async function canonicalAgentDirectory(): Promise<string | undefined> {
+  try {
+    return await realpath(getAgentDir());
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 export function isSensitiveFileName(name: string): boolean {
   const lower = name.toLowerCase();
   if (lower === ".env" || lower.startsWith(".env.")) return true;
@@ -233,6 +274,10 @@ function isInside(root: string, candidate: string): boolean {
 
 function toPosix(path: string): string {
   return path.split(sep).join("/");
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function formatError(error: unknown): string {

@@ -174,3 +174,22 @@ test("overlap merging preserves every segment from a split long line", () => {
   assert.equal(merged.length, 1);
   assert.equal(merged[0]?.body, source);
 });
+
+test("overlap merging preserves long-line continuations that share a chunk with the next line", () => {
+  const longLine = "a".repeat(CHUNK_MAX_BYTES * 2 + 100);
+  const source = `${longLine}\ntail`;
+  const chunks = chunkTextFile("mixed.txt", [longLine, "tail"]).chunks;
+  assert.ok(chunks.some((chunk) => chunk.startLine === 1 && chunk.endLine === 2));
+  const matches: SearchMatch[] = chunks.map((chunk, index) => ({
+    ...chunk,
+    id: index + 1,
+    filePath: "mixed.txt",
+    rrfScore: 1,
+    sources: [],
+    relevance: 0.9 - index / 100,
+  }));
+
+  const merged = mergeOverlappingMatches(matches);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.body, source);
+});

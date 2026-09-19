@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -81,6 +81,42 @@ test("concurrent first opens serialize initialization and leave no lock artifact
     await assert.rejects(lstat(`${databasePathForRoot(root, agentDirectory)}.lock`), (error: unknown) =>
       Boolean(error instanceof Error && "code" in error && error.code === "ENOENT"),
     );
+  });
+});
+
+test("concurrent stale-lock recovery uses one atomic quarantine claim", async () => {
+  if (process.platform === "win32") return;
+  await withTempAgent(async (agentDirectory) => {
+    const root = path.join(agentDirectory, "stale-lock-workspace");
+    const initial = await openSearchDatabase(root, agentDirectory);
+    initial.close();
+    const databasePath = databasePathForRoot(root, agentDirectory);
+    const lockPath = `${databasePath}.lock`;
+    await writeFile(lockPath, `99999999:dead-owner\n${Date.now()}\n`, { mode: 0o600 });
+
+    const databases = await Promise.all(Array.from({ length: 12 }, () => openSearchDatabase(root, agentDirectory)));
+    for (const database of databases) database.close();
+    const quarantines = (await readdir(path.dirname(databasePath))).filter((name) =>
+      name.startsWith(`${path.basename(databasePath)}.lock.stale-`),
+    );
+    assert.equal(quarantines.length, 1);
+    await assert.rejects(lstat(lockPath), (error: unknown) =>
+      Boolean(error instanceof Error && "code" in error && error.code === "ENOENT"),
+    );
+  });
+});
+
+test("database lock waits honor cancellation", async () => {
+  await withTempAgent(async (agentDirectory) => {
+    const root = path.join(agentDirectory, "cancel-lock-workspace");
+    const initial = await openSearchDatabase(root, agentDirectory);
+    initial.close();
+    const lockPath = `${databasePathForRoot(root, agentDirectory)}.lock`;
+    await writeFile(lockPath, `${process.pid}:live-owner\n${Date.now()}\n`, { mode: 0o600 });
+    const controller = new AbortController();
+    const pending = openSearchDatabase(root, agentDirectory, controller.signal);
+    setTimeout(() => controller.abort(), 10);
+    await assert.rejects(pending, (error: unknown) => Boolean(error instanceof Error && error.name === "AbortError"));
   });
 });
 

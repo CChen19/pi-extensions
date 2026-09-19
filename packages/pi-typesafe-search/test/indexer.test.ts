@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { openSearchDatabase } from "../src/database.js";
 import { discoverSearchFiles } from "../src/files.js";
 import { refreshIndex } from "../src/indexer.js";
@@ -67,6 +67,24 @@ test("renamed and newly excluded files replace stale index rows", async () => {
     const excluded = await refreshIndex(database, await discoverSearchFiles(workspace, "."));
     assert.equal(excluded.removed, 1);
     assert.deepEqual(database.listFiles(), []);
+    database.close();
+  });
+});
+
+test("database mutation failures abort refresh instead of looking like skipped source files", async () => {
+  await withFixture(async (workspace, agentDirectory) => {
+    await writeFile(path.join(workspace, "source.txt"), "searchable source\n");
+    const database = await openSearchDatabase(workspace, agentDirectory);
+    const failure = vi.spyOn(database, "replaceFile").mockImplementation(() => {
+      throw new Error("simulated database write failure");
+    });
+
+    await assert.rejects(
+      refreshIndex(database, await discoverSearchFiles(workspace, ".")),
+      /simulated database write failure/,
+    );
+    assert.equal(database.listFiles().length, 0);
+    failure.mockRestore();
     database.close();
   });
 });

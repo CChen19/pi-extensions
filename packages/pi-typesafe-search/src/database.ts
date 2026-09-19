@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open as openFile, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
@@ -55,14 +55,20 @@ export function databasePathForRoot(root: string, agentDirectory = getAgentDir()
   return join(agentDirectory, "pi-typesafe-search", "indexes", `${digest}.sqlite`);
 }
 
-export async function openSearchDatabase(root: string, agentDirectory = getAgentDir()): Promise<SearchDatabase> {
+export async function openSearchDatabase(
+  root: string,
+  agentDirectory = getAgentDir(),
+  signal?: AbortSignal,
+): Promise<SearchDatabase> {
+  signal?.throwIfAborted();
   const path = databasePathForRoot(root, agentDirectory);
   await ensurePrivateIndexDirectory(agentDirectory);
-  const release = await acquireDatabaseLock(path);
+  signal?.throwIfAborted();
+  const release = await acquireDatabaseLock(path, signal);
   let database: SearchDatabase | undefined;
   let openError: unknown;
   try {
-    database = await openSearchDatabaseLocked(path, root);
+    database = await openSearchDatabaseLocked(path, root, signal);
   } catch (error) {
     openError = error;
   }
@@ -79,13 +85,16 @@ export async function openSearchDatabase(root: string, agentDirectory = getAgent
   return database;
 }
 
-async function openSearchDatabaseLocked(path: string, root: string): Promise<SearchDatabase> {
+async function openSearchDatabaseLocked(path: string, root: string, signal?: AbortSignal): Promise<SearchDatabase> {
+  signal?.throwIfAborted();
   const state = await databasePathState(path);
+  signal?.throwIfAborted();
   if (state === "unsafe") throw new Error(`Search index path is not a private regular file: ${path}`);
   if (state === "missing") {
     const database = createDatabase(path, root);
     try {
       await secureDatabaseArtifacts(path);
+      signal?.throwIfAborted();
       return database;
     } catch (error) {
       database.close();
@@ -102,10 +111,12 @@ async function openSearchDatabaseLocked(path: string, root: string): Promise<Sea
     await rebuildDatabase(path, root).catch((rebuildError: unknown) => {
       throw new Error(`Cannot recover search index (${formatError(error)}): ${formatError(rebuildError)}`);
     });
+    signal?.throwIfAborted();
     existing = openValidatedDatabase(path, root);
   }
   try {
     await secureDatabaseArtifacts(path);
+    signal?.throwIfAborted();
     return existing;
   } catch (error) {
     existing.close();
@@ -441,57 +452,76 @@ async function rebuildDatabase(path: string, root: string): Promise<void> {
   }
 }
 
-async function acquireDatabaseLock(path: string): Promise<() => Promise<void>> {
+async function acquireDatabaseLock(path: string, signal?: AbortSignal): Promise<() => Promise<void>> {
   const lockPath = `${path}.lock`;
   const owner = `${process.pid}:${randomUUID()}`;
   const deadline = Date.now() + DATABASE_LOCK_WAIT_MS;
   while (true) {
+    signal?.throwIfAborted();
     try {
-      await mkdir(lockPath, { mode: DATABASE_DIRECTORY_MODE });
+      const handle = await openFile(lockPath, "wx", DATABASE_FILE_MODE);
       try {
-        await writeFile(join(lockPath, "owner"), `${owner}\n${Date.now()}\n`, {
-          encoding: "utf8",
-          flag: "wx",
-          mode: DATABASE_FILE_MODE,
-        });
+        await handle.writeFile(`${owner}\n${Date.now()}\n`, "utf8");
       } catch (error) {
-        await rm(lockPath, { recursive: true, force: true });
+        await handle.close();
+        await unlink(lockPath).catch(() => undefined);
         throw error;
       }
+      await handle.close();
       let released = false;
       return async () => {
         if (released) return;
         released = true;
-        const currentOwner = await readFile(join(lockPath, "owner"), "utf8").catch(() => "");
-        if (currentOwner.startsWith(`${owner}\n`)) await rm(lockPath, { recursive: true, force: true });
+        const currentOwner = await readFile(lockPath, "utf8").catch(() => "");
+        if (currentOwner.startsWith(`${owner}\n`)) await unlink(lockPath);
       };
     } catch (error: unknown) {
       if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-      if (await isStaleDatabaseLock(lockPath)) {
-        await rm(lockPath, { recursive: true, force: true });
+      const staleClaimPath = await staleDatabaseLockClaim(lockPath);
+      signal?.throwIfAborted();
+      if (staleClaimPath) {
+        try {
+          await link(lockPath, staleClaimPath);
+          const [current, claimed] = await Promise.all([lstat(lockPath), lstat(staleClaimPath)]);
+          if (current.dev === claimed.dev && current.ino === claimed.ino) await unlink(lockPath);
+        } catch (claimError: unknown) {
+          if (!isLockClaimRace(claimError)) throw claimError;
+        }
         continue;
       }
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for search index initialization: ${path}`);
-      await delay(DATABASE_LOCK_RETRY_MS);
+      await delay(DATABASE_LOCK_RETRY_MS, undefined, signal ? { signal } : undefined);
     }
   }
 }
 
-async function isStaleDatabaseLock(lockPath: string): Promise<boolean> {
+async function staleDatabaseLockClaim(lockPath: string): Promise<string | undefined> {
   let stats: Awaited<ReturnType<typeof lstat>>;
   try {
     stats = await lstat(lockPath);
   } catch (error: unknown) {
-    if (isNodeError(error) && error.code === "ENOENT") return false;
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
     throw error;
   }
-  if (!stats.isDirectory() || stats.isSymbolicLink()) {
-    throw new Error(`Search index lock is not a private regular directory: ${lockPath}`);
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw new Error(`Search index lock is not a private regular file: ${lockPath}`);
   }
-  const owner = await readFile(join(lockPath, "owner"), "utf8").catch(() => "");
+  const owner = await readFile(lockPath, "utf8").catch(() => "");
   const pid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
-  if (Number.isSafeInteger(pid) && pid > 0) return !isProcessAlive(pid);
-  return Date.now() - stats.mtimeMs >= INCOMPLETE_LOCK_STALE_MS;
+  const stale =
+    Number.isSafeInteger(pid) && pid > 0
+      ? !isProcessAlive(pid)
+      : Date.now() - stats.mtimeMs >= INCOMPLETE_LOCK_STALE_MS;
+  if (!stale) return undefined;
+  const identity = createHash("sha256")
+    .update(`${stats.dev}:${stats.ino}:${stats.mtimeMs}:${owner}`, "utf8")
+    .digest("hex")
+    .slice(0, 24);
+  return `${lockPath}.stale-${identity}`;
+}
+
+function isLockClaimRace(error: unknown): boolean {
+  return isNodeError(error) && (error.code === "ENOENT" || error.code === "EEXIST");
 }
 
 function isProcessAlive(pid: number): boolean {

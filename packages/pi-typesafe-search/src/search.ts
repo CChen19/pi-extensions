@@ -198,14 +198,10 @@ function mergeMatchComponent(component: readonly SearchMatch[]): SearchMatch {
   const positioned = [...component].sort((left, right) => left.sequence - right.sequence);
   let body = positioned[0]?.body ?? "";
   let coveredEnd = positioned[0]?.endLine ?? primary.endLine;
-  const sameLongLine = positioned.every(
-    (candidate) =>
-      candidate.startLine === candidate.endLine &&
-      candidate.startLine === positioned[0]?.startLine &&
-      candidate.endLine === positioned[0]?.endLine,
-  );
+  let previous = positioned[0] ?? primary;
   for (const match of positioned.slice(1)) {
-    if (sameLongLine) {
+    const continuesSplitLine = previous.startLine === previous.endLine && previous.endLine === match.startLine;
+    if (continuesSplitLine) {
       body += match.body;
     } else {
       const overlapLines = Math.max(0, coveredEnd - match.startLine + 1);
@@ -215,6 +211,7 @@ function mergeMatchComponent(component: readonly SearchMatch[]): SearchMatch {
       }
     }
     coveredEnd = Math.max(coveredEnd, match.endLine);
+    previous = match;
   }
 
   const lexicalRank = Math.min(...component.map((match) => match.lexicalRank ?? Number.POSITIVE_INFINITY));

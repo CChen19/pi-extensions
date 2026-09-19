@@ -58,25 +58,9 @@ async function refreshIndexNow(
       continue;
     }
 
+    let loaded: Awaited<ReturnType<typeof loadTextFile>>;
     try {
-      const loaded = await loadTextFile(file, discovery.root, signal);
-      signal?.throwIfAborted();
-      const chunked = chunkTextFile(file.path, loaded.lines);
-      const hash = createHash("sha256").update(loaded.text, "utf8").digest("hex");
-      database.replaceFile(
-        {
-          path: file.path,
-          dev: file.dev,
-          ino: file.ino,
-          size: file.size,
-          mtimeNs: file.mtimeNs,
-          hash,
-          title: chunked.title,
-          outline: chunked.outline,
-        },
-        chunked.chunks,
-      );
-      indexed += 1;
+      loaded = await loadTextFile(file, discovery.root, signal);
     } catch (error: unknown) {
       if (signal?.aborted || isAbortError(error)) throw error;
       if (error instanceof UnsupportedSearchFileError) {
@@ -85,7 +69,26 @@ async function refreshIndexNow(
         unavailablePaths.push(file.path);
       }
       skipped += 1;
+      continue;
     }
+
+    signal?.throwIfAborted();
+    const chunked = chunkTextFile(file.path, loaded.lines);
+    const hash = createHash("sha256").update(loaded.text, "utf8").digest("hex");
+    database.replaceFile(
+      {
+        path: file.path,
+        dev: file.dev,
+        ino: file.ino,
+        size: file.size,
+        mtimeNs: file.mtimeNs,
+        hash,
+        title: chunked.title,
+        outline: chunked.outline,
+      },
+      chunked.chunks,
+    );
+    indexed += 1;
   }
 
   signal?.throwIfAborted();

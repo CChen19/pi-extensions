@@ -137,7 +137,8 @@ Settings reload on `session_start`, including `/reload` and session replacement.
 
 - Search roots must resolve inside the active workspace; symlinks are not followed.
 - `.git`, dependency, build, coverage, virtual-environment, and similar generated directories are skipped.
-- `.env*`, private-key formats, common credential files, and `*.secret`/`*.secrets` are excluded by filename.
+- `.env*`, private-key formats, common credential files, `pi-typesafe-search.json`, and `*.secret`/`*.secrets` are excluded by filename.
+- The canonical Pi agent directory is skipped when it is located inside the workspace and cannot be selected as a search root.
 - Binary, invalid UTF-8, non-regular, oversized, and unreadable files are not indexed.
 - Indexed source chunks remain on the local machine in private per-workspace SQLite databases.
 - TypeSafe receives the query, compact maps for selected files, and shortlisted source chunks.
@@ -157,7 +158,7 @@ Each canonical search root selected inside the workspace receives a separate der
 The database stores file metadata, structural outlines, source chunks, FTS terms, and content hashes.
 It never stores vectors or credentials.
 SQLite WAL mode, transactions, a busy timeout, and per-process mutation ordering protect complete file updates.
-A private cross-process lock serializes database creation and recovery, while SQLite writer locks coordinate ordinary updates from separate Pi processes.
+A private, cancellable cross-process lock serializes database creation and recovery, atomically quarantines stale owners, and leaves ordinary updates to SQLite writer locks.
 
 Schema or chunk-policy changes rebuild a validated replacement before swapping it into place.
 A corrupt derived index is rebuilt automatically when possible.
