@@ -91,7 +91,12 @@ export async function loadJevCompactSettings(
       await handle.close();
     }
     throwIfAborted(signal);
-    const document = JSON.parse(text) as unknown;
+    let document: unknown;
+    try {
+      document = JSON.parse(text) as unknown;
+    } catch {
+      throw new Error("settings file contains malformed JSON");
+    }
     const settings = normalizeJevCompactSettings(document);
     if (!settings || !isRecord(document)) throw new Error("invalid settings shape or API key");
     return { kind: "loaded", path, settings, document, fingerprint: text };
@@ -129,11 +134,15 @@ async function saveApiKeyMutation(
   const settings = normalizeJevCompactSettings(document);
   if (!settings) throw new Error("Refusing to save invalid JEV compaction settings");
 
+  const text = `${JSON.stringify(document, null, 2)}\n`;
+  if (Buffer.byteLength(text, "utf8") > MAX_SETTINGS_BYTES) {
+    throw new Error("Refusing to save settings that exceed 64 KiB");
+  }
+
   const temporaryPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   await mkdir(dirname(path), { recursive: true });
   throwIfAborted(signal);
   try {
-    const text = `${JSON.stringify(document, null, 2)}\n`;
     await writeFile(temporaryPath, text, {
       encoding: "utf8",
       flag: "wx",

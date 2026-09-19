@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "vitest";
@@ -51,11 +51,15 @@ test("saves preserve unknown fields, serialize in request order, and remove only
 test("malformed, invalid, oversized, and symlinked settings remain invalid and unchanged", async () => {
   const malformed = await fixturePath();
   await mkdir(dirname(malformed), { recursive: true });
-  await writeFile(malformed, "{broken", "utf8");
+  const malformedSecret = "super-secret-settings-value";
+  await writeFile(malformed, malformedSecret, "utf8");
   const malformedRuntime = createJevCompactSettingsRuntime(malformed);
-  assert.equal((await malformedRuntime.reload()).kind, "invalid");
+  const malformedState = await malformedRuntime.reload();
+  assert.equal(malformedState.kind, "invalid");
+  assert.match(malformedState.issue ?? "", /malformed JSON/u);
+  assert.doesNotMatch(malformedState.issue ?? "", new RegExp(malformedSecret, "u"));
   await assert.rejects(malformedRuntime.setApiKey("new-secret"), /Cannot overwrite an invalid/u);
-  assert.equal(await readFile(malformed, "utf8"), "{broken");
+  assert.equal(await readFile(malformed, "utf8"), malformedSecret);
 
   const invalid = await fixturePath();
   await mkdir(dirname(invalid), { recursive: true });
@@ -75,6 +79,25 @@ test("malformed, invalid, oversized, and symlinked settings remain invalid and u
   const linked = await loadJevCompactSettings(link);
   assert.equal(linked.kind, "invalid");
   assert.match(linked.issue ?? "", /symbolic links/u);
+});
+
+test("oversized serialized saves preserve the previous file and effective state", async () => {
+  const path = await fixturePath();
+  await mkdir(dirname(path), { recursive: true });
+  const emptyDocumentBytes = Buffer.byteLength(JSON.stringify({ future: "" }), "utf8");
+  const padding = "x".repeat(MAX_SETTINGS_BYTES - emptyDocumentBytes - 1);
+  const original = `${JSON.stringify({ future: padding })}\n`;
+  assert.equal(Buffer.byteLength(original, "utf8"), MAX_SETTINGS_BYTES);
+  await writeFile(path, original, { mode: 0o600 });
+
+  const runtime = createJevCompactSettingsRuntime(path);
+  assert.equal((await runtime.reload()).kind, "loaded");
+  const previousState = runtime.get();
+  await assert.rejects(runtime.setApiKey("new-secret"), /exceed 64 KiB/u);
+
+  assert.equal(await readFile(path, "utf8"), original);
+  assert.deepEqual(runtime.get(), previousState);
+  assert.deepEqual(await readdir(dirname(path)), ["pi-jev-compact.json"]);
 });
 
 test("invalid API keys and aborted writes never replace the previous settings", async () => {
