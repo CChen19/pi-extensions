@@ -171,11 +171,14 @@ test("tool prefers the official TypeSafe API and returns validated JSON", async 
   const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
     assert.equal(input, TYPESAFE_ENDPOINT);
     assert.equal(init?.method, "POST");
-    assert.equal(init?.signal, controller.signal);
-    assert.deepEqual(init?.headers, {
-      Authorization: "Bearer ts-secret",
-      "Content-Type": "application/json",
-    });
+    assert.notEqual(init?.signal, controller.signal);
+    assert.equal(init?.signal instanceof AbortSignal, true);
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("authorization"), "Bearer ts-secret");
+    assert.equal(headers.get("content-type"), "application/json");
+    const sdkHeader = headers.get("x-typesafe-sdk");
+    assert.match(sdkHeader ?? "", /^typesafe-sdk\//u);
+    assert.equal(headers.get("user-agent"), sdkHeader);
     assert.deepEqual(JSON.parse(String(init?.body)), {
       model: TYPESAFE_MODEL,
       state: decisionInput.state,
@@ -208,6 +211,8 @@ test("tool uses enabled Pi-resolved OpenRouter fallback only without a TypeSafe 
       Authorization: "Bearer sk-or-secret",
       "Content-Type": "application/json",
     });
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.has("x-typesafe-sdk"), false);
     assert.deepEqual(JSON.parse(String(init?.body)), {
       model: OPENROUTER_MODEL,
       state: decisionInput.state,
@@ -238,6 +243,33 @@ test("a TypeSafe request failure does not switch providers", async () => {
   );
   assert.equal(getProviderAuth.mock.calls.length, 0);
   assert.equal(fetchImpl.mock.calls.length, 1);
+});
+
+test("official TypeSafe SDK requests time out without retrying", async () => {
+  vi.useFakeTimers();
+  try {
+    const fetchImpl = vi.fn<typeof fetch>(
+      async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(init?.signal?.reason ?? new DOMException("timed out", "AbortError"));
+          if (init?.signal?.aborted) abort();
+          else init?.signal?.addEventListener("abort", abort, { once: true });
+        }),
+    );
+    const pending = requestJevDecision(
+      decisionInput,
+      typeSafeProvider("secret"),
+      new AbortController().signal,
+      fetchImpl,
+    );
+    const rejection = assert.rejects(pending, /timed out after 10000ms/);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejection;
+    assert.equal(fetchImpl.mock.calls.length, 1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("resolved OpenRouter Authorization header takes precedence over its API key", async () => {
@@ -684,7 +716,8 @@ test("fetch cancellation is preserved", async () => {
   const controller = new AbortController();
   controller.abort();
   const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
-    assert.equal(init?.signal, controller.signal);
+    assert.notEqual(init?.signal, controller.signal);
+    assert.equal(init?.signal?.aborted, true);
     throw new DOMException("cancelled", "AbortError");
   });
   await assert.rejects(

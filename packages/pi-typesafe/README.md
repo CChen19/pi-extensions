@@ -9,7 +9,7 @@ Jev returns probabilities instead of prose, while Pi or your application remains
 
 - Asks multiple typed questions about one string, object, or array state in a single request.
 - Supports `noul` yes probabilities, fixed-option `choice` distributions, and ordered `score` distributions.
-- Uses TypeSafe's official API and `jev-latest` model when `TYPESAFE_API_KEY` is set.
+- Uses TypeSafe's official JavaScript SDK, API, and `jev-latest` model when `TYPESAFE_API_KEY` is set.
 - Allows an explicit opt-in fallback to OpenRouter's Decisions API and `~typesafe/jev-latest` when a TypeSafe key is absent.
 - Reuses Pi's resolved OpenRouter authentication for the fallback without storing another credential.
 - Validates request semantics and response distributions before exposing answers to the model.
@@ -110,9 +110,9 @@ The tool accepts one shared `state` and a non-empty `questions` map:
 - `score` requires 2–10 ordered levels and returns a probability-weighted `score`, `legend`, `probabilities`, and `confidence`.
 - `state`, instructions, choice descriptions, and score levels may use structured JSON when a string is insufficient.
 
-With `TYPESAFE_API_KEY`, the extension calls `https://api.typesafe.ai/v1/systemone` with `jev-latest`.
-When that key is absent and `openRouterFallback` is `true` in `pi-typesafe.json`, it uses `https://openrouter.ai/api/alpha/decisions` with `~typesafe/jev-latest`.
-It does not switch providers after a request failure, retry failed requests automatically, or act on returned decisions.
+With `TYPESAFE_API_KEY`, the extension uses `@typesafe-ai/sdk` to call `https://api.typesafe.ai/v1/systemone` with `jev-latest` and a 10-second request timeout.
+When that key is absent and `openRouterFallback` is `true` in `pi-typesafe.json`, it directly calls the SDK-incompatible `https://openrouter.ai/api/alpha/decisions` endpoint with `~typesafe/jev-latest`.
+Neither route switches providers after a request failure or retries failed requests automatically, and the extension never acts on returned decisions.
 
 ## ⚙️ Settings
 
@@ -140,7 +140,7 @@ The skill treats live TypeSafe documentation and installed SDK types as authorit
 
 ## 🔒 Security and privacy
 
-The preferred path reads `TYPESAFE_API_KEY` from the environment and sends its Bearer authorization plus JSON content only to the official TypeSafe endpoint.
+The preferred path reads `TYPESAFE_API_KEY` from the environment and gives it explicitly to the official TypeSafe SDK, which sends its Bearer authorization plus JSON content only to the official TypeSafe endpoint.
 When that key is absent, the extension accesses Pi's `openrouter` credential and sends the request to OpenRouter only if `openRouterFallback: true` in `pi-typesafe.json` explicitly enables the experimental fallback.
 It refuses OpenRouter credentials associated with a custom or proxy base URL rather than forwarding them to `openrouter.ai`.
 Credential values are not included in tool results, logs, or API error messages.
@@ -164,7 +164,7 @@ packages/pi-typesafe/
 ├── src/
 │   ├── index.ts        # Thin Pi entrypoint
 │   ├── jev.ts          # Tool registration and public exports
-│   ├── client.ts       # TypeSafe-first provider selection, requests, and bounded output
+│   ├── client.ts       # Official SDK and OpenRouter transports with bounded output
 │   ├── validation.ts   # Request and response semantic validation
 │   └── types.ts        # Typed Jev questions and answers
 ├── skills/
