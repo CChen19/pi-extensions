@@ -12,6 +12,7 @@ import {
   JEV_COMPACT_DETAILS_KIND,
   JEV_COMPACT_DETAILS_VERSION,
   MAX_HISTORY_UNITS,
+  MAX_UNIT_LABEL_CHARS,
   parseJevCompactDetails,
 } from "../src/history-units.js";
 
@@ -178,6 +179,31 @@ test("bash units match Pi context conversion and exclude private shell messages"
     const [unit] = buildHistoryUnits([message], "history");
     assert.equal(unit?.content, expected);
   }
+});
+
+test("constructed and retained labels stay inside the persisted parser domain", () => {
+  const labelPrefix = "Custom message ";
+  const boundaryType = "x".repeat(MAX_UNIT_LABEL_CHARS - labelPrefix.length);
+  const [boundary] = buildHistoryUnits(
+    [{ role: "custom", customType: boundaryType, content: "kept", display: true, timestamp: 1 }],
+    "history",
+  );
+  assert.ok(boundary);
+  assert.equal(boundary.label.length, MAX_UNIT_LABEL_CHARS);
+  assert.doesNotThrow(() => assertRetainedUnitsBounded([boundary]));
+
+  assert.throws(
+    () =>
+      buildHistoryUnits(
+        [{ role: "custom", customType: `${boundaryType}x`, content: "rejected", display: true, timestamp: 1 }],
+        "history",
+      ),
+    HistoryBoundsError,
+  );
+  assert.throws(
+    () => assertRetainedUnitsBounded([{ ...boundary, label: "x".repeat(MAX_UNIT_LABEL_CHARS + 1) }]),
+    HistoryBoundsError,
+  );
 });
 
 test("tool results use bounded Pi-style serialization", () => {

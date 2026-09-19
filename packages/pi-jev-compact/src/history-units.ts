@@ -6,6 +6,7 @@ export const JEV_COMPACT_DETAILS_KIND = "pi-jev-compact";
 export const JEV_COMPACT_DETAILS_VERSION = 1;
 export const MAX_HISTORY_UNITS = 512;
 export const MAX_UNIT_CHARS = 32 * 1024;
+export const MAX_UNIT_LABEL_CHARS = 512;
 export const MAX_TOOL_RESULT_CHARS = 2_000;
 export const MAX_RETAINED_BYTES = 256 * 1024;
 export const MAX_COMPACTION_SUMMARY_BYTES = 512 * 1024;
@@ -67,6 +68,13 @@ function byteLength(value: string): number {
 function boundedText(value: string, label: string): string {
   if (value.length > MAX_UNIT_CHARS) {
     throw new HistoryBoundsError(`${label} exceeds the ${MAX_UNIT_CHARS}-character unit limit`);
+  }
+  return value;
+}
+
+function boundedLabel(value: string): string {
+  if (value.length > MAX_UNIT_LABEL_CHARS) {
+    throw new HistoryBoundsError(`history unit label exceeds the ${MAX_UNIT_LABEL_CHARS}-character limit`);
   }
   return value;
 }
@@ -216,6 +224,7 @@ export function buildHistoryUnits(
         order,
         source,
         ...draft,
+        label: boundedLabel(draft.label),
       });
       if (units.length + startOrder > MAX_HISTORY_UNITS) {
         throw new HistoryBoundsError(`history exceeds the ${MAX_HISTORY_UNITS}-unit limit`);
@@ -233,7 +242,7 @@ export function combineHistoryUnits(
   const drafts: Omit<HistoryUnit, "id" | "order">[] = [
     ...priorRetained.map(({ kind, label, content }) => ({
       kind,
-      label,
+      label: boundedLabel(label),
       content,
       source: "prior-retained" as const,
     })),
@@ -321,7 +330,7 @@ function parseUnit(value: unknown): HistoryUnit | undefined {
     typeof value.source !== "string" ||
     !UNIT_SOURCES.has(value.source as HistoryUnitSource) ||
     typeof value.label !== "string" ||
-    value.label.length > 512 ||
+    value.label.length > MAX_UNIT_LABEL_CHARS ||
     typeof value.content !== "string" ||
     value.content.length > MAX_UNIT_CHARS + 128
   ) {
@@ -379,6 +388,7 @@ export function parseJevCompactDetails(value: unknown): JevCompactDetails | unde
 }
 
 export function assertRetainedUnitsBounded(units: readonly HistoryUnit[]): void {
+  for (const unit of units) boundedLabel(unit.label);
   if (units.length > MAX_HISTORY_UNITS) {
     throw new HistoryBoundsError(`retained history exceeds the ${MAX_HISTORY_UNITS}-unit limit`);
   }

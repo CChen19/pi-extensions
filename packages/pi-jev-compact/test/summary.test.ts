@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import type { Api, Model, Usage } from "@earendil-works/pi-ai";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { type Api, createAssistantMessageEventStream, type Model, type Usage } from "@earendil-works/pi-ai";
 import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
@@ -76,8 +77,14 @@ function compactResult(summary = "Pi-native compact summary"): CompactionResult 
   };
 }
 
-test("passes only JEV-selected context through Pi's native compact function", async () => {
+function provider(streamSimple: StreamFn = () => ({}) as never) {
+  return { streamSimple };
+}
+
+test("passes only JEV-selected context through Pi's resolved provider and native compact function", async () => {
   let observed: Parameters<PiNativeCompactor>[0] | undefined;
+  let streamedModel: Model<Api> | undefined;
+  const providerStreamResult = {};
   const { ctx } = createMockContext({
     model,
     modelRegistry: {
@@ -87,13 +94,22 @@ test("passes only JEV-selected context through Pi's native compact function", as
           ok: true,
           apiKey: "provider-key",
           headers: { "x-provider": "header", "x-removed": null },
+          baseUrl: "https://resolved.example/v1",
           env: { PROVIDER_MODE: "test" },
         };
+      },
+      getProvider(providerId: string) {
+        assert.equal(providerId, model.provider);
+        return provider((requestModel) => {
+          streamedModel = requestModel;
+          return providerStreamResult as never;
+        });
       },
     },
   });
   const runCompact: PiNativeCompactor = async (request) => {
     observed = request;
+    assert.equal(request.streamFn(request.model, {} as never), providerStreamResult);
     return compactResult();
   };
 
@@ -105,7 +121,9 @@ test("passes only JEV-selected context through Pi's native compact function", as
     runCompact,
   );
 
-  assert.equal(observed?.model, model);
+  assert.equal(observed?.model.id, model.id);
+  assert.equal(observed?.model.baseUrl, "https://resolved.example/v1");
+  assert.equal(streamedModel, observed?.model);
   assert.equal(observed?.thinkingLevel, "high");
   assert.equal(observed?.customInstructions, "Focus on the parser");
   assert.equal(observed?.apiKey, "provider-key");
@@ -125,6 +143,40 @@ test("passes only JEV-selected context through Pi's native compact function", as
   assert.deepEqual(result, { text: "Pi-native compact summary", usage });
 });
 
+test("the default native compact path consumes the resolved provider stream", async () => {
+  let streamCalls = 0;
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "provider-key", baseUrl: "https://resolved.example/v1" };
+      },
+      getProvider: () =>
+        provider((requestModel, context, options) => {
+          streamCalls += 1;
+          assert.equal(requestModel.baseUrl, "https://resolved.example/v1");
+          assert.equal(options?.apiKey, "provider-key");
+          assert.match(JSON.stringify(context.messages), /selected fact/u);
+          const stream = createAssistantMessageEventStream();
+          stream.end({
+            role: "assistant",
+            content: [{ type: "text", text: "summary from composed provider" }],
+            api: requestModel.api,
+            provider: requestModel.provider,
+            model: requestModel.id,
+            usage,
+            stopReason: "stop",
+            timestamp: 1,
+          });
+          return stream;
+        }),
+    },
+  });
+
+  const result = await summarizeWithPiNativeCompact(ctx, summaryOptions());
+  assert.equal(streamCalls, 1);
+  assert.match(result.text, /summary from composed provider/u);
+});
+
 test("empty selections still invoke Pi compact with empty selected context", async () => {
   let observed: Parameters<PiNativeCompactor>[0] | undefined;
   const { ctx } = createMockContext({
@@ -132,6 +184,7 @@ test("empty selections still invoke Pi compact with empty selected context", asy
       async getApiKeyAndHeaders() {
         return { ok: true };
       },
+      getProvider: () => provider(),
     },
   });
 
@@ -167,6 +220,26 @@ test("authentication failures do not start Pi compact", async () => {
   assert.equal(compactCalls, 0);
 });
 
+test("a missing active provider does not start Pi compact", async () => {
+  let compactCalls = 0;
+  const { ctx } = createMockContext({
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        return { ok: true };
+      },
+      getProvider: () => undefined,
+    },
+  });
+  await assert.rejects(
+    summarizeWithPiNativeCompact(ctx, summaryOptions(), async () => {
+      compactCalls += 1;
+      return compactResult();
+    }),
+    /resolve the active model provider/u,
+  );
+  assert.equal(compactCalls, 0);
+});
+
 test("stale ownership after authentication prevents Pi compact", async () => {
   let current = true;
   let compactCalls = 0;
@@ -194,6 +267,7 @@ test("Pi compact failures and cancellation remain observable", async () => {
       async getApiKeyAndHeaders() {
         return { ok: true };
       },
+      getProvider: () => provider(),
     },
   });
   await assert.rejects(

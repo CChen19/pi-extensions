@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ProviderHeaders, Usage } from "@earendil-works/pi-ai";
 import { type CompactionResult, compact, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatUnits, type HistoryUnit } from "./history-units.js";
@@ -21,6 +21,7 @@ export interface PiNativeCompactRequest {
   signal: AbortSignal;
   thinkingLevel: ExtensionContext["thinkingLevel"];
   env?: Record<string, string>;
+  streamFn: StreamFn;
 }
 
 export type PiNativeCompactor = (request: PiNativeCompactRequest) => Promise<CompactionResult>;
@@ -34,7 +35,7 @@ const compactWithPi: PiNativeCompactor = (request) =>
     request.customInstructions,
     request.signal,
     request.thinkingLevel,
-    undefined,
+    request.streamFn,
     request.env,
   );
 
@@ -101,15 +102,21 @@ export async function summarizeWithPiNativeCompact(
   if (!options.isCurrent()) throw staleError();
   if (!auth.ok) throw new Error(`Could not authenticate the active model: ${auth.error}`);
 
+  const provider = ctx.modelRegistry.getProvider(options.model.provider);
+  if (!provider) throw new Error(`Could not resolve the active model provider: ${options.model.provider}`);
+  const model = auth.baseUrl ? { ...options.model, baseUrl: auth.baseUrl } : options.model;
+  const streamFn: StreamFn = (requestModel, context, requestOptions) =>
+    provider.streamSimple(requestModel, context, requestOptions);
   const result = await runCompact({
     preparation,
-    model: options.model,
+    model,
     apiKey: auth.apiKey,
     headers: stringHeaders(auth.headers),
     customInstructions: options.customInstructions,
     signal: options.signal,
     thinkingLevel: options.thinkingLevel,
     env: auth.env,
+    streamFn,
   });
   options.signal.throwIfAborted();
   if (!options.isCurrent()) throw staleError();
