@@ -12,22 +12,22 @@ import {
   combineHistoryUnits,
   composeCompactionSummary,
   fileOperationLists,
-  JEV_COMPACTION_DETAILS_KIND,
-  JEV_COMPACTION_DETAILS_VERSION,
-  type JevCompactionDetails,
+  JEV_COMPACT_DETAILS_KIND,
+  JEV_COMPACT_DETAILS_VERSION,
+  type JevCompactDetails,
   MAX_COMPACTION_DETAILS_BYTES,
   MAX_COMPACTION_SUMMARY_BYTES,
-  parseJevCompactionDetails,
+  parseJevCompactDetails,
 } from "./history-units.js";
-import { showJevCompactionMenu } from "./menu.js";
-import { createJevCompactionSettingsRuntime, type JevCompactionSettingsRuntime } from "./settings.js";
+import { showJevCompactMenu } from "./menu.js";
+import { createJevCompactSettingsRuntime, type JevCompactSettingsRuntime } from "./settings.js";
 import { summarizeWithActiveModel } from "./summary.js";
 
-const STATUS_KEY = "jev-compaction";
+const STATUS_KEY = "jev-compact";
 type Summarize = typeof summarizeWithActiveModel;
 
-export interface JevCompactionExtensionOptions {
-  settingsRuntime?: JevCompactionSettingsRuntime;
+export interface JevCompactExtensionOptions {
+  settingsRuntime?: JevCompactSettingsRuntime;
   clientFactory?: TypeSafeClientFactory;
   summarize?: Summarize;
 }
@@ -36,11 +36,11 @@ function modelIdentity(model: Model<Api> | undefined): string | undefined {
   return model ? `${model.provider}\0${model.api}\0${model.id}` : undefined;
 }
 
-function latestPriorDetails(entries: readonly SessionEntry[]): JevCompactionDetails | undefined {
+function latestPriorDetails(entries: readonly SessionEntry[]): JevCompactDetails | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.type !== "compaction") continue;
-    return parseJevCompactionDetails(entry.details);
+    return parseJevCompactDetails(entry.details);
   }
   return undefined;
 }
@@ -71,7 +71,7 @@ async function compactWithJev(
   event: SessionBeforeCompactEvent,
   ctx: ExtensionContext,
   options: {
-    runtime: JevCompactionSettingsRuntime;
+    runtime: JevCompactSettingsRuntime;
     clientFactory: TypeSafeClientFactory;
     summarize: Summarize;
     generation: number;
@@ -135,9 +135,9 @@ async function compactWithJev(
     if (Buffer.byteLength(summary, "utf8") > MAX_COMPACTION_SUMMARY_BYTES) {
       throw new Error("Final JEV compaction summary exceeds the 512 KiB limit");
     }
-    const details: JevCompactionDetails = {
-      kind: JEV_COMPACTION_DETAILS_KIND,
-      version: JEV_COMPACTION_DETAILS_VERSION,
+    const details: JevCompactDetails = {
+      kind: JEV_COMPACT_DETAILS_KIND,
+      version: JEV_COMPACT_DETAILS_VERSION,
       compressedSummary: generated.text,
       retainedUnits,
       evaluator: {
@@ -176,21 +176,21 @@ async function compactWithJev(
   }
 }
 
-export function createJevCompactionExtension(options: JevCompactionExtensionOptions = {}): (pi: ExtensionAPI) => void {
+export function createJevCompactExtension(options: JevCompactExtensionOptions = {}): (pi: ExtensionAPI) => void {
   return (pi) => {
-    const runtime = options.settingsRuntime ?? createJevCompactionSettingsRuntime();
+    const runtime = options.settingsRuntime ?? createJevCompactSettingsRuntime();
     const clientFactory = options.clientFactory ?? createTypeSafeClient;
     const summarize = options.summarize ?? summarizeWithActiveModel;
     let generation = 0;
     let sessionController = new AbortController();
 
-    pi.registerCommand("jev-compaction", {
+    pi.registerCommand("jev-compact", {
       description: "Configure JEV-guided compaction",
       handler: async (args, ctx) => {
-        if (args.trim()) throw new Error("Usage: /jev-compaction");
+        if (args.trim()) throw new Error("Usage: /jev-compact");
         const ownerGeneration = generation;
         const ownerController = sessionController;
-        await showJevCompactionMenu(runtime, ctx, {
+        await showJevCompactMenu(runtime, ctx, {
           signal: ownerController.signal,
           isCurrent: () => ownerGeneration === generation && !ownerController.signal.aborted,
         });
@@ -215,7 +215,7 @@ export function createJevCompactionExtension(options: JevCompactionExtensionOpti
         }
         if (state.kind === "invalid" && ctx.hasUI) {
           ctx.ui.notify(
-            `Invalid pi-jev-compaction.json; Pi-native compaction remains active. ${safeError(state.issue ?? "unknown validation error")}`,
+            `Invalid pi-jev-compact.json; Pi-native compaction remains active. ${safeError(state.issue ?? "unknown validation error")}`,
             "warning",
           );
         }
@@ -223,7 +223,7 @@ export function createJevCompactionExtension(options: JevCompactionExtensionOpti
         if (sessionController.signal.aborted || ownerGeneration !== generation) return;
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `Could not load pi-jev-compaction.json; Pi-native compaction remains active. ${safeError(error)}`,
+            `Could not load pi-jev-compact.json; Pi-native compaction remains active. ${safeError(error)}`,
             "warning",
           );
         }
@@ -250,4 +250,4 @@ export function createJevCompactionExtension(options: JevCompactionExtensionOpti
   };
 }
 
-export default createJevCompactionExtension();
+export default createJevCompactExtension();

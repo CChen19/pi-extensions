@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "vitest";
-import { createJevCompactionSettingsRuntime, loadJevCompactionSettings, MAX_SETTINGS_BYTES } from "../src/settings.js";
+import { createJevCompactSettingsRuntime, loadJevCompactSettings, MAX_SETTINGS_BYTES } from "../src/settings.js";
 
 const roots: string[] = [];
 
@@ -14,16 +14,16 @@ afterEach(async () => {
 async function fixturePath(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pi-jev-settings-"));
   roots.push(root);
-  return join(root, "agent", "pi-jev-compaction.json");
+  return join(root, "agent", "pi-jev-compact.json");
 }
 
 test("missing loads are side-effect free and first save creates a private file", async () => {
   const path = await fixturePath();
-  const state = await loadJevCompactionSettings(path);
+  const state = await loadJevCompactSettings(path);
   assert.equal(state.kind, "missing");
   await assert.rejects(lstat(dirname(path)), /ENOENT/u);
 
-  const runtime = createJevCompactionSettingsRuntime(path);
+  const runtime = createJevCompactSettingsRuntime(path);
   await runtime.setApiKey("  secret-value  ");
   assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { apiKey: "secret-value" });
   if (process.platform !== "win32") assert.equal((await lstat(path)).mode & 0o777, 0o600);
@@ -33,7 +33,7 @@ test("saves preserve unknown fields, serialize in request order, and remove only
   const path = await fixturePath();
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, '{"future":{"enabled":true},"apiKey":"old"}\n', { mode: 0o600 });
-  const runtime = createJevCompactionSettingsRuntime(path);
+  const runtime = createJevCompactSettingsRuntime(path);
   await runtime.reload();
   const first = runtime.setApiKey("first");
   const second = runtime.setApiKey("second");
@@ -52,7 +52,7 @@ test("malformed, invalid, oversized, and symlinked settings remain invalid and u
   const malformed = await fixturePath();
   await mkdir(dirname(malformed), { recursive: true });
   await writeFile(malformed, "{broken", "utf8");
-  const malformedRuntime = createJevCompactionSettingsRuntime(malformed);
+  const malformedRuntime = createJevCompactSettingsRuntime(malformed);
   assert.equal((await malformedRuntime.reload()).kind, "invalid");
   await assert.rejects(malformedRuntime.setApiKey("new-secret"), /Cannot overwrite an invalid/u);
   assert.equal(await readFile(malformed, "utf8"), "{broken");
@@ -60,26 +60,26 @@ test("malformed, invalid, oversized, and symlinked settings remain invalid and u
   const invalid = await fixturePath();
   await mkdir(dirname(invalid), { recursive: true });
   await writeFile(invalid, '{"apiKey":"   "}\n', "utf8");
-  assert.equal((await loadJevCompactionSettings(invalid)).kind, "invalid");
+  assert.equal((await loadJevCompactSettings(invalid)).kind, "invalid");
 
   const oversized = await fixturePath();
   await mkdir(dirname(oversized), { recursive: true });
   await writeFile(oversized, "x".repeat(MAX_SETTINGS_BYTES + 1), "utf8");
-  assert.match((await loadJevCompactionSettings(oversized)).issue ?? "", /exceeds 64 KiB/u);
+  assert.match((await loadJevCompactSettings(oversized)).issue ?? "", /exceeds 64 KiB/u);
 
   const target = await fixturePath();
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, '{"apiKey":"target-secret"}\n', "utf8");
   const link = join(dirname(target), "linked.json");
   await symlink(target, link);
-  const linked = await loadJevCompactionSettings(link);
+  const linked = await loadJevCompactSettings(link);
   assert.equal(linked.kind, "invalid");
   assert.match(linked.issue ?? "", /symbolic links/u);
 });
 
 test("invalid API keys and aborted writes never replace the previous settings", async () => {
   const path = await fixturePath();
-  const runtime = createJevCompactionSettingsRuntime(path);
+  const runtime = createJevCompactSettingsRuntime(path);
   await runtime.setApiKey("old-secret");
   await assert.rejects(runtime.setApiKey("bad\nsecret"), /non-empty/u);
   const controller = new AbortController();
@@ -93,7 +93,7 @@ test.runIf(process.platform !== "win32")(
   "a failed atomic write preserves the previous file and effective state",
   async () => {
     const path = await fixturePath();
-    const runtime = createJevCompactionSettingsRuntime(path);
+    const runtime = createJevCompactSettingsRuntime(path);
     await runtime.setApiKey("old-secret");
     await chmod(dirname(path), 0o500);
     try {

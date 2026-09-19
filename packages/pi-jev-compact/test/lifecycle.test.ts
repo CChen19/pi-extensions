@@ -5,13 +5,9 @@ import type { SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent"
 import { test } from "vitest";
 import { createMockContext, createMockPi } from "../../../test/support.js";
 import type { TypeSafeSystemOneClient } from "../src/evaluator.js";
-import {
-  JEV_COMPACTION_DETAILS_KIND,
-  JEV_COMPACTION_DETAILS_VERSION,
-  type JevCompactionDetails,
-} from "../src/history-units.js";
-import { createJevCompactionExtension } from "../src/jev-compaction.js";
-import type { JevCompactionSettingsRuntime, JevCompactionSettingsState } from "../src/settings.js";
+import { JEV_COMPACT_DETAILS_KIND, JEV_COMPACT_DETAILS_VERSION, type JevCompactDetails } from "../src/history-units.js";
+import { createJevCompactExtension } from "../src/jev-compact.js";
+import type { JevCompactSettingsRuntime, JevCompactSettingsState } from "../src/settings.js";
 import type { ActiveModelSummary, summarizeWithActiveModel } from "../src/summary.js";
 
 const model = {
@@ -32,11 +28,11 @@ const usage: Usage = {
 };
 
 function settingsRuntime(
-  input: Partial<JevCompactionSettingsState> = {},
-): JevCompactionSettingsRuntime & { flushes: number } {
-  let state: JevCompactionSettingsState = {
+  input: Partial<JevCompactSettingsState> = {},
+): JevCompactSettingsRuntime & { flushes: number } {
+  let state: JevCompactSettingsState = {
     kind: "loaded",
-    path: "/agent/pi-jev-compaction.json",
+    path: "/agent/pi-jev-compact.json",
     settings: { apiKey: "type-safe-secret" },
     document: { apiKey: "type-safe-secret" },
     ...input,
@@ -112,7 +108,7 @@ function evaluator(probabilities: readonly number[], onRequest?: () => void): Ty
 
 function setup(
   options: {
-    runtime?: JevCompactionSettingsRuntime;
+    runtime?: JevCompactSettingsRuntime;
     client?: TypeSafeSystemOneClient;
     summarize?: (options: Parameters<typeof summarizeWithActiveModel>[1]) => Promise<ActiveModelSummary>;
     context?: Record<string, unknown>;
@@ -121,7 +117,7 @@ function setup(
   const mock = createMockPi();
   const runtime = options.runtime ?? settingsRuntime();
   const selected: string[][] = [];
-  createJevCompactionExtension({
+  createJevCompactExtension({
     settingsRuntime: runtime,
     clientFactory: () => options.client ?? evaluator([1]),
     summarize: async (_ctx, summaryOptions) => {
@@ -160,7 +156,7 @@ test.each([
       firstKeptEntryId: string;
       tokensBefore: number;
       usage: Usage;
-      details: JevCompactionDetails;
+      details: JevCompactDetails;
     };
   };
   assert.equal(result.compaction.firstKeptEntryId, "kept");
@@ -171,7 +167,7 @@ test.each([
   assert.match(result.compaction.summary, /<modified-files>\nsrc\/new.ts\nsrc\/changed.ts/u);
   assert.equal(result.compaction.details.evaluator.summarized, 1);
   assert.deepEqual(state.selected, [["summarize me"]]);
-  assert.equal(state.statuses.get("jev-compaction"), undefined);
+  assert.equal(state.statuses.get("jev-compact"), undefined);
 });
 
 test("split-turn tool calls and results are independently selected and retained", async () => {
@@ -200,7 +196,7 @@ test("split-turn tool calls and results are independently selected and retained"
   event.preparation.turnPrefixMessages = [assistant, resultMessage];
   event.preparation.isSplitTurn = true;
   const result = (await handler?.(event, state.ctx)) as {
-    compaction: { summary: string; details: JevCompactionDetails };
+    compaction: { summary: string; details: JevCompactDetails };
   };
   assert.deepEqual(state.selected, [[expectToolCall()]]);
   assert.equal(result.compaction.details.evaluator.summarized, 1);
@@ -222,9 +218,9 @@ test("repeated compaction reevaluates prior retained units and uses only the pri
     label: "User",
     content: "prior retained",
   };
-  const priorDetails: JevCompactionDetails = {
-    kind: JEV_COMPACTION_DETAILS_KIND,
-    version: JEV_COMPACTION_DETAILS_VERSION,
+  const priorDetails: JevCompactDetails = {
+    kind: JEV_COMPACT_DETAILS_KIND,
+    version: JEV_COMPACT_DETAILS_VERSION,
     compressedSummary: "pure prior summary",
     retainedUnits: [priorUnit],
     evaluator: {
@@ -262,7 +258,7 @@ test("repeated compaction reevaluates prior retained units and uses only the pri
   ];
   event.preparation.messagesToSummarize = [user("new retained")];
   const handler = state.mock.events.get("session_before_compact")?.[0];
-  const result = (await handler?.(event, state.ctx)) as { compaction: { details: JevCompactionDetails } };
+  const result = (await handler?.(event, state.ctx)) as { compaction: { details: JevCompactDetails } };
   assert.equal(previousSummary, "pure prior summary");
   assert.deepEqual(state.selected, [["prior retained"]]);
   assert.equal(result.compaction.details.retainedUnits[0]?.content, "new retained");
@@ -278,7 +274,7 @@ test("session start reports invalid settings without exposing contents", async (
   const state = setup({ runtime });
   const start = state.mock.events.get("session_start")?.[0];
   await start?.({ type: "session_start", reason: "startup" }, state.ctx);
-  assert.match(state.notifications[0]?.message ?? "", /Invalid pi-jev-compaction\.json/u);
+  assert.match(state.notifications[0]?.message ?? "", /Invalid pi-jev-compact\.json/u);
   assert.match(state.notifications[0]?.message ?? "", /invalid settings shape/u);
 });
 
@@ -365,11 +361,11 @@ test("session replacement aborts evaluation and clears the old status", async ()
   const start = state.mock.events.get("session_start")?.[0];
   const pending = handler?.(compactEvent(), state.ctx);
   await Promise.resolve();
-  assert.equal(state.statuses.get("jev-compaction"), "JEV evaluating history…");
+  assert.equal(state.statuses.get("jev-compact"), "JEV evaluating history…");
   sessionId = "replacement";
   await start?.({ type: "session_start", reason: "new" }, state.ctx);
   assert.deepEqual(await pending, { cancel: true });
-  assert.equal(state.statuses.get("jev-compaction"), undefined);
+  assert.equal(state.statuses.get("jev-compact"), undefined);
 });
 
 test("session or model changes after active-model completion cancel stale publication", async () => {
@@ -417,9 +413,9 @@ test("shutdown aborts in-flight evaluation, clears status, and flushes settings"
   const shutdown = state.mock.events.get("session_shutdown")?.[0];
   const pending = handler?.(compactEvent(), state.ctx);
   await Promise.resolve();
-  assert.equal(state.statuses.get("jev-compaction"), "JEV evaluating history…");
+  assert.equal(state.statuses.get("jev-compact"), "JEV evaluating history…");
   await shutdown?.({ type: "session_shutdown", reason: "quit" }, state.ctx);
   assert.deepEqual(await pending, { cancel: true });
-  assert.equal(state.statuses.get("jev-compaction"), undefined);
+  assert.equal(state.statuses.get("jev-compact"), undefined);
   assert.equal((runtime as ReturnType<typeof settingsRuntime>).flushes, 1);
 });

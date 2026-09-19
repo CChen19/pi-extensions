@@ -7,13 +7,13 @@ import { test } from "vitest";
 import { createMockContext } from "../../../test/support.js";
 
 test("source entrypoint loads through Pi without factory file or network side effects", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-jev-compaction-loader-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-jev-compact-loader-"));
   const agentDir = join(root, "agent");
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   try {
     await mkdir(agentDir, { recursive: true });
     process.env.PI_CODING_AGENT_DIR = agentDir;
-    const entrypoint = resolve("packages/pi-jev-compaction/src/index.ts");
+    const entrypoint = resolve("packages/pi-jev-compact/src/index.ts");
     const loader = new DefaultResourceLoader({
       cwd: root,
       agentDir,
@@ -26,7 +26,7 @@ test("source entrypoint loads through Pi without factory file or network side ef
     assert.deepEqual(loaded.errors, []);
     assert.equal(loaded.extensions.length, 1);
     const extension = loaded.extensions[0];
-    assert.ok(extension?.commands.has("jev-compaction"));
+    assert.ok(extension?.commands.has("jev-compact"));
     assert.deepEqual([...(extension?.handlers.keys() ?? [])].sort(), [
       "session_before_compact",
       "session_shutdown",
@@ -34,7 +34,7 @@ test("source entrypoint loads through Pi without factory file or network side ef
     ]);
     assert.deepEqual(await readdir(agentDir), []);
 
-    const command = extension?.commands.get("jev-compaction");
+    const command = extension?.commands.get("jev-compact");
     assert.ok(command);
     await assert.rejects(command.handler("unexpected", createMockContext({ mode: "print" }).ctx), /Usage/u);
     await assert.rejects(command.handler("", createMockContext({ mode: "json" }).ctx), /requires TUI/u);

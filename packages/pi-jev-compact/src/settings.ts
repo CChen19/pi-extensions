@@ -4,28 +4,28 @@ import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export const JEV_COMPACTION_SETTINGS_FILE = "pi-jev-compaction.json";
+export const JEV_COMPACT_SETTINGS_FILE = "pi-jev-compact.json";
 export const MAX_SETTINGS_BYTES = 64 * 1024;
 const MAX_API_KEY_LENGTH = 16 * 1024;
 
-export interface JevCompactionSettings {
+export interface JevCompactSettings {
   apiKey?: string;
 }
 
-export interface JevCompactionSettingsState {
+export interface JevCompactSettingsState {
   kind: "missing" | "loaded" | "invalid";
   path: string;
-  settings: JevCompactionSettings;
+  settings: JevCompactSettings;
   document?: Record<string, unknown>;
   issue?: string;
   fingerprint?: string;
 }
 
-export interface JevCompactionSettingsRuntime {
-  get(): Readonly<JevCompactionSettingsState>;
-  reload(signal?: AbortSignal): Promise<Readonly<JevCompactionSettingsState>>;
-  setApiKey(apiKey: string, signal?: AbortSignal): Promise<Readonly<JevCompactionSettingsState>>;
-  removeApiKey(signal?: AbortSignal): Promise<Readonly<JevCompactionSettingsState>>;
+export interface JevCompactSettingsRuntime {
+  get(): Readonly<JevCompactSettingsState>;
+  reload(signal?: AbortSignal): Promise<Readonly<JevCompactSettingsState>>;
+  setApiKey(apiKey: string, signal?: AbortSignal): Promise<Readonly<JevCompactSettingsState>>;
+  removeApiKey(signal?: AbortSignal): Promise<Readonly<JevCompactSettingsState>>;
   flush(): Promise<void>;
 }
 
@@ -47,22 +47,22 @@ export function normalizeApiKey(value: unknown): string | undefined {
   return normalized;
 }
 
-export function normalizeJevCompactionSettings(value: unknown): JevCompactionSettings | undefined {
+export function normalizeJevCompactSettings(value: unknown): JevCompactSettings | undefined {
   if (!isRecord(value)) return undefined;
   if (!Object.hasOwn(value, "apiKey")) return {};
   const apiKey = normalizeApiKey(value.apiKey);
   return apiKey ? { apiKey } : undefined;
 }
 
-export function jevCompactionSettingsPath(): string {
-  return join(getAgentDir(), JEV_COMPACTION_SETTINGS_FILE);
+export function jevCompactSettingsPath(): string {
+  return join(getAgentDir(), JEV_COMPACT_SETTINGS_FILE);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("Settings operation aborted", "AbortError");
 }
 
-function cloneState(state: JevCompactionSettingsState): JevCompactionSettingsState {
+function cloneState(state: JevCompactSettingsState): JevCompactSettingsState {
   return structuredClone(state);
 }
 
@@ -70,10 +70,10 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
-export async function loadJevCompactionSettings(
-  path = jevCompactionSettingsPath(),
+export async function loadJevCompactSettings(
+  path = jevCompactSettingsPath(),
   signal?: AbortSignal,
-): Promise<JevCompactionSettingsState> {
+): Promise<JevCompactSettingsState> {
   throwIfAborted(signal);
   try {
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -89,7 +89,7 @@ export async function loadJevCompactionSettings(
     }
     throwIfAborted(signal);
     const document = JSON.parse(text) as unknown;
-    const settings = normalizeJevCompactionSettings(document);
+    const settings = normalizeJevCompactSettings(document);
     if (!settings || !isRecord(document)) throw new Error("invalid settings shape or API key");
     return { kind: "loaded", path, settings, document, fingerprint: text };
   } catch (error) {
@@ -115,15 +115,15 @@ async function saveApiKeyMutation(
   path: string,
   apiKey: string | undefined,
   signal?: AbortSignal,
-): Promise<JevCompactionSettingsState> {
-  const latest = await loadJevCompactionSettings(path, signal);
+): Promise<JevCompactSettingsState> {
+  const latest = await loadJevCompactSettings(path, signal);
   if (latest.kind === "invalid") {
-    throw new Error("Cannot overwrite an invalid pi-jev-compaction.json; repair it and reload first");
+    throw new Error("Cannot overwrite an invalid pi-jev-compact.json; repair it and reload first");
   }
   const document = { ...(latest.document ?? {}) };
   if (apiKey === undefined) delete document.apiKey;
   else document.apiKey = apiKey;
-  const settings = normalizeJevCompactionSettings(document);
+  const settings = normalizeJevCompactSettings(document);
   if (!settings) throw new Error("Refusing to save invalid JEV compaction settings");
 
   const temporaryPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
@@ -137,10 +137,10 @@ async function saveApiKeyMutation(
       mode: 0o600,
     });
     throwIfAborted(signal);
-    const current = await loadJevCompactionSettings(path, signal);
+    const current = await loadJevCompactSettings(path, signal);
     const unchanged =
       current.kind === latest.kind && (latest.kind === "missing" || current.fingerprint === latest.fingerprint);
-    if (!unchanged) throw new Error("pi-jev-compaction.json changed while saving; reopen settings and retry");
+    if (!unchanged) throw new Error("pi-jev-compact.json changed while saving; reopen settings and retry");
     await rename(temporaryPath, path);
     return { kind: "loaded", path, settings, document, fingerprint: text };
   } finally {
@@ -148,8 +148,8 @@ async function saveApiKeyMutation(
   }
 }
 
-export function createJevCompactionSettingsRuntime(path = jevCompactionSettingsPath()): JevCompactionSettingsRuntime {
-  let state: JevCompactionSettingsState = { kind: "missing", path, settings: {}, document: {} };
+export function createJevCompactSettingsRuntime(path = jevCompactSettingsPath()): JevCompactSettingsRuntime {
+  let state: JevCompactSettingsState = { kind: "missing", path, settings: {}, document: {} };
   let queue = Promise.resolve();
   const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = queue.then(operation, operation);
@@ -164,7 +164,7 @@ export function createJevCompactionSettingsRuntime(path = jevCompactionSettingsP
     get: () => cloneState(state),
     reload: (signal) =>
       enqueue(async () => {
-        state = await loadJevCompactionSettings(path, signal);
+        state = await loadJevCompactSettings(path, signal);
         return cloneState(state);
       }),
     setApiKey: (value, signal) =>

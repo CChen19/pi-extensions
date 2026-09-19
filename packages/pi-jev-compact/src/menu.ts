@@ -1,9 +1,9 @@
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { MenuDefinition } from "@narumitw/pi-tui-kit";
-import type { JevCompactionSettingsRuntime, JevCompactionSettingsState } from "./settings.js";
+import type { JevCompactSettingsRuntime, JevCompactSettingsState } from "./settings.js";
 
-export interface JevCompactionMenuOwner {
+export interface JevCompactMenuOwner {
   signal: AbortSignal;
   isCurrent(): boolean;
 }
@@ -29,13 +29,13 @@ function redactedError(error: unknown, secret?: string): string {
 
 function createMenu(requested: {
   value: RequestedAction;
-}): MenuDefinition<JevCompactionSettingsState, Screen, Action, ExtensionCommandContext> {
+}): MenuDefinition<JevCompactSettingsState, Screen, Action, ExtensionCommandContext> {
   return {
     start: "main",
     screens: {
       main: ({ state }) => ({
         kind: "actions",
-        title: "JEV Compaction",
+        title: "JEV Compact",
         lines: [
           `TypeSafe API key: ${state.settings.apiKey ? "Configured" : "Missing"}`,
           `Evaluator: ${state.settings.apiKey && state.kind === "loaded" ? "JEV jev-latest" : "Pi-native fallback"}`,
@@ -50,7 +50,7 @@ function createMenu(requested: {
       }),
       settings: ({ state }) => ({
         kind: "actions",
-        title: "JEV Compaction Settings",
+        title: "JEV Compact Settings",
         lines: [
           `User settings: ${displayText(state.path)}`,
           state.kind === "invalid"
@@ -80,7 +80,7 @@ function createMenu(requested: {
       }),
       status: ({ state }) => ({
         kind: "detail",
-        title: "JEV Compaction Status",
+        title: "JEV Compact Status",
         lines: [
           `Settings file: ${displayText(state.path)}`,
           `Settings state: ${state.kind}`,
@@ -91,7 +91,7 @@ function createMenu(requested: {
       }),
       help: () => ({
         kind: "detail",
-        title: "JEV Compaction Help",
+        title: "JEV Compact Help",
         lines: [
           "Pi keeps its normal /compact command and automatic thresholds.",
           "JEV independently selects old history units for summarization.",
@@ -115,10 +115,10 @@ function createMenu(requested: {
   };
 }
 
-export async function showJevCompactionMenu(
-  runtime: JevCompactionSettingsRuntime,
+export async function showJevCompactMenu(
+  runtime: JevCompactSettingsRuntime,
   ctx: ExtensionCommandContext,
-  owner: JevCompactionMenuOwner,
+  owner: JevCompactMenuOwner,
 ): Promise<void> {
   const current = runtime.get();
   if (ctx.mode === "rpc" && ctx.hasUI) {
@@ -128,7 +128,7 @@ export async function showJevCompactionMenu(
     );
     return;
   }
-  if (ctx.mode !== "tui") throw new Error("/jev-compaction requires TUI or RPC UI support");
+  if (ctx.mode !== "tui") throw new Error("/jev-compact requires TUI or RPC UI support");
   if (owner.signal.aborted || !owner.isCurrent()) return;
 
   const { defineMenu, runConfirmation, runMenu, runSecretInput, sanitizeTerminalText } = await import(
@@ -160,11 +160,11 @@ export async function showJevCompactionMenu(
     try {
       await runtime.setApiKey(input.value, owner.signal);
       if (owner.signal.aborted || !owner.isCurrent()) return;
-      ctx.ui.notify(`TypeSafe API key saved to ${runtime.get().path}.`, "info");
+      ctx.ui.notify(`TypeSafe API key saved to ${displayText(runtime.get().path)}.`, "info");
     } catch (error) {
       if (owner.signal.aborted || !owner.isCurrent()) return;
       ctx.ui.notify(
-        `Could not save pi-jev-compaction.json: ${sanitizeTerminalText(redactedError(error, input.value))}`,
+        `Could not save pi-jev-compact.json: ${sanitizeTerminalText(redactedError(error, input.value))}`,
         "error",
       );
     }
@@ -187,7 +187,7 @@ export async function showJevCompactionMenu(
       ctx.ui.notify("TypeSafe API key removed; Pi-native compaction is active.", "info");
     } catch (error) {
       if (owner.signal.aborted || !owner.isCurrent()) return;
-      ctx.ui.notify(`Could not update pi-jev-compaction.json: ${sanitizeTerminalText(redactedError(error))}`, "error");
+      ctx.ui.notify(`Could not update pi-jev-compact.json: ${sanitizeTerminalText(redactedError(error))}`, "error");
     }
   }
 }

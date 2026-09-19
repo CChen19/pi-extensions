@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-export const JEV_COMPACTION_DETAILS_KIND = "pi-jev-compaction";
-export const JEV_COMPACTION_DETAILS_VERSION = 1;
+export const JEV_COMPACT_DETAILS_KIND = "pi-jev-compact";
+export const JEV_COMPACT_DETAILS_VERSION = 1;
 export const MAX_HISTORY_UNITS = 512;
 export const MAX_UNIT_CHARS = 32 * 1024;
 export const MAX_TOOL_RESULT_CHARS = 2_000;
@@ -34,9 +34,9 @@ export interface HistoryUnit {
   content: string;
 }
 
-export interface JevCompactionDetails {
-  kind: typeof JEV_COMPACTION_DETAILS_KIND;
-  version: typeof JEV_COMPACTION_DETAILS_VERSION;
+export interface JevCompactDetails {
+  kind: typeof JEV_COMPACT_DETAILS_KIND;
+  version: typeof JEV_COMPACT_DETAILS_VERSION;
   compressedSummary: string;
   retainedUnits: HistoryUnit[];
   evaluator: {
@@ -335,8 +335,8 @@ function stringArray(value: unknown): string[] | undefined {
   return [...value];
 }
 
-export function parseJevCompactionDetails(value: unknown): JevCompactionDetails | undefined {
-  if (!isRecord(value) || value.kind !== JEV_COMPACTION_DETAILS_KIND || value.version !== 1) return undefined;
+export function parseJevCompactDetails(value: unknown): JevCompactDetails | undefined {
+  if (!isRecord(value) || value.kind !== JEV_COMPACT_DETAILS_KIND || value.version !== 1) return undefined;
   try {
     if (byteLength(JSON.stringify(value)) > MAX_COMPACTION_DETAILS_BYTES) return undefined;
   } catch {
@@ -366,11 +366,11 @@ export function parseJevCompactionDetails(value: unknown): JevCompactionDetails 
   const modifiedFiles = stringArray(value.modifiedFiles);
   if (!readFiles || !modifiedFiles) return undefined;
   return {
-    kind: JEV_COMPACTION_DETAILS_KIND,
-    version: JEV_COMPACTION_DETAILS_VERSION,
+    kind: JEV_COMPACT_DETAILS_KIND,
+    version: JEV_COMPACT_DETAILS_VERSION,
     compressedSummary: value.compressedSummary,
     retainedUnits: retainedUnits as HistoryUnit[],
-    evaluator: value.evaluator as JevCompactionDetails["evaluator"],
+    evaluator: value.evaluator as JevCompactDetails["evaluator"],
     readFiles,
     modifiedFiles,
   };
