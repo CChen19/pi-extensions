@@ -127,11 +127,10 @@ export default function jevExtension(pi: ExtensionAPI, options: JevExtensionOpti
     settings = applyRuntimeSettings(loaded.settings, runtimeSettings);
     if (!loaded.warning) return;
     const warning = formatJevToolError(loaded.warning);
-    if (ctx.hasUI) {
+    if (ctx.mode === "print" || ctx.mode === "json") throw warning;
+    if (ctx.hasUI && (ctx.mode === "tui" || ctx.mode === "rpc")) {
       ctx.ui.notify(warning.message, "warning");
-      return;
     }
-    throw warning;
   });
   pi.on("session_shutdown", (_event, ctx) => {
     if (ctx.sessionManager !== activeSession) return;

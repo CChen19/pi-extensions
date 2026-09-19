@@ -222,28 +222,59 @@ test("an unrelated session shutdown does not cancel the active settings load", a
   assert.equal(fetchImpl.mock.calls.length, 1);
 });
 
-test("reports sanitized settings warnings through the lifecycle in non-UI modes", async () => {
+test("routes sanitized settings warnings through each supported mode", async () => {
+  const createWarningLifecycle = () => {
+    const mock = createMockPi();
+    jevExtension(mock.pi, {
+      loadSettings: async () => ({
+        settings: { openRouterFallback: false },
+        warning: "unsafe\u001b]0;owned\u0007 settings warning",
+      }),
+    });
+    const start = mock.events.get("session_start")?.[0];
+    assert.ok(start);
+    return start;
+  };
+
+  for (const mode of ["tui", "rpc"] as const) {
+    const context = createMockContext({ hasUI: true, mode });
+    await createWarningLifecycle()({ reason: "startup" }, context.ctx);
+    const warning = context.notifications.at(-1)?.message ?? "";
+    assert.match(warning, /unsafe settings warning/u);
+    assert.equal(warning.includes("\u001b"), false);
+    assert.equal(warning.includes("\u0007"), false);
+    assert.equal(warning.includes("owned"), false);
+  }
+
+  for (const mode of ["print", "json"] as const) {
+    const context = createMockContext({ hasUI: false, mode });
+    await assert.rejects(
+      () => Promise.resolve(createWarningLifecycle()({ reason: "startup" }, context.ctx)),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /unsafe settings warning/u);
+        assert.equal(error.message.includes("\u001b"), false);
+        assert.equal(error.message.includes("\u0007"), false);
+        assert.equal(error.message.includes("owned"), false);
+        return true;
+      },
+    );
+    assert.deepEqual(context.notifications, []);
+  }
+});
+
+test("does not throw a settings warning when the context omits its mode", async () => {
   const mock = createMockPi();
   jevExtension(mock.pi, {
     loadSettings: async () => ({
       settings: { openRouterFallback: false },
-      warning: "unsafe\u001b]0;owned\u0007 settings warning",
+      warning: "settings warning",
     }),
   });
-  const context = createMockContext({ hasUI: false, mode: "json" });
+  const context = createMockContext();
   const start = mock.events.get("session_start")?.[0];
   assert.ok(start);
 
-  await assert.rejects(
-    () => Promise.resolve(start({ reason: "startup" }, context.ctx)),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /unsafe settings warning/u);
-      assert.equal(error.message.includes("\u001b"), false);
-      assert.equal(error.message.includes("\u0007"), false);
-      assert.equal(error.message.includes("owned"), false);
-      return true;
-    },
-  );
+  await start({ reason: "startup" }, context.ctx);
   assert.deepEqual(context.notifications, []);
 });
