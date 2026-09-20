@@ -39,7 +39,7 @@ export function formatUsageReport(report: UsageReport, displayState: UsageDispla
   } else if (report.providerId === "minimax" || report.providerId === "minimax-cn") {
     formatMiniMaxReport(lines, report);
   } else if (report.providerId === "xai") formatXaiReport(lines, report);
-  else if (report.providerId === "zai" || report.providerId === "zai-coding-cn") {
+  else if (report.providerId === "zai" || report.providerId === "zai-coding-cn" || report.providerId === "stepfun") {
     formatZaiReport(lines, report);
   } else formatGenericReport(lines, report);
 
@@ -79,6 +79,9 @@ export function formatUsageStatusline(
   }
   if (report.providerId === "zai" || report.providerId === "zai-coding-cn") {
     return formatZaiStatusline(report, now, showCodexResetCountdown);
+  }
+  if (report.providerId === "stepfun") {
+    return formatStepFunStatusline(report, now, showCodexResetCountdown);
   }
   return undefined;
 }
@@ -445,6 +448,27 @@ function formatZaiStatusline(report: UsageReport, now = Date.now(), showResetCou
     parts.push(`${percentRemaining(bucket)}%${countdown ? ` ↻ ${countdown}` : ""}`);
   }
   return parts.length > 0 ? `GLM ${parts.join(" │ ")}` : undefined;
+}
+
+function formatStepFunStatusline(report: UsageReport, now = Date.now(), showResetCountdown = true): string | undefined {
+  const credit = report.buckets.find((bucket) => bucket.id === "credit");
+  if (credit?.limit && credit.remaining !== undefined) {
+    const plan = report.notes?.find((note) => note.startsWith("Plan: "))?.slice("Plan: ".length);
+    const countdown = showResetCountdown ? formatResetCountdown(credit.resetsAt, now) : undefined;
+    return `StepFun${plan ? ` ${plan}` : ""} · ${percentRemaining(credit)}% credits${countdown ? ` ↻ ${countdown}` : ""}`;
+  }
+
+  const windows = [
+    report.buckets.find((bucket) => bucket.id === "five-hour"),
+    report.buckets.find((bucket) => bucket.id === "weekly"),
+  ];
+  const parts: string[] = [];
+  for (const bucket of windows) {
+    if (!bucket?.limit || bucket.remaining === undefined) continue;
+    const countdown = showResetCountdown ? formatResetCountdown(bucket.resetsAt, now) : undefined;
+    parts.push(`${percentRemaining(bucket)}%${countdown ? ` ↻ ${countdown}` : ""}`);
+  }
+  return parts.length > 0 ? `StepFun ${parts.join(" │ ")}` : undefined;
 }
 
 function formatCurrencyMetric(metric: UsageReport["metrics"][number]): string {

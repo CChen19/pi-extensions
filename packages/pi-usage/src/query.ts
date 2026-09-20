@@ -14,6 +14,18 @@ import { type MiniMaxProviderId, miniMaxUsageKind, normalizeMiniMaxUsagePayload 
 import { normalizeMoonshotBalancePayload } from "./providers/moonshot.js";
 import { normalizeOpenCodeZenPayload } from "./providers/opencode-zen.js";
 import { normalizeOpenRouterKeyPayload } from "./providers/openrouter.js";
+import { normalizeStepFunPlanStatusPayload, normalizeStepFunRateLimitPayload } from "./providers/stepfun.js";
+import {
+  refreshStepFunSession,
+  requireStepFunToken,
+  resolveStepFunCredentials,
+  type StepFunPlatform,
+  stepfunDashboardUrl,
+  stepfunPlatformForApiBaseUrl,
+  stepfunPlatformForToken,
+  stepfunRequestHeaders,
+} from "./providers/stepfun-auth.js";
+import { isStepFunAuthError, stepfunResponseError } from "./providers/stepfun-errors.js";
 import { normalizeVercelAIGatewayCreditsPayload } from "./providers/vercel-ai-gateway.js";
 import { normalizeXaiBillingPayload } from "./providers/xai.js";
 import { normalizeZaiQuotaPayload, normalizeZaiSubscriptionPayload } from "./providers/zai.js";
@@ -30,6 +42,9 @@ import type {
   OpenRouterKeyPayload,
   PiModel,
   ResolvedUsageAuth,
+  StepFunPlanInfo,
+  StepFunPlanStatusPayload,
+  StepFunRateLimitPayload,
   UsageProviderAdapter,
   UsageQuerySettings,
   UsageReport,
@@ -255,6 +270,15 @@ export const SUPPORTED_ADAPTERS: readonly UsageProviderAdapter[] = [
     semantics: { kind: "consumer-subscription", label: "GLM Coding Plan usage" },
     async query(auth, signal, timeoutMs, guard) {
       return queryZaiUsage("zai-coding-cn", "Z.AI Coding CN", auth, signal, timeoutMs, guard);
+    },
+  },
+  {
+    id: "stepfun",
+    displayName: "StepFun",
+    invalidateCacheOnFailure: true,
+    semantics: { kind: "consumer-subscription", label: "Step Plan usage" },
+    async query(auth, signal, timeoutMs) {
+      return queryStepFunUsage("stepfun", "StepFun", auth, signal, timeoutMs);
     },
   },
 ];
@@ -580,7 +604,7 @@ export async function fetchProviderJson(
     body?: Record<string, unknown>;
     redirect?: RequestRedirect;
     userAgent?: boolean;
-    responseError?: (status: number, text: string) => string | undefined;
+    responseError?: (status: number, text: string) => string | Error | undefined;
   } = {},
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
@@ -618,7 +642,7 @@ export async function fetchProviderJson(
     );
     if (controller.signal.aborted) throw Object.assign(new Error("Usage query aborted."), { name: "AbortError" });
     const responseError = request.responseError?.(response.status, text);
-    if (responseError) throw new Error(responseError);
+    if (responseError) throw typeof responseError === "string" ? new Error(responseError) : responseError;
     if (!response.ok) {
       throw new Error(
         `${description} returned ${response.status} ${response.statusText}: ${redactUsageError(text, auth.secrets)}`,
@@ -904,6 +928,9 @@ function hasOfficialUrlOrigin(value: string, providerId: string): boolean {
     if (providerId === "xai") return url.origin === "https://api.x.ai";
     if (providerId === "zai") return url.origin === "https://api.z.ai";
     if (providerId === "zai-coding-cn") return url.origin === "https://open.bigmodel.cn";
+    if (providerId === "stepfun") {
+      return ["https://api.stepfun.ai", "https://api.stepfun.com"].includes(url.origin);
+    }
     if (providerId === "github-copilot") {
       return url.protocol === "https:" && /^api\.[a-z0-9-]+\.githubcopilot\.com$/u.test(url.hostname);
     }
@@ -1055,6 +1082,97 @@ async function fetchZaiPlan(
       { responseError: zaiResponseError },
     )) as ZaiSubscriptionPayload;
     return normalizeZaiSubscriptionPayload(payload);
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return undefined;
+  }
+}
+
+// StepFun meters the Step Plan on its regional platform dashboard, which rejects Step Plan API
+// keys and only accepts an Oasis-Token web session. The token's app_id selects the China or
+// overseas platform; an expired session is refreshed once before the failure surfaces.
+async function queryStepFunUsage(
+  providerId: string,
+  providerName: string,
+  auth: ResolvedUsageAuth,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<UsageReport> {
+  const startedAt = Date.now();
+  const token = requireStepFunToken(await resolveStepFunCredentials());
+  const fallbackPlatform = stepfunPlatformForApiBaseUrl(auth.model.baseUrl);
+
+  const queryRateLimit = async (sessionToken: string): Promise<StepFunRateLimitPayload> => {
+    const platform = stepfunPlatformForToken(sessionToken) ?? fallbackPlatform;
+    const sessionAuth: ResolvedUsageAuth = {
+      ...auth,
+      headers: stepfunRequestHeaders(sessionToken, platform),
+      secrets: [...auth.secrets, sessionToken],
+    };
+    return (await fetchProviderJson(
+      stepfunDashboardUrl(platform, "QueryStepPlanRateLimit"),
+      sessionAuth,
+      signal,
+      remainingTimeout(timeoutMs, startedAt, `fetching ${providerName} quota`),
+      `${providerName} quota endpoint`,
+      { method: "POST", body: {}, responseError: stepfunResponseError },
+    )) as StepFunRateLimitPayload;
+  };
+
+  let activeToken = token;
+  let payload: StepFunRateLimitPayload;
+  try {
+    payload = await queryRateLimit(activeToken);
+  } catch (error) {
+    if (isAbortError(error) || !isStepFunAuthError(error)) throw error;
+    activeToken = await refreshStepFunSession(
+      token,
+      signal,
+      remainingTimeout(timeoutMs, startedAt, `refreshing the ${providerName} session`),
+      fallbackPlatform,
+    );
+    payload = await queryRateLimit(activeToken);
+  }
+
+  const activePlatform = stepfunPlatformForToken(activeToken) ?? fallbackPlatform;
+  const plan = await fetchStepFunPlan(
+    providerName,
+    auth,
+    activeToken,
+    activePlatform,
+    signal,
+    timeoutMs - (Date.now() - startedAt),
+  );
+  return normalizeStepFunRateLimitPayload(providerId, providerName, payload, Date.now(), plan);
+}
+
+// The plan endpoint is undocumented and only contributes the plan name, so any non-abort failure
+// is swallowed instead of blanking the required quota report (same policy as the Z.AI plan
+// endpoint).
+async function fetchStepFunPlan(
+  providerName: string,
+  auth: ResolvedUsageAuth,
+  token: string,
+  platform: StepFunPlatform,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<StepFunPlanInfo | undefined> {
+  if (timeoutMs <= 0 || signal.aborted) return undefined;
+  try {
+    const sessionAuth: ResolvedUsageAuth = {
+      ...auth,
+      headers: stepfunRequestHeaders(token, platform),
+      secrets: [...auth.secrets, token],
+    };
+    const payload = (await fetchProviderJson(
+      stepfunDashboardUrl(platform, "GetStepPlanStatus"),
+      sessionAuth,
+      signal,
+      timeoutMs,
+      `${providerName} plan endpoint`,
+      { method: "POST", body: {}, responseError: stepfunResponseError },
+    )) as StepFunPlanStatusPayload;
+    return normalizeStepFunPlanStatusPayload(payload);
   } catch (error) {
     if (isAbortError(error)) throw error;
     return undefined;

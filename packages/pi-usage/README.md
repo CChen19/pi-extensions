@@ -126,6 +126,7 @@ Currencies and billing targets remain separate.
 | OpenCode Go | Rolling, weekly, and monthly plan windows |
 | xAI | OAuth subscription allowance and credits; explicit menu queries only |
 | Z.AI | Coding Plan quota windows, MCP allowance, plan name, and renewal date |
+| StepFun | Step Plan rolling 5-hour/weekly windows or the monthly Credit pool, plus the plan name |
 
 Read the [provider reference](./docs/providers.md) for provider IDs, exact endpoints, authentication requirements, normalization rules, statusline examples, limitations, and pinned contract evidence.
 Codex reset redemption requires a freshly matched current OAuth account and explicit confirmation; custom or proxy origins fail before mutation.

@@ -1495,6 +1495,465 @@ function asNonnegativeNumber3(value) {
   return value;
 }
 
+// src/providers/stepfun-errors.ts
+var CODE_MESSAGES = {
+  unauthenticated: "StepFun platform session is not authenticated. Obtain a new platform Oasis-Token.",
+  permission_denied: "StepFun platform denied the session. Obtain a new platform Oasis-Token.",
+  invalid_argument: "StepFun platform rejected the request. Try again later.",
+  internal: "StepFun platform internal error. Try again later.",
+  unavailable: "StepFun platform is unavailable. Try again later.",
+  rate_limited: "StepFun platform request rate limit reached. Try again later."
+};
+var HTTP_MESSAGES = {
+  400: "StepFun platform rejected the request. Try again later.",
+  401: "StepFun platform session expired. Obtain a new platform Oasis-Token.",
+  403: "StepFun platform denied the session. Obtain a new platform Oasis-Token.",
+  429: "StepFun platform request rate limit reached. Try again later.",
+  500: "StepFun platform internal error. Try again later.",
+  502: "StepFun platform is unavailable. Try again later.",
+  503: "StepFun platform is unavailable. Try again later."
+};
+var AUTH_FAILURE = /* @__PURE__ */ Symbol("stepfun-auth-failure");
+function stepfunAuthError(message) {
+  return Object.assign(new Error(message), { [AUTH_FAILURE]: true });
+}
+function isStepFunAuthError(error) {
+  return error instanceof Error && AUTH_FAILURE in error;
+}
+function stepfunHttpErrorMessage(status) {
+  return `StepFun HTTP ${status}: ${HTTP_MESSAGES[status] ?? "API request failed."}`;
+}
+function stepfunPayloadError(payload) {
+  const object = asObject11(payload);
+  if (!object) return void 0;
+  const code = typeof object.code === "string" && object.code.trim() ? object.code.trim() : void 0;
+  if (code) return `StepFun ${code}: ${CODE_MESSAGES[code] ?? "API request failed."}`;
+  if (typeof object.status === "number" && object.status !== 1) return "StepFun: API request failed.";
+  return void 0;
+}
+function stepfunResponseError(status, text) {
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    if (status >= 200 && status < 300) return "StepFun: Invalid JSON response.";
+  }
+  const payloadError = stepfunPayloadError(payload);
+  if (payloadError) return classifyAuthFailure(status, payload, payloadError);
+  if (status < 200 || status >= 300) {
+    return classifyAuthFailure(status, payload, stepfunHttpErrorMessage(status));
+  }
+  return void 0;
+}
+function classifyAuthFailure(status, payload, message) {
+  if (status < 200 || status >= 300) return status === 401 ? stepfunAuthError(message) : message;
+  const object = asObject11(payload);
+  const code = typeof object?.code === "string" ? object.code : void 0;
+  const rejectedStatus = typeof object?.status === "number" && object.status === 0;
+  if (code === "unauthenticated" || rejectedStatus) return stepfunAuthError(message);
+  return message;
+}
+function asObject11(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+
+// src/providers/stepfun.ts
+var FIVE_HOUR_WINDOW_MINUTES2 = 300;
+var WEEKLY_WINDOW_MINUTES2 = 10080;
+var MONTHLY_WINDOW_MINUTES = 43200;
+var CREDIT_PLAN_FAMILY = 2;
+function normalizeStepFunRateLimitPayload(providerId, providerName, payload, capturedAt, plan) {
+  const error = stepfunPayloadError(payload);
+  if (error) throw new Error(error);
+  const fiveHourReset = flexibleTimestamp(payload.five_hour_usage_reset_time);
+  const weeklyReset = flexibleTimestamp(payload.weekly_usage_reset_time);
+  const hasLiveWindow = fiveHourReset !== void 0 || weeklyReset !== void 0;
+  const credit = asObject12(payload.plan_credit_rate_limit);
+  const creditLeftRate = creditLeftRateOf(credit);
+  const hasCreditPool = creditLeftRate !== void 0 || hasCreditBuckets(credit);
+  const isCreditPlan = !hasLiveWindow && (hasCreditPool || flexibleNumber(payload.plan_family) === CREDIT_PLAN_FAMILY);
+  const buckets = [];
+  const metrics = [];
+  if (isCreditPlan) {
+    addCreditBucket(
+      buckets,
+      metrics,
+      credit,
+      creditLeftRate,
+      flexibleTimestamp(credit?.subscription_credit_reset_time)
+    );
+  } else {
+    addRateWindow(
+      buckets,
+      "five-hour",
+      "5h window",
+      FIVE_HOUR_WINDOW_MINUTES2,
+      payload.five_hour_usage_left_rate,
+      fiveHourReset
+    );
+    addRateWindow(
+      buckets,
+      "weekly",
+      "Weekly window",
+      WEEKLY_WINDOW_MINUTES2,
+      payload.weekly_usage_left_rate,
+      weeklyReset
+    );
+  }
+  if (buckets.length === 0) {
+    throw new Error("StepFun quota endpoint returned no displayable usage data.");
+  }
+  const notes = plan?.name ? [`Plan: ${plan.name}`] : [];
+  return {
+    providerId,
+    providerName,
+    capturedAt,
+    source: "stepfun-platform",
+    semantics: { kind: "consumer-subscription", label: "Step Plan usage" },
+    buckets,
+    metrics,
+    ...notes.length > 0 ? { notes } : {}
+  };
+}
+function normalizeStepFunPlanStatusPayload(payload) {
+  if (stepfunPayloadError(payload)) return void 0;
+  const name = asString5(asObject12(payload.subscription)?.name);
+  return name ? { name } : void 0;
+}
+function addRateWindow(buckets, id, label, windowMinutes, rawLeftRate, resetsAt) {
+  const leftRate = flexibleNumber(rawLeftRate);
+  if (leftRate === void 0) return;
+  buckets.push({
+    id,
+    label,
+    used: roundPercent((1 - leftRate) * 100),
+    remaining: roundPercent(leftRate * 100),
+    limit: 100,
+    unit: "percent",
+    windowMinutes,
+    ...resetsAt !== void 0 ? { resetsAt } : {}
+  });
+}
+function addCreditBucket(buckets, metrics, credit, creditLeftRate, resetsAt) {
+  if (creditLeftRate === void 0) return;
+  buckets.push({
+    id: "credit",
+    label: "Monthly credits",
+    used: roundPercent((1 - creditLeftRate) * 100),
+    remaining: roundPercent(creditLeftRate * 100),
+    limit: 100,
+    unit: "percent",
+    windowMinutes: MONTHLY_WINDOW_MINUTES,
+    ...resetsAt !== void 0 ? { resetsAt } : {}
+  });
+  const totals = creditBucketTotals(credit);
+  if (totals) {
+    metrics.push({ id: "credit-remaining", label: "Credits remaining", value: totals.residual, unit: "count" });
+    metrics.push({ id: "credit-total", label: "Credits total", value: totals.total, unit: "count" });
+  }
+}
+function creditLeftRateOf(credit) {
+  if (!credit) return void 0;
+  const totals = creditBucketTotals(credit);
+  if (totals && totals.total > 0) return clampRate(totals.residual / totals.total);
+  const subscription = flexibleNumber(credit.subscription_credit_left_rate);
+  if (subscription !== void 0) return clampRate(subscription);
+  const topup = flexibleNumber(credit.topup_credit_left_rate);
+  return topup === void 0 ? void 0 : clampRate(topup);
+}
+function creditBucketTotals(credit) {
+  if (!Array.isArray(credit?.credit_buckets) || credit.credit_buckets.length === 0) return void 0;
+  let total = 0;
+  let residual = 0;
+  for (const raw of credit.credit_buckets) {
+    const bucket = asObject12(raw);
+    const bucketTotal = flexibleNumber(bucket?.credit_total);
+    const bucketResidual = flexibleNumber(bucket?.credit_residual);
+    if (bucketTotal === void 0 || bucketResidual === void 0) return void 0;
+    if (bucketTotal <= 0 || bucketResidual < 0 || bucketResidual > bucketTotal) return void 0;
+    total += bucketTotal;
+    residual += bucketResidual;
+  }
+  return { total, residual };
+}
+function hasCreditBuckets(credit) {
+  return Array.isArray(credit?.credit_buckets) && credit.credit_buckets.length > 0;
+}
+function flexibleNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : void 0;
+  }
+  return void 0;
+}
+function flexibleTimestamp(value) {
+  const seconds = flexibleNumber(value);
+  if (seconds === void 0 || seconds <= 0) return void 0;
+  return Math.floor(seconds);
+}
+function clampRate(value) {
+  return Math.min(1, Math.max(0, value));
+}
+function roundPercent(value) {
+  return Math.round(value * 100) / 100;
+}
+function asObject12(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  return value;
+}
+function asString5(value) {
+  if (typeof value !== "string") return void 0;
+  return sanitizeDisplayText(value, 80) || void 0;
+}
+
+// src/providers/stepfun-auth.ts
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+var STEPFUN_CHINA_PLATFORM = Object.freeze({
+  origin: "https://platform.stepfun.com",
+  appId: "10300"
+});
+var STEPFUN_OVERSEAS_PLATFORM = Object.freeze({
+  origin: "https://platform.stepfun.ai",
+  appId: "20700"
+});
+var STEPFUN_DEFAULT_WEB_ID = "c8a1002d2c457e758785a9979832217c7c0b884c";
+var STEPFUN_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+var STEPFUN_CREDENTIALS_FILE = "pi-usage-stepfun.json";
+var MAX_CREDENTIAL_FILE_BYTES = 16 * 1024;
+var MAX_SUCCESS_BODY_BYTES = 64 * 1024;
+var MAX_ERROR_BODY_BYTES = 4 * 1024;
+var TOKEN_PATTERN = /^[A-Za-z0-9._~+/-]{8,8192}$/u;
+var DEVICE_ID_PATTERN = /^[A-Za-z0-9._~-]{1,128}$/u;
+function stepfunCredentialsFromEnv(env = process.env) {
+  return { token: normalizeStepFunToken(env.STEPFUN_TOKEN) };
+}
+async function resolveStepFunCredentials(env = process.env) {
+  const fromEnv = stepfunCredentialsFromEnv(env);
+  if (fromEnv.token || env.STEPFUN_CREDENTIALS_FILE === "") return fromEnv;
+  const path = env.STEPFUN_CREDENTIALS_FILE ?? join(getAgentDir(), STEPFUN_CREDENTIALS_FILE);
+  return readStepFunCredentialsFile(path);
+}
+async function readStepFunCredentialsFile(path) {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return {};
+    throw new Error("StepFun credentials file could not be opened safely.");
+  }
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile() || stats.size > MAX_CREDENTIAL_FILE_BYTES) {
+      throw new Error("StepFun credentials file is invalid.");
+    }
+    if (process.platform !== "win32" && (stats.mode & 63) !== 0) {
+      throw new Error("StepFun credentials file must be readable only by its owner (mode 600).");
+    }
+    const value = asObject13(JSON.parse(await handle.readFile("utf8")));
+    if (!value || !validOptionalString(value.token)) throw new Error("StepFun credentials file is invalid.");
+    return { token: normalizeStepFunToken(value.token) };
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("StepFun credentials file")) throw error;
+    throw new Error("StepFun credentials file is invalid.");
+  } finally {
+    await handle.close();
+  }
+}
+function normalizeStepFunToken(value) {
+  if (typeof value !== "string") return void 0;
+  let token = value.trim();
+  const cookieMatch = /(?:^|;\s*)Oasis-Token=([^;]*)/iu.exec(token);
+  if (cookieMatch) token = cookieMatch[1] ?? "";
+  if (token.length >= 2 && (token.startsWith('"') && token.endsWith('"') || token.startsWith("'") && token.endsWith("'"))) {
+    token = token.slice(1, -1).trim();
+  }
+  return token ? token.slice(0, 8192) : void 0;
+}
+function requireStepFunToken(credentials) {
+  if (!credentials.token) {
+    throw new Error(
+      "StepFun platform credentials are not configured. Set STEPFUN_TOKEN or create ~/.pi/agent/pi-usage-stepfun.json with an Oasis-Token."
+    );
+  }
+  if (!TOKEN_PATTERN.test(credentials.token)) throw new Error("StepFun Oasis-Token format is invalid.");
+  return credentials.token;
+}
+async function refreshStepFunSession(token, signal, timeoutMs, fallbackPlatform = STEPFUN_CHINA_PLATFORM) {
+  const platform = stepfunPlatformForToken(token) ?? fallbackPlatform;
+  const webid = stepfunWebId(token);
+  const response = await stepfunPlatformFetch(
+    `${platform.origin}/passport/proto.api.passport.v1.PassportService/RefreshToken`,
+    {
+      headers: {
+        ...stepfunBaseHeaders(platform),
+        "oasis-webid": webid,
+        "Oasis-Token": token,
+        Cookie: `Oasis-Token=${token}; Oasis-Webid=${webid}`
+      },
+      signal,
+      timeoutMs,
+      secrets: [token]
+    }
+  );
+  if (!response.ok) throw new Error(`StepFun platform session request failed with HTTP ${response.status}.`);
+  const refreshed = combinedToken(parseJson(response.text));
+  if (!refreshed) throw new Error("StepFun token refresh did not return a session token.");
+  return refreshed;
+}
+function stepfunWebId(token) {
+  for (const half of token.split("...").reverse()) {
+    const deviceId = jwtPayload(half)?.device_id;
+    if (typeof deviceId === "string" && DEVICE_ID_PATTERN.test(deviceId)) return deviceId;
+  }
+  return STEPFUN_DEFAULT_WEB_ID;
+}
+function stepfunPlatformForApiBaseUrl(baseUrl) {
+  let hostname;
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    throw new Error("StepFun model base URL is invalid.");
+  }
+  if (hostname === "api.stepfun.ai") return STEPFUN_OVERSEAS_PLATFORM;
+  if (hostname === "api.stepfun.com") return STEPFUN_CHINA_PLATFORM;
+  throw new Error("StepFun model base URL is not an official StepFun origin.");
+}
+function stepfunPlatformForToken(token) {
+  for (const half of token.split("...").reverse()) {
+    const appId = jwtPayload(half)?.app_id;
+    const normalized = typeof appId === "string" || typeof appId === "number" ? String(appId) : void 0;
+    if (normalized === STEPFUN_OVERSEAS_PLATFORM.appId) return STEPFUN_OVERSEAS_PLATFORM;
+    if (normalized === STEPFUN_CHINA_PLATFORM.appId) return STEPFUN_CHINA_PLATFORM;
+  }
+  return void 0;
+}
+function stepfunDashboardUrl(platform, method) {
+  return `${platform.origin}/api/step.openapi.devcenter.Dashboard/${method}`;
+}
+function stepfunRequestHeaders(token, fallbackPlatform = STEPFUN_CHINA_PLATFORM) {
+  const webid = stepfunWebId(token);
+  const platform = stepfunPlatformForToken(token) ?? fallbackPlatform;
+  return {
+    ...stepfunBaseHeaders(platform),
+    "oasis-webid": webid,
+    Cookie: `Oasis-Token=${token}; Oasis-Webid=${webid}`
+  };
+}
+async function stepfunPlatformFetch(url, request) {
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  if (request.signal.aborted) controller.abort();
+  else request.signal.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = setTimeout(() => controller.abort(), request.timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: request.headers,
+      body: "{}",
+      signal: controller.signal,
+      redirect: "error"
+    });
+    if (controller.signal.aborted) throw abortError();
+    const text = await readBoundedText(
+      response,
+      response.ok ? MAX_SUCCESS_BODY_BYTES : MAX_ERROR_BODY_BYTES,
+      controller.signal
+    );
+    if (controller.signal.aborted) throw abortError();
+    return { ok: response.ok, status: response.status, text };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    throw new Error(redactUsageError(errorMessage(error), request.secrets));
+  } finally {
+    clearTimeout(timeout);
+    request.signal.removeEventListener("abort", abortFromCaller);
+  }
+}
+async function readBoundedText(response, maxBytes, signal) {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  const cancel = () => void reader.cancel().catch(() => void 0);
+  if (signal.aborted) cancel();
+  else signal.addEventListener("abort", cancel, { once: true });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const remaining = maxBytes - total;
+      if (value.byteLength > remaining) {
+        if (remaining > 0) {
+          chunks.push(value.subarray(0, remaining));
+          total += remaining;
+        }
+        await reader.cancel();
+        break;
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+function combinedToken(payload) {
+  const object = asObject13(payload);
+  const access = tokenRaw(object?.accessToken);
+  if (!access) return void 0;
+  const refresh = tokenRaw(object?.refreshToken);
+  return refresh ? `${access}...${refresh}` : access;
+}
+function tokenRaw(value) {
+  const raw = asObject13(value)?.raw;
+  return typeof raw === "string" && TOKEN_PATTERN.test(raw) ? raw : void 0;
+}
+function stepfunBaseHeaders(platform) {
+  return {
+    "content-type": "application/json",
+    "oasis-appid": platform.appId,
+    "oasis-platform": "web",
+    "oasis-webid": STEPFUN_DEFAULT_WEB_ID,
+    "user-agent": STEPFUN_USER_AGENT
+  };
+}
+function jwtPayload(jwt) {
+  const payload = jwt.split(".")[1];
+  if (!payload) return void 0;
+  try {
+    return asObject13(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
+  } catch {
+    return void 0;
+  }
+}
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+function validOptionalString(value) {
+  return value === void 0 || typeof value === "string";
+}
+function errorCode(error) {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : void 0;
+}
+function asObject13(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+
 // src/providers/vercel-ai-gateway.ts
 var DECIMAL_AMOUNT3 = /^(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 function normalizeVercelAIGatewayCreditsPayload(payload, capturedAt) {
@@ -1726,7 +2185,7 @@ var ERROR_MESSAGES = {
   "1320": "5-hour limit reached; extra usage blocked by monthly spend limit.",
   "1321": "7-day limit reached; extra usage blocked by monthly spend limit."
 };
-var HTTP_MESSAGES = {
+var HTTP_MESSAGES2 = {
   400: "Invalid request. Check the API documentation.",
   401: "Authentication failed. Check your API key.",
   403: "Access denied. Check your permissions.",
@@ -1734,11 +2193,11 @@ var HTTP_MESSAGES = {
   500: "Internal error. Try again later."
 };
 function zaiPayloadError(payload) {
-  const object = asObject11(payload);
+  const object = asObject14(payload);
   if (!object) return void 0;
-  const nested = asObject11(object.error);
+  const nested = asObject14(object.error);
   const rawCode = nested?.code === void 0 ? object.code : nested.code;
-  const code = errorCode(rawCode);
+  const code = errorCode2(rawCode);
   if (object.error === void 0 && object.success !== false && (rawCode === void 0 || code === "0" || code === "200")) {
     return void 0;
   }
@@ -1754,35 +2213,35 @@ function zaiResponseError(status, text) {
   const error = zaiPayloadError(payload);
   if (error) return error;
   if (status < 200 || status >= 300) {
-    return `Z.AI HTTP ${status}: ${HTTP_MESSAGES[status] ?? "API request failed."}`;
+    return `Z.AI HTTP ${status}: ${HTTP_MESSAGES2[status] ?? "API request failed."}`;
   }
   return void 0;
 }
-function errorCode(value) {
+function errorCode2(value) {
   if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 9999) {
     return String(value);
   }
   return typeof value === "string" && /^(?:0|[1-9]\d{0,3})$/u.test(value) ? value : void 0;
 }
-function asObject11(value) {
+function asObject14(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
 }
 
 // src/providers/zai.ts
-var FIVE_HOUR_WINDOW_MINUTES2 = 300;
-var WEEKLY_WINDOW_MINUTES2 = 10080;
+var FIVE_HOUR_WINDOW_MINUTES3 = 300;
+var WEEKLY_WINDOW_MINUTES3 = 10080;
 function normalizeZaiQuotaPayload(providerId, providerName, payload, capturedAt, plan) {
   const error = zaiPayloadError(payload);
   if (error) throw new Error(error);
-  const data = asObject12(payload.data);
+  const data = asObject15(payload.data);
   if (!data) throw new Error("Z.AI quota response data was not an object.");
   const limits = Array.isArray(data.limits) ? data.limits : [];
   const buckets = [];
   const metrics = [];
   for (const raw of limits) {
-    const limit = asObject12(raw);
+    const limit = asObject15(raw);
     if (!limit) continue;
-    const type = asString5(limit.type);
+    const type = asString6(limit.type);
     const unit = asNonnegativeNumber4(limit.unit);
     const isPlanUsage = type === "TOKENS_LIMIT" || type === "CREDIT_LIMIT";
     if (type === "TIME_LIMIT") {
@@ -1804,7 +2263,7 @@ function normalizeZaiQuotaPayload(providerId, providerName, payload, capturedAt,
     throw new Error("Z.AI quota endpoint returned no displayable usage data.");
   }
   const notes = [];
-  const level = asString5(data.level);
+  const level = asString6(data.level);
   const planLabel = plan?.name ?? level;
   if (planLabel) {
     notes.push(plan?.renewsAt ? `Plan: ${planLabel} \xB7 renews ${plan.renewsAt}` : `Plan: ${planLabel}`);
@@ -1825,12 +2284,12 @@ function normalizeZaiSubscriptionPayload(payload) {
   if (!Array.isArray(payload.data)) return void 0;
   const candidates = [];
   for (const raw of payload.data) {
-    const entry = asObject12(raw);
+    const entry = asObject15(raw);
     if (!entry) continue;
-    const name = asString5(entry.productName);
+    const name = asString6(entry.productName);
     if (!name) continue;
     const renewsAt = planRenewalDate(entry.nextRenewTime);
-    const status = asString5(entry.status)?.toUpperCase();
+    const status = asString6(entry.status)?.toUpperCase();
     const inCurrentPeriod = asBoolean(entry.inCurrentPeriod);
     candidates.push({
       plan: { name, ...renewsAt !== void 0 ? { renewsAt } : {} },
@@ -1852,15 +2311,15 @@ function planRenewalDate(value) {
 }
 function sessionWindowMinutes(limit) {
   const hours = asPositiveNumber(limit.number);
-  return hours === void 0 ? FIVE_HOUR_WINDOW_MINUTES2 : Math.round(hours * 60);
+  return hours === void 0 ? FIVE_HOUR_WINDOW_MINUTES3 : Math.round(hours * 60);
 }
 function sessionWindowLabel(limit) {
   const minutes = sessionWindowMinutes(limit);
-  return minutes === FIVE_HOUR_WINDOW_MINUTES2 ? "5h window" : `${Math.round(minutes / 60)}h window`;
+  return minutes === FIVE_HOUR_WINDOW_MINUTES3 ? "5h window" : `${Math.round(minutes / 60)}h window`;
 }
 function weeklyWindowMinutes(limit) {
   const weeks = asPositiveNumber(limit.number);
-  return weeks === void 0 ? WEEKLY_WINDOW_MINUTES2 : Math.round(weeks * WEEKLY_WINDOW_MINUTES2);
+  return weeks === void 0 ? WEEKLY_WINDOW_MINUTES3 : Math.round(weeks * WEEKLY_WINDOW_MINUTES3);
 }
 function addPercentBucket(buckets, limit, id, label, windowMinutes) {
   const used = asNonnegativeNumber4(limit.percentage);
@@ -1897,19 +2356,19 @@ function addCountBucket(buckets, limit, id, label, windowMinutes) {
 function addUsageDetailMetrics(metrics, value) {
   if (!Array.isArray(value)) return;
   for (const raw of value) {
-    const detail = asObject12(raw);
+    const detail = asObject15(raw);
     if (!detail) continue;
-    const label = asString5(detail.modelCode);
+    const label = asString6(detail.modelCode);
     const usage = asNonnegativeNumber4(detail.usage);
     if (!label || usage === void 0) continue;
     metrics.push({ id: `mcp-${kebabCase(label)}`, label, value: usage, unit: "count" });
   }
 }
-function asObject12(value) {
+function asObject15(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
   return value;
 }
-function asString5(value) {
+function asString6(value) {
   if (typeof value !== "string") return void 0;
   return sanitizeDisplayText(value, 80) || void 0;
 }
@@ -2053,8 +2512,8 @@ var XAI_CLIENT_HEADERS = Object.freeze({
   "x-grok-client-version": "1.0.10",
   "x-grok-client-mode": "interactive"
 });
-var MAX_SUCCESS_BODY_BYTES = 64 * 1024;
-var MAX_ERROR_BODY_BYTES = 4 * 1024;
+var MAX_SUCCESS_BODY_BYTES2 = 64 * 1024;
+var MAX_ERROR_BODY_BYTES2 = 4 * 1024;
 var AUTH_FINGERPRINT_SALT = randomBytes(32);
 var SUPPORTED_ADAPTERS = [
   {
@@ -2238,6 +2697,15 @@ var SUPPORTED_ADAPTERS = [
     semantics: { kind: "consumer-subscription", label: "GLM Coding Plan usage" },
     async query(auth, signal, timeoutMs, guard) {
       return queryZaiUsage("zai-coding-cn", "Z.AI Coding CN", auth, signal, timeoutMs, guard);
+    }
+  },
+  {
+    id: "stepfun",
+    displayName: "StepFun",
+    invalidateCacheOnFailure: true,
+    semantics: { kind: "consumer-subscription", label: "Step Plan usage" },
+    async query(auth, signal, timeoutMs) {
+      return queryStepFunUsage("stepfun", "StepFun", auth, signal, timeoutMs);
     }
   }
 ];
@@ -2518,14 +2986,14 @@ async function fetchProviderJson(url, auth, signal, timeoutMs, description, requ
     if (controller.signal.aborted) throw Object.assign(new Error("Usage query aborted."), { name: "AbortError" });
     const text = await readBoundedResponse(
       response,
-      response.ok ? MAX_SUCCESS_BODY_BYTES : MAX_ERROR_BODY_BYTES,
+      response.ok ? MAX_SUCCESS_BODY_BYTES2 : MAX_ERROR_BODY_BYTES2,
       !response.ok,
       description,
       controller.signal
     );
     if (controller.signal.aborted) throw Object.assign(new Error("Usage query aborted."), { name: "AbortError" });
     const responseError = request.responseError?.(response.status, text);
-    if (responseError) throw new Error(responseError);
+    if (responseError) throw typeof responseError === "string" ? new Error(responseError) : responseError;
     if (!response.ok) {
       throw new Error(
         `${description} returned ${response.status} ${response.statusText}: ${redactUsageError(text, auth.secrets)}`
@@ -2601,7 +3069,7 @@ function resolveXaiUsageAuth(auth, model, salt, candidates) {
   const matches = [];
   for (const candidate of candidates) {
     try {
-      const credential = asObject13(candidate);
+      const credential = asObject16(candidate);
       if (credential?.type !== "oauth") continue;
       sawOAuth = true;
       if (credential.access !== resolvedAccess) continue;
@@ -2655,7 +3123,7 @@ function resolveGitHubCopilotUsageAuth(auth, model, salt, candidates, standalone
   const matches = /* @__PURE__ */ new Map();
   for (const candidate of candidates) {
     try {
-      const credential = asObject13(candidate);
+      const credential = asObject16(candidate);
       if (credential?.type !== "oauth") continue;
       sawOAuth = true;
       const storedAccess2 = typeof credential.access === "string" && credential.access ? credential.access : void 0;
@@ -2715,7 +3183,7 @@ function bearerToken(authorization) {
   const match = /^Bearer\s+(.+)$/iu.exec(authorization ?? "");
   return match?.[1];
 }
-function asObject13(value) {
+function asObject16(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
   return value;
 }
@@ -2750,6 +3218,9 @@ function hasOfficialUrlOrigin(value, providerId) {
     if (providerId === "xai") return url.origin === "https://api.x.ai";
     if (providerId === "zai") return url.origin === "https://api.z.ai";
     if (providerId === "zai-coding-cn") return url.origin === "https://open.bigmodel.cn";
+    if (providerId === "stepfun") {
+      return ["https://api.stepfun.ai", "https://api.stepfun.com"].includes(url.origin);
+    }
     if (providerId === "github-copilot") {
       return url.protocol === "https:" && /^api\.[a-z0-9-]+\.githubcopilot\.com$/u.test(url.hostname);
     }
@@ -2862,6 +3333,73 @@ async function fetchZaiPlan(providerName, auth, signal, timeoutMs) {
       { responseError: zaiResponseError }
     );
     return normalizeZaiSubscriptionPayload(payload);
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return void 0;
+  }
+}
+async function queryStepFunUsage(providerId, providerName, auth, signal, timeoutMs) {
+  const startedAt = Date.now();
+  const token = requireStepFunToken(await resolveStepFunCredentials());
+  const fallbackPlatform = stepfunPlatformForApiBaseUrl(auth.model.baseUrl);
+  const queryRateLimit = async (sessionToken) => {
+    const platform = stepfunPlatformForToken(sessionToken) ?? fallbackPlatform;
+    const sessionAuth = {
+      ...auth,
+      headers: stepfunRequestHeaders(sessionToken, platform),
+      secrets: [...auth.secrets, sessionToken]
+    };
+    return await fetchProviderJson(
+      stepfunDashboardUrl(platform, "QueryStepPlanRateLimit"),
+      sessionAuth,
+      signal,
+      remainingTimeout2(timeoutMs, startedAt, `fetching ${providerName} quota`),
+      `${providerName} quota endpoint`,
+      { method: "POST", body: {}, responseError: stepfunResponseError }
+    );
+  };
+  let activeToken = token;
+  let payload;
+  try {
+    payload = await queryRateLimit(activeToken);
+  } catch (error) {
+    if (isAbortError(error) || !isStepFunAuthError(error)) throw error;
+    activeToken = await refreshStepFunSession(
+      token,
+      signal,
+      remainingTimeout2(timeoutMs, startedAt, `refreshing the ${providerName} session`),
+      fallbackPlatform
+    );
+    payload = await queryRateLimit(activeToken);
+  }
+  const activePlatform = stepfunPlatformForToken(activeToken) ?? fallbackPlatform;
+  const plan = await fetchStepFunPlan(
+    providerName,
+    auth,
+    activeToken,
+    activePlatform,
+    signal,
+    timeoutMs - (Date.now() - startedAt)
+  );
+  return normalizeStepFunRateLimitPayload(providerId, providerName, payload, Date.now(), plan);
+}
+async function fetchStepFunPlan(providerName, auth, token, platform, signal, timeoutMs) {
+  if (timeoutMs <= 0 || signal.aborted) return void 0;
+  try {
+    const sessionAuth = {
+      ...auth,
+      headers: stepfunRequestHeaders(token, platform),
+      secrets: [...auth.secrets, token]
+    };
+    const payload = await fetchProviderJson(
+      stepfunDashboardUrl(platform, "GetStepPlanStatus"),
+      sessionAuth,
+      signal,
+      timeoutMs,
+      `${providerName} plan endpoint`,
+      { method: "POST", body: {}, responseError: stepfunResponseError }
+    );
+    return normalizeStepFunPlanStatusPayload(payload);
   } catch (error) {
     if (isAbortError(error)) throw error;
     return void 0;
@@ -3007,7 +3545,7 @@ function normalizeCodexResetCreditsPayload(payload) {
   if (rawCredits !== void 0 && !Array.isArray(rawCredits)) {
     throw new Error("Codex reset credits response returned invalid credits.");
   }
-  const options = (rawCredits ?? []).map(asObject14).filter((credit) => Boolean(credit)).filter((credit) => credit.status === "available" && credit.reset_type === "codex_rate_limits").map(normalizeResetOption).sort((left, right) => (left.expiresAt ?? Number.MAX_SAFE_INTEGER) - (right.expiresAt ?? Number.MAX_SAFE_INTEGER)).slice(0, Math.min(availableCount, MAX_RESET_OPTIONS));
+  const options = (rawCredits ?? []).map(asObject17).filter((credit) => Boolean(credit)).filter((credit) => credit.status === "available" && credit.reset_type === "codex_rate_limits").map(normalizeResetOption).sort((left, right) => (left.expiresAt ?? Number.MAX_SAFE_INTEGER) - (right.expiresAt ?? Number.MAX_SAFE_INTEGER)).slice(0, Math.min(availableCount, MAX_RESET_OPTIONS));
   if (availableCount > 0 && options.length === 0) {
     options.push(genericCodexResetOption());
   }
@@ -3020,7 +3558,7 @@ function selectCodexResetCredential(candidates, resolvedAccess, resolvedAccountI
   const matches = /* @__PURE__ */ new Map();
   for (const candidate of candidates) {
     try {
-      const credential = asObject14(candidate);
+      const credential = asObject17(candidate);
       if (credential?.type !== "oauth") continue;
       sawOAuth = true;
       const storedAccess = asNonemptyString(credential.access);
@@ -3059,7 +3597,7 @@ function codexAccountIdFromAccessToken(access) {
     const parts = access.split(".");
     if (parts.length !== 3 || !parts[1]) return void 0;
     const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-    const claims = asObject14(asObject14(payload)?.["https://api.openai.com/auth"]);
+    const claims = asObject17(asObject17(payload)?.["https://api.openai.com/auth"]);
     return validHeaderValue(claims?.chatgpt_account_id);
   } catch {
     return void 0;
@@ -3091,7 +3629,7 @@ function normalizeResetOption(credit) {
 function isCodexResetOutcomeCode(value) {
   return value === "reset" || value === "nothing_to_reset" || value === "no_credit" || value === "already_redeemed";
 }
-function asObject14(value) {
+function asObject17(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
   return value;
 }
@@ -3148,7 +3686,7 @@ function formatUsageReport(report2, displayState) {
   } else if (report2.providerId === "minimax" || report2.providerId === "minimax-cn") {
     formatMiniMaxReport(lines, report2);
   } else if (report2.providerId === "xai") formatXaiReport(lines, report2);
-  else if (report2.providerId === "zai" || report2.providerId === "zai-coding-cn") {
+  else if (report2.providerId === "zai" || report2.providerId === "zai-coding-cn" || report2.providerId === "stepfun") {
     formatZaiReport(lines, report2);
   } else formatGenericReport(lines, report2);
   if (report2.notes) {
@@ -3181,6 +3719,9 @@ function formatUsageStatusline(report2, model, now = Date.now(), showCodexResetC
   }
   if (report2.providerId === "zai" || report2.providerId === "zai-coding-cn") {
     return formatZaiStatusline(report2, now, showCodexResetCountdown);
+  }
+  if (report2.providerId === "stepfun") {
+    return formatStepFunStatusline(report2, now, showCodexResetCountdown);
   }
   return void 0;
 }
@@ -3499,6 +4040,25 @@ function formatZaiStatusline(report2, now = Date.now(), showResetCountdown = tru
   }
   return parts.length > 0 ? `GLM ${parts.join(" \u2502 ")}` : void 0;
 }
+function formatStepFunStatusline(report2, now = Date.now(), showResetCountdown = true) {
+  const credit = report2.buckets.find((bucket) => bucket.id === "credit");
+  if (credit?.limit && credit.remaining !== void 0) {
+    const plan = report2.notes?.find((note) => note.startsWith("Plan: "))?.slice("Plan: ".length);
+    const countdown = showResetCountdown ? formatResetCountdown(credit.resetsAt, now) : void 0;
+    return `StepFun${plan ? ` ${plan}` : ""} \xB7 ${percentRemaining(credit)}% credits${countdown ? ` \u21BB ${countdown}` : ""}`;
+  }
+  const windows = [
+    report2.buckets.find((bucket) => bucket.id === "five-hour"),
+    report2.buckets.find((bucket) => bucket.id === "weekly")
+  ];
+  const parts = [];
+  for (const bucket of windows) {
+    if (!bucket?.limit || bucket.remaining === void 0) continue;
+    const countdown = showResetCountdown ? formatResetCountdown(bucket.resetsAt, now) : void 0;
+    parts.push(`${percentRemaining(bucket)}%${countdown ? ` \u21BB ${countdown}` : ""}`);
+  }
+  return parts.length > 0 ? `StepFun ${parts.join(" \u2502 ")}` : void 0;
+}
 function formatCurrencyMetric(metric2) {
   if (typeof metric2.value !== "number") return String(metric2.value);
   if (!metric2.currency) return "unavailable";
@@ -3697,10 +4257,10 @@ function clampPercent4(value) {
 
 // src/settings.ts
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { constants as constants2 } from "node:fs";
+import { chmod, mkdir, open as open2, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join as join2 } from "node:path";
+import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
 var USAGE_SETTINGS_FILE = "pi-usage.json";
 var MAX_USAGE_SETTINGS_BYTES = 64 * 1024;
 var DEFAULT_USAGE_SETTINGS = Object.freeze({
@@ -3709,7 +4269,7 @@ var DEFAULT_USAGE_SETTINGS = Object.freeze({
   selectedTargets: Object.freeze({})
 });
 function usageSettingsPath() {
-  return join(getAgentDir(), USAGE_SETTINGS_FILE);
+  return join2(getAgentDir2(), USAGE_SETTINGS_FILE);
 }
 function normalizeUsageSettings(value) {
   if (!isRecord3(value)) return void 0;
@@ -3737,7 +4297,7 @@ function normalizeUsageSettings(value) {
 async function loadUsageSettings(path = usageSettingsPath(), signal) {
   throwIfAborted(signal);
   try {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open2(path, constants2.O_RDONLY | constants2.O_NOFOLLOW);
     let text;
     try {
       const stats = await handle.stat();
@@ -3877,7 +4437,7 @@ async function saveUsageSettingsDocument(path, mutate, operations, signal, expec
   const settings = normalizeUsageSettings(document);
   if (!settings) throw new Error("Refusing to save invalid pi-usage settings");
   const directory = dirname(path);
-  const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
+  const temporaryPath = join2(directory, `.${basename(path)}.${randomUUID()}.tmp`);
   await mkdir(directory, { recursive: true, mode: 448 });
   throwIfAborted(signal);
   try {
@@ -4336,7 +4896,7 @@ function usageExtension(pi, dependencies = {}) {
       return;
     }
     const reportProviderId = outcome.state.report.providerId;
-    const showCodexResetCountdown = reportProviderId === "openai-codex" && settingsRuntime.get().settings.codexStatusResetCountdown || reportProviderId === "zai" || reportProviderId === "zai-coding-cn";
+    const showCodexResetCountdown = reportProviderId === "openai-codex" && settingsRuntime.get().settings.codexStatusResetCountdown || reportProviderId === "zai" || reportProviderId === "zai-coding-cn" || reportProviderId === "stepfun";
     const now = Date.now();
     const rawValue = formatUsageStatusline(outcome.state.report, model, now, showCodexResetCountdown);
     const value = rawValue ? fastRuntime.decorateStatus(model, rawValue) : void 0;
@@ -5390,6 +5950,8 @@ export {
   normalizeMoonshotBalancePayload,
   normalizeOpenCodeZenPayload,
   normalizeOpenRouterKeyPayload,
+  normalizeStepFunPlanStatusPayload,
+  normalizeStepFunRateLimitPayload,
   normalizeUsageSettings,
   normalizeUsageTargets,
   normalizeVercelAIGatewayCreditsPayload,

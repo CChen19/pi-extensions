@@ -170,7 +170,8 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     const showCodexResetCountdown =
       (reportProviderId === "openai-codex" && settingsRuntime.get().settings.codexStatusResetCountdown) ||
       reportProviderId === "zai" ||
-      reportProviderId === "zai-coding-cn";
+      reportProviderId === "zai-coding-cn" ||
+      reportProviderId === "stepfun";
     const now = Date.now();
     const rawValue = formatUsageStatusline(outcome.state.report, model, now, showCodexResetCountdown);
     const value = rawValue ? fastRuntime.decorateStatus(model, rawValue) : undefined;

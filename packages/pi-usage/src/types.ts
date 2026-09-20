@@ -233,3 +233,26 @@ export type CodexBackendPayload = {
   credits?: unknown;
   rate_limit_reset_credits?: unknown;
 };
+
+export type StepFunRateLimitPayload = {
+  status?: unknown;
+  code?: unknown;
+  message?: unknown;
+  desc?: unknown;
+  five_hour_usage_left_rate?: unknown;
+  weekly_usage_left_rate?: unknown;
+  five_hour_usage_reset_time?: unknown;
+  weekly_usage_reset_time?: unknown;
+  plan_family?: unknown;
+  plan_credit_rate_limit?: unknown;
+};
+
+export type StepFunPlanStatusPayload = {
+  status?: unknown;
+  code?: unknown;
+  subscription?: unknown;
+};
+
+export interface StepFunPlanInfo {
+  name: string;
+}

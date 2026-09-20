@@ -18,6 +18,7 @@ The README contains the capability overview and shared security requirements.
 - [OpenCode Go](#opencode-go-zen)
 - [xAI](#xai-consumer-subscriptions)
 - [Z.AI](#zai-glm-coding-plan)
+- [StepFun](#stepfun-step-plan)
 
 ## 📋 Provider semantics
 
@@ -270,3 +271,35 @@ Quota errors and missing or malformed quota data remain query failures with a st
 An accepted Z.AI query failure discards the matching cached report, so the next turn after backoff expires retries instead of restoring stale usage.
 The plan endpoint only contributes the plan name and renewal date; when it is unavailable or fails, the quota windows remain reported and the plan note falls back to the quota response's plan level.
 Only the official `api.z.ai` and `open.bigmodel.cn` origins are queried; other origins fail before sending the credential.
+
+### StepFun (Step Plan)
+
+- Provider ID: `stepfun`
+- Semantics: Step Plan subscription usage—rolling 5-hour and weekly windows for Coding Plans, or the monthly Credit pool for Token Plans
+- Source: the undocumented `POST https://platform.stepfun.ai/api/step.openapi.devcenter.Dashboard/QueryStepPlanRateLimit` (overseas) or matching `https://platform.stepfun.com/...` (China) endpoint, plus `POST .../GetStepPlanStatus` for the plan name
+- Allowed origins: the model base URL must resolve to `https://api.stepfun.ai` or `https://api.stepfun.com`
+- Displayed data: remaining percentages and reset times per window, absolute credit balances from `credit_buckets`, and the plan name
+- Statusline: publishes remaining plan percentages such as `StepFun 87% ↻ 2h13m │ 76% ↻ 5d` for windowed plans or `StepFun Plus · 99% credits` for credit plans
+
+The Step Plan API key cannot read the platform quota endpoints (`api key not permitted for this method`); the dashboard accepts only an Oasis-Token web session.
+Provide that session with `STEPFUN_TOKEN`.
+When Pi is launched by a daemon or desktop process that does not inherit shell variables, place it in the owner-private `pi-usage-stepfun.json` file under Pi's agent directory (normally `~/.pi/agent`): `{"token":"<Oasis-Token>"}`.
+The file must be a regular file no larger than 16 KiB and, on Unix, have mode `600`; symlinks are refused.
+Environment credentials take precedence, and an explicitly empty `STEPFUN_CREDENTIALS_FILE` disables file fallback while a nonempty value selects a different credential-file path.
+`STEPFUN_TOKEN` and the JSON `token` field also accept a pasted browser `Oasis-Token=…; Oasis-Webid=…` cookie header; copy it from the platform domain where the account is signed in.
+China (`platform.stepfun.com`) tokens use Oasis app ID `10300`, while overseas (`platform.stepfun.ai`) tokens use `20700` and are signed by a different environment.
+The extension reads the token's `app_id` claim to select the matching allowlisted platform origin, falling back to the official model API region for legacy tokens, so a session is never sent to the other StepFun environment.
+The `Oasis-Webid` header and cookie are derived from the token's refresh-half `device_id` claim so the platform does not reject the session as embezzled.
+Tokens, cookies, and device IDs are charset-validated before use because they are interpolated into request headers.
+An expired session is refreshed once through `RefreshToken` before the failure surfaces; non-session failures surface immediately.
+The Pi Step Plan API key is never sent to the platform: only the Oasis-Token cookie, the platform headers, and a browser user agent leave the machine.
+
+StepFun runs two billing models side by side: the grandfathered Coding Plan meters rolling 5-hour and weekly windows, while the Token Plan meters a monthly Credit pool whose rate windows are reported as `0` with reset time `"0"` ("no window configured", not "used up").
+Classification follows the payload shape—a live window wins over `plan_family: 2`—so a changed family ID cannot route a windowed plan onto the credit renderer or vice versa.
+Numeric fields arrive as integers, floats, or strings (for example `"400000000"`), and timestamps as strings or integers; both are parsed elastically.
+Subscription and top-up credit rates are independent fractions and are never added; the extension prefers the absolute weighted bucket balances and falls back to the subscription rate, then the top-up rate.
+Credit balances add `Credits remaining` and `Credits total` metrics to the full `/usage` report.
+The plan endpoint only contributes the plan name; when it is unavailable or fails, the quota data remains reported and the plan note is omitted.
+Quota errors use fixed English hints and never echo provider message text, which may contain credentials.
+An accepted StepFun query failure discards the matching cached report, so the next turn after backoff expires retries instead of restoring stale usage.
+Only the official `api.stepfun.ai` and `api.stepfun.com` inference origins gate the adapter, and dashboard sessions are sent only to the matching allowlisted `platform.stepfun.ai` or `platform.stepfun.com` origin; other origins fail before the credential is resolved.
