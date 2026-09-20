@@ -262,6 +262,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
         "minimax-cn",
         "moonshotai",
         "moonshotai-cn",
+        "openrouter",
         "vercel-ai-gateway",
         "xai",
         "zai",

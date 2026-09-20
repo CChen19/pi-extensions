@@ -47,6 +47,12 @@ export interface UsageReport {
   notes?: string[];
 }
 
+export interface ResolvedManagementUsageAuth {
+  apiKey: string;
+  headers: Record<string, string>;
+  source?: string;
+}
+
 export interface ResolvedUsageAuth {
   apiKey?: string;
   headers: Record<string, string>;
@@ -61,6 +67,8 @@ export interface ResolvedUsageAuth {
   env?: Record<string, string>;
   source?: string;
   effectiveBaseUrl?: string;
+  /** Account-level credentials used only by providers with a separate billing endpoint. */
+  managementAuth?: ResolvedManagementUsageAuth;
 }
 
 export interface UsageQuerySettings {
@@ -161,6 +169,10 @@ export type GitHubCopilotUsagePayload = {
 };
 
 export type OpenRouterKeyPayload = {
+  data?: unknown;
+};
+
+export type OpenRouterCreditsPayload = {
   data?: unknown;
 };
 

@@ -122,13 +122,25 @@ It reports overage without treating a negative included balance as malformed.
 ### OpenRouter
 
 - Provider ID: `openrouter`
-- Semantics: API-key spend and per-key credit limits—not consumer subscription quota
-- Source: OpenRouter's documented [`GET /api/v1/key`](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key) endpoint using Pi's resolved inference API key
-- Displayed data: key label when safely returned, optional per-key limit and remaining amount, reset period, and daily/weekly/monthly/all-time spend
-- Statusline examples: `openrouter $74.50 left` or `openrouter $25.50 used`
+- Semantics: API-key spend and per-key credit limits, plus account-wide credits when explicitly configured
+- Sources: documented [`GET /api/v1/key`](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key) with Pi's inference key and [`GET /api/v1/credits`](https://openrouter.ai/docs/api/api-reference/credits/get-remaining-credits) with a Management API key
+- Displayed data: key label when safely returned, optional per-key limit and remaining amount, reset period, daily/weekly/monthly/all-time spend, and account credits purchased/used/remaining
+- Statusline examples: `openrouter $74.75 left` (account balance), `openrouter $74.50 left` (key limit), or `openrouter $25.50 used`
 
-The extension does not call OpenRouter's account-level `/credits` endpoint because that operation requires a separate management key.
-OpenRouter documents the distinction between credit and rate limits in its [API limits guide](https://openrouter.ai/docs/api_reference/limits).
+Account credits are enabled only when `OPENROUTER_MANAGEMENT_API_KEY` is set, or when a JSON file contains:
+
+```json
+{
+  "managementApiKey": "sk-or-v1-..."
+}
+```
+
+The default file is `~/.pi/agent/pi-usage-openrouter.json`; set `OPENROUTER_CREDENTIALS_FILE` to use another path. The file must be a regular, non-symlink file with no group or other permissions (for example mode `0600`). An explicitly empty `OPENROUTER_CREDENTIALS_FILE` disables file fallback, and the environment key takes precedence. On platforms where Node does not expose a no-follow open flag (including Windows), file fallback is disabled and `OPENROUTER_MANAGEMENT_API_KEY` must be used.
+
+The account report calculates `total_credits - total_usage`; OpenRouter permits a negative result when usage exceeds purchased credits, and the statusline renders it as a signed amount. Account credits and key limits remain separate sections because they can represent different scopes or accounts. Without management credentials, or when the credits request fails, the adapter retains the existing per-key limit/spend report and adds an explicit note that account balance is unavailable.
+
+The inference key is sent only to `/api/v1/key`; the Management API key is sent only to `/api/v1/credits`. Both requests reject redirects, and the adapter revalidates the active model/auth boundary between requests. Management credentials are not placed in Pi settings, included in the inference auth object, or written to usage output.
+OpenRouter documents the distinction between credit and rate limits in its [API limits guide](https://openrouter.ai/docs/api_reference/limits) and the required key type in its [Management API Keys guide](https://openrouter.ai/docs/guides/overview/auth/management-api-keys).
 
 ### DeepSeek API balance
 

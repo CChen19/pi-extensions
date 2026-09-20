@@ -50,7 +50,11 @@ export {
 export type { MoonshotProviderId } from "./providers/moonshot.js";
 export { normalizeMoonshotBalancePayload } from "./providers/moonshot.js";
 export { normalizeOpenCodeZenPayload } from "./providers/opencode-zen.js";
-export { normalizeOpenRouterKeyPayload } from "./providers/openrouter.js";
+export {
+  mergeOpenRouterAccountCredits,
+  normalizeOpenRouterCreditsPayload,
+  normalizeOpenRouterKeyPayload,
+} from "./providers/openrouter.js";
 export { normalizeStepFunPlanStatusPayload, normalizeStepFunRateLimitPayload } from "./providers/stepfun.js";
 export { normalizeVercelAIGatewayCreditsPayload } from "./providers/vercel-ai-gateway.js";
 export { normalizeXaiBillingPayload } from "./providers/xai.js";
@@ -86,7 +90,10 @@ export type {
   KimiCodingUsagePayload,
   MiniMaxUsagePayload,
   MoonshotBalancePayload,
+  OpenRouterCreditsPayload,
+  OpenRouterKeyPayload,
   ProviderUsageState,
+  ResolvedManagementUsageAuth,
   ResolvedUsageAuth,
   StepFunPlanInfo,
   StepFunPlanStatusPayload,

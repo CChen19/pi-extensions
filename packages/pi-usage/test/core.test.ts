@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test, vi } from "vitest";
 import { createMockContext } from "../../../test/support.js";
 import type { UsageReport } from "../src/index.js";
 import {
   awaitWithDeadline,
   fingerprintResolvedAuth,
+  formatUsageStatusline,
   queryProviderUsage,
   redactUsageError,
   resolveUsageAuth,
@@ -13,6 +17,10 @@ import {
   sanitizeDisplayText,
   UsageCache,
 } from "../src/index.js";
+import {
+  OPENROUTER_CREDENTIALS_FILE_ENV,
+  OPENROUTER_MANAGEMENT_API_KEY_ENV,
+} from "../src/providers/openrouter-auth.js";
 
 const report: UsageReport = {
   providerId: "openrouter",
@@ -185,7 +193,7 @@ test("runtime auth rejects proxy origins and forwards only adapter-approved head
       getAll: () => [officialModel],
     },
   });
-  const auth = await resolveUsageAuth(officialContext, adapter);
+  const auth = await resolveUsageAuth(officialContext, adapter, undefined, undefined, undefined, {});
   assert.deepEqual(auth?.headers, { Authorization: "Bearer official-key" });
   assert.deepEqual(auth?.auth, {
     apiKey: "official-key",
@@ -208,7 +216,7 @@ test("runtime auth rejects proxy origins and forwards only adapter-approved head
       getAll: () => [officialModel],
     },
   });
-  const rotatedEnv = await resolveUsageAuth(rotatedEnvContext, adapter);
+  const rotatedEnv = await resolveUsageAuth(rotatedEnvContext, adapter, undefined, undefined, undefined, {});
   assert.notEqual(rotatedEnv?.fingerprint, auth?.fingerprint);
 
   const { ctx: modelScopedContext } = createMockContext({
@@ -227,7 +235,7 @@ test("runtime auth rejects proxy origins and forwards only adapter-approved head
       getAll: () => [officialModel],
     },
   });
-  const modelScopedAuth = await resolveUsageAuth(modelScopedContext, adapter);
+  const modelScopedAuth = await resolveUsageAuth(modelScopedContext, adapter, undefined, undefined, undefined, {});
   assert.deepEqual(modelScopedAuth?.headers, { Authorization: "Bearer current-model-key" });
   assert.ok(modelScopedAuth?.secrets.includes("Bearer current-model-key"));
   assert.ok(modelScopedAuth?.secrets.includes("must-not-leak"));
@@ -241,8 +249,250 @@ test("runtime auth rejects proxy origins and forwards only adapter-approved head
       getAll: () => [officialModel],
     },
   });
-  const modelKeyAuth = await resolveUsageAuth(modelKeyContext, adapter);
+  const modelKeyAuth = await resolveUsageAuth(modelKeyContext, adapter, undefined, undefined, undefined, {});
   assert.deepEqual(modelKeyAuth?.headers, { Authorization: "Bearer current-model-key" });
+});
+
+test("OpenRouter resolves management credentials from a configured file during auth resolution", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-usage-openrouter-auth-"));
+  const credentialsPath = join(directory, "credentials.json");
+  await writeFile(credentialsPath, JSON.stringify({ managementApiKey: "file-secret" }));
+  await chmod(credentialsPath, 0o600);
+  t.onTestFinished(async () => {
+    vi.unstubAllEnvs();
+    await rm(directory, { recursive: true, force: true });
+  });
+  vi.stubEnv(OPENROUTER_MANAGEMENT_API_KEY_ENV, "");
+  vi.stubEnv(OPENROUTER_CREDENTIALS_FILE_ENV, credentialsPath);
+
+  const adapter = SUPPORTED_ADAPTERS.find((candidate) => candidate.id === "openrouter");
+  assert.ok(adapter);
+  const model = {
+    id: "test-model",
+    name: "Test model",
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+  };
+  const { ctx } = createMockContext({
+    model,
+    modelRegistry: {
+      getProviderAuth: async () => ({ auth: { apiKey: "inference-secret", baseUrl: model.baseUrl } }),
+      getAvailable: () => [model],
+      getAll: () => [model],
+    },
+  });
+
+  const auth = await resolveUsageAuth(ctx, adapter);
+  assert.equal(auth?.managementAuth?.headers.Authorization, "Bearer file-secret");
+  assert.equal(auth?.managementAuth?.source, "file");
+});
+
+test("OpenRouter uses separate inference and management credentials for account credits", async () => {
+  const adapter = SUPPORTED_ADAPTERS.find((candidate) => candidate.id === "openrouter");
+  assert.ok(adapter);
+  const model = {
+    id: "test-model",
+    name: "Test model",
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+  };
+  const { ctx } = createMockContext({
+    model,
+    modelRegistry: {
+      getProviderAuth: async () => ({ auth: { apiKey: "inference-secret", baseUrl: model.baseUrl } }),
+      getAvailable: () => [model],
+      getAll: () => [model],
+    },
+  });
+  const auth = await resolveUsageAuth(ctx, adapter, undefined, undefined, undefined, {
+    managementApiKey: "management-secret",
+    source: "file",
+  });
+  assert.ok(auth);
+  assert.equal(auth.headers.Authorization, "Bearer inference-secret");
+  assert.equal(auth.managementAuth?.headers.Authorization, "Bearer management-secret");
+  assert.ok(auth.secrets.includes("inference-secret"));
+  assert.ok(auth.secrets.includes("management-secret"));
+  assert.doesNotMatch(auth.fingerprint, /management-secret|inference-secret/);
+  const rotatedAuth = await resolveUsageAuth(ctx, adapter, undefined, undefined, undefined, {
+    managementApiKey: "rotated-management-secret",
+    source: "file",
+  });
+  assert.ok(rotatedAuth);
+  assert.notEqual(rotatedAuth.fingerprint, auth.fingerprint);
+
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const headers = { ...(init?.headers as Record<string, string> | undefined) };
+    requests.push({ url, headers });
+    const payload = url.endsWith("/key")
+      ? { data: { limit: 100, limit_remaining: 75, usage: 25 } }
+      : { data: { total_credits: 100, total_usage: 20 } };
+    return new Response(JSON.stringify(payload), { status: 200 });
+  };
+  try {
+    const report = await queryProviderUsage(adapter, auth, new AbortController().signal, 1_000, async () => {});
+    assert.deepEqual(
+      requests.map((request) => request.url),
+      ["https://openrouter.ai/api/v1/key", "https://openrouter.ai/api/v1/credits"],
+    );
+    assert.deepEqual(requests[0]?.headers, {
+      Authorization: "Bearer inference-secret",
+      "User-Agent": "pi-usage",
+    });
+    assert.deepEqual(requests[1]?.headers, {
+      Authorization: "Bearer management-secret",
+      "User-Agent": "pi-usage",
+    });
+    assert.equal(report.metrics.find((metric) => metric.id === "account-credits-remaining")?.value, 80);
+    assert.equal(formatUsageStatusline(report), "openrouter $80.00 left");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenRouter account credits fall back to key limits and redact management-key errors", async () => {
+  const adapter = SUPPORTED_ADAPTERS.find((candidate) => candidate.id === "openrouter");
+  assert.ok(adapter);
+  const model = {
+    id: "test-model",
+    name: "Test model",
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+  };
+  const { ctx } = createMockContext({
+    model,
+    modelRegistry: {
+      getProviderAuth: async () => ({ auth: { apiKey: "inference-secret", baseUrl: model.baseUrl } }),
+      getAvailable: () => [model],
+      getAll: () => [model],
+    },
+  });
+  const auth = await resolveUsageAuth(ctx, adapter, undefined, undefined, undefined, {
+    managementApiKey: "management-secret",
+    source: "file",
+  });
+  assert.ok(auth);
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    return requestCount === 1
+      ? new Response(JSON.stringify({ data: { limit: 100, limit_remaining: 75, usage: 25 } }), { status: 200 })
+      : new Response(`{"error":"management-secret"}`, { status: 403 });
+  };
+  try {
+    const report = await queryProviderUsage(adapter, auth, new AbortController().signal, 1_000, async () => {});
+    assert.equal(requestCount, 2);
+    assert.match(report.notes?.join("\n") ?? "", /Account balance unavailable/);
+    assert.match(report.notes?.join("\n") ?? "", /valid Management API key/i);
+    assert.doesNotMatch(JSON.stringify(report), /management-secret/);
+    assert.equal(formatUsageStatusline(report), "openrouter $75.00 left");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenRouter account credits fall back for non-auth endpoint failures", async () => {
+  const adapter = SUPPORTED_ADAPTERS.find((candidate) => candidate.id === "openrouter");
+  assert.ok(adapter);
+  const model = {
+    id: "test-model",
+    name: "Test model",
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+  };
+  const { ctx } = createMockContext({
+    model,
+    modelRegistry: {
+      getProviderAuth: async () => ({ auth: { apiKey: "inference-secret", baseUrl: model.baseUrl } }),
+      getAvailable: () => [model],
+      getAll: () => [model],
+    },
+  });
+  const auth = await resolveUsageAuth(ctx, adapter, undefined, undefined, undefined, {
+    managementApiKey: "management-secret",
+    source: "file",
+  });
+  assert.ok(auth);
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const makeFailureResponse of [
+      () => new Response("management-secret", { status: 500 }),
+      () => new Response("management-secret", { status: 200 }),
+    ]) {
+      let requestCount = 0;
+      globalThis.fetch = async () => {
+        requestCount += 1;
+        return requestCount === 1
+          ? new Response(JSON.stringify({ data: { limit: 100, limit_remaining: 75, usage: 25 } }), { status: 200 })
+          : makeFailureResponse();
+      };
+      const report = await queryProviderUsage(adapter, auth, new AbortController().signal, 1_000, async () => {});
+      assert.equal(requestCount, 2);
+      assert.match(report.notes?.join("\n") ?? "", /Account balance unavailable/);
+      assert.doesNotMatch(JSON.stringify(report), /management-secret/);
+      assert.equal(formatUsageStatusline(report), "openrouter $75.00 left");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenRouter keeps per-key fallback when no management credentials are configured", async () => {
+  const adapter = SUPPORTED_ADAPTERS.find((candidate) => candidate.id === "openrouter");
+  assert.ok(adapter);
+  const model = {
+    id: "test-model",
+    name: "Test model",
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+  };
+  const { ctx } = createMockContext({
+    model,
+    modelRegistry: {
+      getProviderAuth: async () => ({ auth: { apiKey: "inference-secret", baseUrl: model.baseUrl } }),
+      getAvailable: () => [model],
+      getAll: () => [model],
+    },
+  });
+  const auth = await resolveUsageAuth(ctx, adapter, undefined, undefined, undefined, {});
+  assert.ok(auth);
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    return new Response(JSON.stringify({ data: { limit: 100, limit_remaining: 75, usage: 25 } }), { status: 200 });
+  };
+  try {
+    const report = await queryProviderUsage(adapter, auth, new AbortController().signal, 1_000, async () => {});
+    assert.equal(requestCount, 1);
+    assert.match(report.notes?.join("\n") ?? "", /Account balance requires/);
+    assert.equal(formatUsageStatusline(report), "openrouter $75.00 left");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenRouter account credits fail closed without a request-boundary guard", async () => {
+  const adapter = SUPPORTED_ADAPTERS.find((candidate) => candidate.id === "openrouter");
+  assert.ok(adapter);
+  const auth = {
+    headers: { Authorization: "Bearer management-secret" },
+    fingerprint: "fingerprint",
+    secrets: ["management-secret"],
+    model: { id: "test-model", name: "Test model", provider: "openrouter" } as never,
+    managementAuth: {
+      apiKey: "management-secret",
+      headers: { Authorization: "Bearer management-secret" },
+    },
+  };
+  await assert.rejects(
+    () => queryProviderUsage(adapter, auth, new AbortController().signal, 1_000),
+    /request-boundary revalidation/,
+  );
 });
 
 test("GitHub Copilot usage uses the matching Pi OAuth refresh token", async () => {
@@ -586,13 +836,13 @@ test("provider response reads are byte-bounded", async (t) => {
   };
   globalThis.fetch = async () => new Response("x".repeat(70_000), { status: 200 });
   await assert.rejects(
-    () => queryProviderUsage(adapter, auth, new AbortController().signal, 1_000),
+    () => queryProviderUsage(adapter, auth, new AbortController().signal, 1_000, async () => {}),
     /exceeded.*bytes|too large/iu,
   );
 
   globalThis.fetch = async () => new Response("x".repeat(70_000), { status: 500 });
   await assert.rejects(
-    () => queryProviderUsage(adapter, auth, new AbortController().signal, 1_000),
+    () => queryProviderUsage(adapter, auth, new AbortController().signal, 1_000, async () => {}),
     (error: unknown) => error instanceof Error && error.message.length < 1_000 && /returned 500/.test(error.message),
   );
 });

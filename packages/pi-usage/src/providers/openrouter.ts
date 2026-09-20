@@ -1,5 +1,11 @@
 import { sanitizeDisplayText } from "../core.js";
-import type { OpenRouterKeyPayload, UsageBucket, UsageMetric, UsageReport } from "../types.js";
+import type {
+  OpenRouterCreditsPayload,
+  OpenRouterKeyPayload,
+  UsageBucket,
+  UsageMetric,
+  UsageReport,
+} from "../types.js";
 
 export function normalizeOpenRouterKeyPayload(payload: OpenRouterKeyPayload, capturedAt: number): UsageReport {
   const data = asObject(payload.data);
@@ -48,10 +54,66 @@ export function normalizeOpenRouterKeyPayload(payload: OpenRouterKeyPayload, cap
   };
 }
 
+/** Normalize the account-wide credits returned by OpenRouter's management endpoint. */
+export function normalizeOpenRouterCreditsPayload(payload: OpenRouterCreditsPayload, capturedAt: number): UsageReport {
+  const data = asObject(payload.data);
+  if (!data) throw new Error("OpenRouter credits response data was not an object.");
+
+  const totalCredits = requiredNonnegativeNumber(data.total_credits, "total_credits");
+  const totalUsage = requiredNonnegativeNumber(data.total_usage, "total_usage");
+  const remaining = totalCredits - totalUsage;
+  const metrics: UsageMetric[] = [
+    { id: "account-credits-purchased", label: "Credits purchased", value: totalCredits, unit: "usd" },
+    { id: "account-credits-used", label: "Credits used", value: totalUsage, unit: "usd" },
+    { id: "account-credits-remaining", label: "Credits remaining", value: remaining, unit: "usd" },
+  ];
+
+  return {
+    providerId: "openrouter",
+    providerName: "OpenRouter",
+    capturedAt,
+    source: "openrouter-credits",
+    semantics: { kind: "api-key", label: "Account credits" },
+    accountLabel: "OpenRouter account",
+    buckets: [],
+    metrics,
+    notes: ["Account balance is total credits purchased minus total credits used."],
+  };
+}
+
+/** Merge the two independently scoped OpenRouter reports without conflating their balances. */
+export function mergeOpenRouterAccountCredits(
+  keyReport: UsageReport,
+  accountReport: UsageReport,
+  managementSource?: string,
+): UsageReport {
+  const sourceLabel = managementSource ? ` (${sanitizeDisplayText(managementSource, 40)})` : "";
+  const notes = [
+    ...(keyReport.notes ?? []),
+    `Account credits were queried with management credentials${sourceLabel}.`,
+    "Account credits are account-wide; key limits are scoped to the inference key.",
+    ...(accountReport.notes ?? []),
+  ];
+  return {
+    ...keyReport,
+    source: "openrouter-key+credits",
+    semantics: { kind: "api-key", label: "API-key spend limits and account credits" },
+    metrics: [...keyReport.metrics, ...accountReport.metrics],
+    notes,
+  };
+}
+
 function addUsageMetric(metrics: UsageMetric[], id: string, label: string, value: unknown): void {
   const amount = typeof value === "number" ? asNonnegativeNumber(value) : undefined;
   if (amount === undefined) return;
   metrics.push({ id, label, value: amount, unit: "usd" });
+}
+
+function requiredNonnegativeNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`OpenRouter credits response field ${field} must be a non-negative number.`);
+  }
+  return value;
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {

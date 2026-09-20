@@ -139,6 +139,12 @@ function fingerprintResolvedAuth(auth, salt) {
   const headers = Object.entries(auth.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]).sort(([left], [right]) => left.localeCompare(right));
   const env = Object.entries(auth.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
   const providerHeaders = Object.entries(auth.providerAuth?.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]).sort(([left], [right]) => left.localeCompare(right));
+  const managementHeaders = Object.entries(auth.managementHeaders ?? {}).map(([name, value]) => [name.toLowerCase(), value]).sort(([left], [right]) => left.localeCompare(right));
+  const managementAuth = auth.managementApiKey !== void 0 || auth.managementHeaders !== void 0 || auth.managementSource !== void 0 ? {
+    apiKey: auth.managementApiKey ?? "",
+    headers: managementHeaders,
+    source: auth.managementSource ?? ""
+  } : void 0;
   const canonical = JSON.stringify({
     apiKey: auth.apiKey ?? "",
     headers,
@@ -149,7 +155,8 @@ function fingerprintResolvedAuth(auth, salt) {
       apiKey: auth.providerAuth?.apiKey ?? "",
       headers: providerHeaders,
       baseUrl: auth.providerAuth?.baseUrl ?? ""
-    }
+    },
+    ...managementAuth ? { managementAuth } : {}
   });
   return createHmac("sha256", salt).update(canonical).digest("hex");
 }
@@ -1477,10 +1484,55 @@ function normalizeOpenRouterKeyPayload(payload, capturedAt) {
     ...notes.length > 0 ? { notes } : {}
   };
 }
+function normalizeOpenRouterCreditsPayload(payload, capturedAt) {
+  const data = asObject10(payload.data);
+  if (!data) throw new Error("OpenRouter credits response data was not an object.");
+  const totalCredits = requiredNonnegativeNumber(data.total_credits, "total_credits");
+  const totalUsage = requiredNonnegativeNumber(data.total_usage, "total_usage");
+  const remaining = totalCredits - totalUsage;
+  const metrics = [
+    { id: "account-credits-purchased", label: "Credits purchased", value: totalCredits, unit: "usd" },
+    { id: "account-credits-used", label: "Credits used", value: totalUsage, unit: "usd" },
+    { id: "account-credits-remaining", label: "Credits remaining", value: remaining, unit: "usd" }
+  ];
+  return {
+    providerId: "openrouter",
+    providerName: "OpenRouter",
+    capturedAt,
+    source: "openrouter-credits",
+    semantics: { kind: "api-key", label: "Account credits" },
+    accountLabel: "OpenRouter account",
+    buckets: [],
+    metrics,
+    notes: ["Account balance is total credits purchased minus total credits used."]
+  };
+}
+function mergeOpenRouterAccountCredits(keyReport, accountReport, managementSource) {
+  const sourceLabel = managementSource ? ` (${sanitizeDisplayText(managementSource, 40)})` : "";
+  const notes = [
+    ...keyReport.notes ?? [],
+    `Account credits were queried with management credentials${sourceLabel}.`,
+    "Account credits are account-wide; key limits are scoped to the inference key.",
+    ...accountReport.notes ?? []
+  ];
+  return {
+    ...keyReport,
+    source: "openrouter-key+credits",
+    semantics: { kind: "api-key", label: "API-key spend limits and account credits" },
+    metrics: [...keyReport.metrics, ...accountReport.metrics],
+    notes
+  };
+}
 function addUsageMetric(metrics, id, label, value) {
   const amount2 = typeof value === "number" ? asNonnegativeNumber3(value) : void 0;
   if (amount2 === void 0) return;
   metrics.push({ id, label, value: amount2, unit: "usd" });
+}
+function requiredNonnegativeNumber(value, field) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`OpenRouter credits response field ${field} must be a non-negative number.`);
+  }
+  return value;
 }
 function asObject10(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
@@ -1493,6 +1545,124 @@ function asString4(value) {
 function asNonnegativeNumber3(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return void 0;
   return value;
+}
+
+// src/providers/openrouter-auth.ts
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+var OPENROUTER_MANAGEMENT_API_KEY_ENV = "OPENROUTER_MANAGEMENT_API_KEY";
+var OPENROUTER_CREDENTIALS_FILE_ENV = "OPENROUTER_CREDENTIALS_FILE";
+var DEFAULT_CREDENTIALS_FILE = "pi-usage-openrouter.json";
+var MAX_CREDENTIALS_FILE_BYTES = 16 * 1024;
+var MANAGEMENT_KEY_PATTERN = /^[A-Za-z0-9._~+/=-]{8,8192}$/u;
+var NOFOLLOW_FLAG = constants.O_NOFOLLOW;
+function openRouterManagementCredentialsFromEnv(env = process.env) {
+  const rawValue = env[OPENROUTER_MANAGEMENT_API_KEY_ENV];
+  if (typeof rawValue !== "string" || rawValue.trim() === "") return {};
+  const value = normalizeManagementKey(rawValue);
+  if (!value) {
+    throw new Error(`${OPENROUTER_MANAGEMENT_API_KEY_ENV} is set but is not a valid Management API key.`);
+  }
+  return { managementApiKey: value, source: "environment" };
+}
+function resolveOpenRouterManagementCredentialsSync(env = process.env) {
+  const fromEnvironment = openRouterManagementCredentialsFromEnv(env);
+  if (fromEnvironment.managementApiKey || env[OPENROUTER_CREDENTIALS_FILE_ENV] === "") {
+    return fromEnvironment;
+  }
+  const credentialsPath = env[OPENROUTER_CREDENTIALS_FILE_ENV] ?? join(getAgentDir(), DEFAULT_CREDENTIALS_FILE);
+  return readOpenRouterCredentialsFile(credentialsPath);
+}
+function readOpenRouterCredentialsFile(path) {
+  let descriptor;
+  try {
+    if (!NOFOLLOW_FLAG) {
+      try {
+        lstatSync(path);
+      } catch (error) {
+        if (error.code === "ENOENT") return {};
+        throw error;
+      }
+      throw new Error(
+        "OpenRouter management credentials file fallback is unavailable on this platform; set OPENROUTER_MANAGEMENT_API_KEY instead."
+      );
+    }
+    descriptor = openSync(path, constants.O_RDONLY | NOFOLLOW_FLAG);
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile()) {
+      throw new Error(`OpenRouter management credentials path is not a regular file: ${path}`);
+    }
+    if (stats.size > MAX_CREDENTIALS_FILE_BYTES) {
+      throw new Error(`OpenRouter management credentials file exceeds ${MAX_CREDENTIALS_FILE_BYTES} bytes.`);
+    }
+    if (process.platform !== "win32" && (stats.mode & 63) !== 0) {
+      throw new Error(
+        `OpenRouter management credentials file must not be accessible by group or other users (mode ${(stats.mode & 511).toString(8)}).`
+      );
+    }
+    const buffer = Buffer.alloc(MAX_CREDENTIALS_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset <= MAX_CREDENTIALS_FILE_BYTES) {
+      const bytesRead = readSync(descriptor, buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+      if (offset > MAX_CREDENTIALS_FILE_BYTES) {
+        throw new Error(`OpenRouter management credentials file exceeds ${MAX_CREDENTIALS_FILE_BYTES} bytes.`);
+      }
+    }
+    const contents = buffer.subarray(0, offset).toString("utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(contents);
+    } catch (error) {
+      throw new Error(`OpenRouter management credentials file contains invalid JSON: ${errorMessage2(error)}`);
+    }
+    if (!isRecord2(parsed)) {
+      throw new Error("OpenRouter management credentials file must contain a JSON object.");
+    }
+    const canonical = parsed.managementApiKey;
+    const alias = parsed.managementKey;
+    if (canonical !== void 0 && alias !== void 0 && canonical !== alias) {
+      throw new Error(
+        "OpenRouter management credentials file contains conflicting managementApiKey and managementKey values."
+      );
+    }
+    const value = normalizeManagementKey(typeof canonical === "string" ? canonical : alias);
+    if (!value) {
+      throw new Error(
+        "OpenRouter management credentials file must define managementApiKey or managementKey as a string."
+      );
+    }
+    return { managementApiKey: value, source: "file" };
+  } catch (error) {
+    const code = error.code;
+    if (code === "ENOENT") return {};
+    if (code === "ELOOP" || code === "EMLINK") {
+      throw new Error(`OpenRouter management credentials path is not a regular, non-symlink file: ${path}`);
+    }
+    if (error instanceof Error && error.message.startsWith("OpenRouter management credentials")) throw error;
+    throw new Error(`Unable to read OpenRouter management credentials at ${path}: ${errorMessage2(error)}`);
+  } finally {
+    if (descriptor !== void 0) closeSync(descriptor);
+  }
+}
+function normalizeManagementKey(value) {
+  if (typeof value !== "string") return void 0;
+  let key = value.trim();
+  if (key.length >= 2 && (key.startsWith('"') && key.endsWith('"') || key.startsWith("'") && key.endsWith("'"))) {
+    key = key.slice(1, -1).trim();
+  }
+  if (!MANAGEMENT_KEY_PATTERN.test(key)) {
+    return void 0;
+  }
+  return key;
+}
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function errorMessage2(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // src/providers/stepfun-errors.ts
@@ -1708,10 +1878,10 @@ function asString5(value) {
 }
 
 // src/providers/stepfun-auth.ts
-import { constants } from "node:fs";
+import { constants as constants2 } from "node:fs";
 import { open } from "node:fs/promises";
-import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { join as join2 } from "node:path";
+import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
 var STEPFUN_CHINA_PLATFORM = Object.freeze({
   origin: "https://platform.stepfun.com",
   appId: "10300"
@@ -1734,13 +1904,13 @@ function stepfunCredentialsFromEnv(env = process.env) {
 async function resolveStepFunCredentials(env = process.env) {
   const fromEnv = stepfunCredentialsFromEnv(env);
   if (fromEnv.token || env.STEPFUN_CREDENTIALS_FILE === "") return fromEnv;
-  const path = env.STEPFUN_CREDENTIALS_FILE ?? join(getAgentDir(), STEPFUN_CREDENTIALS_FILE);
+  const path = env.STEPFUN_CREDENTIALS_FILE ?? join2(getAgentDir2(), STEPFUN_CREDENTIALS_FILE);
   return readStepFunCredentialsFile(path);
 }
 async function readStepFunCredentialsFile(path) {
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(path, constants2.O_RDONLY | constants2.O_NOFOLLOW);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return {};
     throw new Error("StepFun credentials file could not be opened safely.");
@@ -1996,10 +2166,10 @@ function decimalAmount3(value, label) {
 var MAX_SAFE_CENTS = Number.MAX_SAFE_INTEGER;
 function normalizeXaiBillingPayload(payload, subscriptionTier, capturedAt) {
   const configValue = payload.config;
-  if (configValue !== null && configValue !== void 0 && !isRecord2(configValue)) {
+  if (configValue !== null && configValue !== void 0 && !isRecord3(configValue)) {
     throw new Error("xAI billing response config was not an object or null.");
   }
-  const config = isRecord2(configValue) ? configValue : void 0;
+  const config = isRecord3(configValue) ? configValue : void 0;
   const buckets = [];
   const metrics = [];
   const notes = [];
@@ -2080,10 +2250,10 @@ function normalizeXaiBillingPayload(payload, subscriptionTier, capturedAt) {
   };
 }
 function normalizePeriod(currentPeriod, legacyStart, legacyEnd) {
-  if (currentPeriod !== void 0 && currentPeriod !== null && !isRecord2(currentPeriod)) {
+  if (currentPeriod !== void 0 && currentPeriod !== null && !isRecord3(currentPeriod)) {
     throw new Error("xAI billing currentPeriod was not an object or null.");
   }
-  if (isRecord2(currentPeriod)) {
+  if (isRecord3(currentPeriod)) {
     const type = optionalString(currentPeriod.type, "currentPeriod.type");
     const start2 = optionalTimestamp(currentPeriod.start, "currentPeriod.start");
     const end2 = optionalTimestamp(currentPeriod.end, "currentPeriod.end");
@@ -2107,7 +2277,7 @@ function periodLabel(type, start) {
 }
 function optionalUsd(value, field) {
   if (value === void 0 || value === null) return void 0;
-  if (!isRecord2(value)) throw new Error(`xAI billing ${field} was not a cent wrapper.`);
+  if (!isRecord3(value)) throw new Error(`xAI billing ${field} was not a cent wrapper.`);
   const cents = value.val === void 0 ? 0 : value.val;
   if (!Number.isSafeInteger(cents) || Math.abs(cents) > MAX_SAFE_CENTS) {
     throw new Error(`xAI billing ${field}.val was not a safe signed integer.`);
@@ -2144,7 +2314,7 @@ function optionalTier(value) {
   }
   return sanitizeDisplayText(value, 80) || void 0;
 }
-function isRecord2(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -2493,6 +2663,7 @@ var CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 var DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
 var GITHUB_COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
 var OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
+var OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits";
 var VERCEL_AI_GATEWAY_CREDITS_URL = "https://ai-gateway.vercel.sh/v1/credits";
 var OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 var KIMI_CODING_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
@@ -2592,9 +2763,67 @@ var SUPPORTED_ADAPTERS = [
     id: "openrouter",
     displayName: "OpenRouter",
     semantics: { kind: "api-key", label: "API-key spend limits" },
-    async query(auth, signal, timeoutMs) {
-      const payload = await fetchProviderJson(OPENROUTER_KEY_URL, auth, signal, timeoutMs, "OpenRouter key endpoint");
-      return normalizeOpenRouterKeyPayload(payload, Date.now());
+    async query(auth, signal, timeoutMs, guard) {
+      if (!guard) throw new Error("OpenRouter usage requires request-boundary revalidation.");
+      const startedAt = Date.now();
+      await guard();
+      const keyPayload = await fetchProviderJson(
+        OPENROUTER_KEY_URL,
+        auth,
+        signal,
+        remainingTimeout2(timeoutMs, startedAt, "fetching OpenRouter key usage"),
+        "OpenRouter key endpoint",
+        { redirect: "error" }
+      );
+      await guard();
+      const keyReport = normalizeOpenRouterKeyPayload(keyPayload, Date.now());
+      const managementAuth = auth.managementAuth;
+      if (!managementAuth) {
+        return {
+          ...keyReport,
+          notes: [
+            ...keyReport.notes ?? [],
+            "Account balance requires OPENROUTER_MANAGEMENT_API_KEY or an owner-private OpenRouter credentials file."
+          ]
+        };
+      }
+      const { managementAuth: _managementAuth, auth: _preservedAuth, ...requestAuth } = auth;
+      const creditsAuth = {
+        ...requestAuth,
+        apiKey: managementAuth.apiKey,
+        headers: managementAuth.headers,
+        secrets: [...requestAuth.secrets, managementAuth.apiKey, managementAuth.headers.Authorization].filter(
+          (value) => Boolean(value)
+        )
+      };
+      let accountReport;
+      try {
+        await guard();
+        const creditsPayload = await fetchProviderJson(
+          OPENROUTER_CREDITS_URL,
+          creditsAuth,
+          signal,
+          remainingTimeout2(timeoutMs, startedAt, "fetching OpenRouter account credits"),
+          "OpenRouter account credits endpoint",
+          {
+            redirect: "error",
+            responseError: (status) => status === 401 || status === 403 ? new Error("OpenRouter account credits endpoint requires a valid Management API key.") : void 0
+          }
+        );
+        await guard();
+        accountReport = normalizeOpenRouterCreditsPayload(creditsPayload, Date.now());
+      } catch (error) {
+        if (isStaleExtensionContextError(error) || isAbortError(error)) throw error;
+        return {
+          ...keyReport,
+          notes: [
+            ...keyReport.notes ?? [],
+            "Account balance unavailable; showing API-key usage.",
+            `Account balance error: ${redactUsageError(errorMessage(error), creditsAuth.secrets)}`
+          ]
+        };
+      }
+      return mergeOpenRouterAccountCredits(keyReport, accountReport, managementAuth.source);
     }
   },
   {
@@ -2762,7 +2991,7 @@ function adapterForProvider(providerId) {
 function isStaleExtensionContextError(error) {
   return error instanceof Error && error.message.includes("This extension ctx is stale after session replacement or reload");
 }
-async function resolveUsageAuth(ctx, adapter, salt = AUTH_FINGERPRINT_SALT, credentialReader = readStoredCredential2, candidateReader) {
+async function resolveUsageAuth(ctx, adapter, salt = AUTH_FINGERPRINT_SALT, credentialReader = readStoredCredential2, candidateReader, openRouterCredentials) {
   if (ctx.model?.provider === adapter.id && !hasOfficialOrigin(ctx.model, adapter.id)) {
     throw new Error(
       `${adapter.displayName} usage cannot send a custom provider base URL credential to the official usage endpoint.`
@@ -2806,6 +3035,13 @@ async function resolveUsageAuth(ctx, adapter, salt = AUTH_FINGERPRINT_SALT, cred
   }
   const auth = modelAuth ?? providerResult?.auth;
   if (!auth) return void 0;
+  if (adapter.id === "openrouter" && !authorizationFrom(auth)) return void 0;
+  const managementCredentials = adapter.id === "openrouter" ? openRouterCredentials ?? resolveOpenRouterManagementCredentialsSync() : void 0;
+  const managementAuth = managementCredentials?.managementApiKey ? {
+    apiKey: managementCredentials.managementApiKey,
+    headers: { Authorization: `Bearer ${managementCredentials.managementApiKey}` },
+    ...managementCredentials.source ? { source: managementCredentials.source } : {}
+  } : void 0;
   const finalize = (resolved) => {
     const preservedAuth = { ...providerResult?.auth ?? auth };
     const env = providerResult?.env ?? modelAuth?.env;
@@ -2816,7 +3052,9 @@ async function resolveUsageAuth(ctx, adapter, salt = AUTH_FINGERPRINT_SALT, cred
       ...Object.values(preservedAuth.headers ?? {}),
       ...Object.values(env ?? {}),
       modelAuth?.apiKey,
-      ...Object.values(modelAuth?.headers ?? {})
+      ...Object.values(modelAuth?.headers ?? {}),
+      managementAuth?.apiKey,
+      ...Object.values(managementAuth?.headers ?? {})
     ].filter((value) => typeof value === "string" && value.length > 0);
     return {
       ...resolved,
@@ -2824,6 +3062,7 @@ async function resolveUsageAuth(ctx, adapter, salt = AUTH_FINGERPRINT_SALT, cred
       ...env ? { env: { ...env } } : {},
       ...source ? { source } : {},
       effectiveBaseUrl,
+      ...managementAuth ? { managementAuth } : {},
       secrets: [.../* @__PURE__ */ new Set([...resolved.secrets, ...redactionInputs])],
       fingerprint: fingerprintResolvedAuth(
         {
@@ -2832,7 +3071,10 @@ async function resolveUsageAuth(ctx, adapter, salt = AUTH_FINGERPRINT_SALT, cred
           baseUrl: effectiveBaseUrl,
           env,
           source,
-          providerAuth: preservedAuth
+          providerAuth: preservedAuth,
+          managementApiKey: managementAuth?.apiKey,
+          managementHeaders: managementAuth?.headers,
+          managementSource: managementAuth?.source
         },
         salt
       )
@@ -2913,7 +3155,8 @@ async function queryProviderUsage(adapter, auth, signal, timeoutMs, guard, targe
     );
   } catch (error) {
     if (isStaleExtensionContextError(error) || isAbortError(error)) throw error;
-    throw new Error(redactUsageError(errorMessage(error), auth.secrets));
+    const secrets = auth.managementAuth ? [...auth.secrets, auth.managementAuth.apiKey, ...Object.values(auth.managementAuth.headers)] : auth.secrets;
+    throw new Error(redactUsageError(errorMessage(error), secrets));
   }
 }
 function providerIsConfigured(ctx, providerId) {
@@ -3666,11 +3909,19 @@ function headerValue2(headers, name) {
 // src/format.ts
 var BAR_SEGMENTS = 20;
 var VALUE_COLUMN = 29;
+var OPENROUTER_ACCOUNT_CREDIT_METRIC_IDS = /* @__PURE__ */ new Set([
+  "account-credits-purchased",
+  "account-credits-used",
+  "account-credits-remaining"
+]);
 function formatUsageReport(report2, displayState) {
   const stateLabel = displayState === "current" ? "Current" : "Configured";
   const title = report2.providerId === "baseten" ? "Baseten Model APIs Spend" : report2.providerId === "deepseek" ? "DeepSeek API Balance" : report2.providerId === "fireworks" ? "Fireworks API Spend" : report2.providerId === "vercel-ai-gateway" ? "Vercel AI Gateway Credits" : report2.providerId === "moonshotai" || report2.providerId === "moonshotai-cn" ? `${report2.providerName} Balance` : report2.providerId === "minimax" || report2.providerId === "minimax-cn" ? report2.source === "minimax-account-balance" ? `${report2.providerName} API Balance` : `${report2.providerName} Token Plan` : `${report2.providerName} Usage`;
   const lines = [`${title} \xB7 ${stateLabel}`];
-  if (report2.accountLabel) lines.push(`Account: ${report2.accountLabel}`);
+  if (report2.accountLabel) {
+    const label = report2.providerId === "openrouter" && report2.source === "openrouter-key+credits" ? "Key" : "Account";
+    lines.push(`${label}: ${report2.accountLabel}`);
+  }
   lines.push(`Semantics: ${report2.semantics.label}`, "");
   if (report2.providerId === "baseten") formatBasetenReport(lines, report2);
   else if (report2.providerId === "openai-codex") formatCodexReport(lines, report2);
@@ -3704,6 +3955,10 @@ function formatUsageStatusline(report2, model, now = Date.now(), showCodexResetC
   if (report2.providerId === "vercel-ai-gateway") return formatVercelAIGatewayStatusline(report2);
   if (report2.providerId === "github-copilot") return formatGitHubCopilotStatusline(report2);
   if (report2.providerId === "openrouter") {
+    const accountRemaining = report2.metrics.find((metric2) => metric2.id === "account-credits-remaining");
+    if (typeof accountRemaining?.value === "number") {
+      return `openrouter ${formatSignedUsd(accountRemaining.value)} left`;
+    }
     const limit = report2.buckets.find((bucket) => bucket.id === "key-limit");
     if (limit?.remaining !== void 0) return `openrouter ${formatUsd(limit.remaining)} left`;
     const total = report2.metrics.find((metric2) => metric2.id === "usage-total");
@@ -3862,13 +4117,23 @@ function percentRemaining(bucket) {
   return Math.round(clampPercent4(bucket.remaining / bucket.limit * 100));
 }
 function formatOpenRouterReport(lines, report2) {
+  const isAccountCreditMetric = (metric2) => OPENROUTER_ACCOUNT_CREDIT_METRIC_IDS.has(metric2.id);
+  const accountMetrics = report2.metrics.filter(isAccountCreditMetric);
+  const keyMetrics = report2.metrics.filter((metric2) => !isAccountCreditMetric(metric2));
+  if (accountMetrics.length > 0) {
+    lines.push("", "Account credits:");
+    for (const metric2 of accountMetrics) {
+      const value = typeof metric2.value === "number" ? formatSignedUsd(metric2.value) : String(metric2.value);
+      lines.push(`${`${metric2.label}:`.padEnd(VALUE_COLUMN)}${value}`);
+    }
+  }
   const limit = report2.buckets.find((bucket) => bucket.id === "key-limit");
   if (limit) {
     const period = limit.period ? ` (${limit.period})` : "";
     const value = limit.remaining === void 0 ? `${formatUsd(limit.limit ?? 0)} cap; remaining unavailable` : `${formatUsd(limit.remaining)} of ${formatUsd(limit.limit ?? 0)} left`;
     lines.push(`${`Key limit${period}:`.padEnd(VALUE_COLUMN)}${value}`);
   }
-  for (const metric2 of report2.metrics) {
+  for (const metric2 of keyMetrics) {
     lines.push(`${`${metric2.label}:`.padEnd(VALUE_COLUMN)}${formatMetricValue(metric2.value, metric2.unit)}`);
   }
 }
@@ -4240,6 +4505,9 @@ function formatMetricValue(value, unit) {
 function formatUsd(value) {
   return `$${value.toFixed(2)}`;
 }
+function formatSignedUsd(value) {
+  return value < 0 ? `-$${Math.abs(value).toFixed(2)}` : formatUsd(value);
+}
 function formatReset(epochSeconds) {
   const reset = new Date(epochSeconds * 1e3);
   if (Number.isNaN(reset.getTime())) return "at an unknown time";
@@ -4257,10 +4525,10 @@ function clampPercent4(value) {
 
 // src/settings.ts
 import { randomUUID } from "node:crypto";
-import { constants as constants2 } from "node:fs";
+import { constants as constants3 } from "node:fs";
 import { chmod, mkdir, open as open2, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join as join2 } from "node:path";
-import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
+import { basename, dirname, join as join3 } from "node:path";
+import { getAgentDir as getAgentDir3 } from "@earendil-works/pi-coding-agent";
 var USAGE_SETTINGS_FILE = "pi-usage.json";
 var MAX_USAGE_SETTINGS_BYTES = 64 * 1024;
 var DEFAULT_USAGE_SETTINGS = Object.freeze({
@@ -4269,10 +4537,10 @@ var DEFAULT_USAGE_SETTINGS = Object.freeze({
   selectedTargets: Object.freeze({})
 });
 function usageSettingsPath() {
-  return join2(getAgentDir2(), USAGE_SETTINGS_FILE);
+  return join3(getAgentDir3(), USAGE_SETTINGS_FILE);
 }
 function normalizeUsageSettings(value) {
-  if (!isRecord3(value)) return void 0;
+  if (!isRecord4(value)) return void 0;
   if (Object.hasOwn(value, "codexFastMode") && typeof value.codexFastMode !== "boolean") {
     return void 0;
   }
@@ -4297,7 +4565,7 @@ function normalizeUsageSettings(value) {
 async function loadUsageSettings(path = usageSettingsPath(), signal) {
   throwIfAborted(signal);
   try {
-    const handle = await open2(path, constants2.O_RDONLY | constants2.O_NOFOLLOW);
+    const handle = await open2(path, constants3.O_RDONLY | constants3.O_NOFOLLOW);
     let text;
     try {
       const stats = await handle.stat();
@@ -4313,7 +4581,7 @@ async function loadUsageSettings(path = usageSettingsPath(), signal) {
     throwIfAborted(signal);
     const document = JSON.parse(text);
     const settings = normalizeUsageSettings(document);
-    if (!settings || !isRecord3(document)) throw new Error("invalid settings shape");
+    if (!settings || !isRecord4(document)) throw new Error("invalid settings shape");
     return { kind: "loaded", path, settings, document };
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -4437,7 +4705,7 @@ async function saveUsageSettingsDocument(path, mutate, operations, signal, expec
   const settings = normalizeUsageSettings(document);
   if (!settings) throw new Error("Refusing to save invalid pi-usage settings");
   const directory = dirname(path);
-  const temporaryPath = join2(directory, `.${basename(path)}.${randomUUID()}.tmp`);
+  const temporaryPath = join3(directory, `.${basename(path)}.${randomUUID()}.tmp`);
   await mkdir(directory, { recursive: true, mode: 448 });
   throwIfAborted(signal);
   try {
@@ -4492,7 +4760,7 @@ async function chmodPrivate(path) {
 function throwIfAborted(signal) {
   if (signal?.aborted) throw new DOMException("Settings operation aborted", "AbortError");
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isNodeError(error) {
@@ -4500,7 +4768,7 @@ function isNodeError(error) {
 }
 function normalizeSelectedTargets(value) {
   if (value === void 0) return {};
-  if (!isRecord3(value)) return void 0;
+  if (!isRecord4(value)) return void 0;
   const targets = {};
   for (const [providerId, targetId] of Object.entries(value)) {
     if (!isProviderId(providerId) || !isBoundedTargetId(targetId)) return void 0;
@@ -4603,7 +4871,7 @@ function registerCodexFastMode(pi, settingsRuntime, refreshStatus, options = {})
     const key = activeRequestKey(ctx);
     if (key && ctx.model) {
       pendingFastRequests.set(key, {
-        fastRequested: isRecord4(rewritten) && rewritten.service_tier === "priority",
+        fastRequested: isRecord5(rewritten) && rewritten.service_tier === "priority",
         model: ctx.model
       });
     }
@@ -4637,7 +4905,7 @@ function activeRequestKey(ctx) {
   return model ? `${ctx.sessionManager.getSessionId()}:${model.provider}/${model.id}` : void 0;
 }
 function consumeFastRequest(ctx, message, pending) {
-  if (!isRecord4(message) || message.role !== "assistant") return NO_FAST_REQUEST;
+  if (!isRecord5(message) || message.role !== "assistant") return NO_FAST_REQUEST;
   const key = messageRequestKey(ctx, message);
   if (!key) return NO_FAST_REQUEST;
   const request = pending.get(key);
@@ -4648,7 +4916,7 @@ function messageRequestKey(ctx, message) {
   if (typeof message.provider !== "string" || typeof message.model !== "string") return void 0;
   return `${ctx.sessionManager.getSessionId()}:${message.provider}/${message.model}`;
 }
-function isRecord4(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isAbortError2(error) {
@@ -4970,6 +5238,7 @@ function usageExtension(pi, dependencies = {}) {
       "minimax-cn",
       "moonshotai",
       "moonshotai-cn",
+      "openrouter",
       "vercel-ai-gateway",
       "xai",
       "zai",
@@ -5937,6 +6206,7 @@ export {
   listCodexResetCredits,
   listUsageTargets,
   loadUsageSettings,
+  mergeOpenRouterAccountCredits,
   miniMaxUsageKind,
   normalizeBasetenBillingUsagePayload,
   normalizeCodexBackendPayload,
@@ -5949,6 +6219,7 @@ export {
   normalizeMiniMaxUsagePayload,
   normalizeMoonshotBalancePayload,
   normalizeOpenCodeZenPayload,
+  normalizeOpenRouterCreditsPayload,
   normalizeOpenRouterKeyPayload,
   normalizeStepFunPlanStatusPayload,
   normalizeStepFunRateLimitPayload,

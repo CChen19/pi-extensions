@@ -69,6 +69,9 @@ export function fingerprintResolvedAuth(
       headers?: Record<string, string | null>;
       baseUrl?: string;
     };
+    managementApiKey?: string;
+    managementHeaders?: Record<string, string>;
+    managementSource?: string;
   },
   salt: Uint8Array,
 ): string {
@@ -79,6 +82,17 @@ export function fingerprintResolvedAuth(
   const providerHeaders = Object.entries(auth.providerAuth?.headers ?? {})
     .map(([name, value]) => [name.toLowerCase(), value] as const)
     .sort(([left], [right]) => left.localeCompare(right));
+  const managementHeaders = Object.entries(auth.managementHeaders ?? {})
+    .map(([name, value]) => [name.toLowerCase(), value] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+  const managementAuth =
+    auth.managementApiKey !== undefined || auth.managementHeaders !== undefined || auth.managementSource !== undefined
+      ? {
+          apiKey: auth.managementApiKey ?? "",
+          headers: managementHeaders,
+          source: auth.managementSource ?? "",
+        }
+      : undefined;
   const canonical = JSON.stringify({
     apiKey: auth.apiKey ?? "",
     headers,
@@ -90,6 +104,7 @@ export function fingerprintResolvedAuth(
       headers: providerHeaders,
       baseUrl: auth.providerAuth?.baseUrl ?? "",
     },
+    ...(managementAuth ? { managementAuth } : {}),
   });
   return createHmac("sha256", salt).update(canonical).digest("hex");
 }

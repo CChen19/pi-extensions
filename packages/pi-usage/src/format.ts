@@ -2,6 +2,11 @@ import type { ProviderUsageState, UsageBucket, UsageDisplayState, UsageModel, Us
 
 const BAR_SEGMENTS = 20;
 const VALUE_COLUMN = 29;
+const OPENROUTER_ACCOUNT_CREDIT_METRIC_IDS = new Set([
+  "account-credits-purchased",
+  "account-credits-used",
+  "account-credits-remaining",
+]);
 
 export function formatUsageReport(report: UsageReport, displayState: UsageDisplayState): string {
   const stateLabel = displayState === "current" ? "Current" : "Configured";
@@ -22,7 +27,10 @@ export function formatUsageReport(report: UsageReport, displayState: UsageDispla
                   : `${report.providerName} Token Plan`
                 : `${report.providerName} Usage`;
   const lines = [`${title} · ${stateLabel}`];
-  if (report.accountLabel) lines.push(`Account: ${report.accountLabel}`);
+  if (report.accountLabel) {
+    const label = report.providerId === "openrouter" && report.source === "openrouter-key+credits" ? "Key" : "Account";
+    lines.push(`${label}: ${report.accountLabel}`);
+  }
   lines.push(`Semantics: ${report.semantics.label}`, "");
 
   if (report.providerId === "baseten") formatBasetenReport(lines, report);
@@ -64,6 +72,10 @@ export function formatUsageStatusline(
   if (report.providerId === "vercel-ai-gateway") return formatVercelAIGatewayStatusline(report);
   if (report.providerId === "github-copilot") return formatGitHubCopilotStatusline(report);
   if (report.providerId === "openrouter") {
+    const accountRemaining = report.metrics.find((metric) => metric.id === "account-credits-remaining");
+    if (typeof accountRemaining?.value === "number") {
+      return `openrouter ${formatSignedUsd(accountRemaining.value)} left`;
+    }
     const limit = report.buckets.find((bucket) => bucket.id === "key-limit");
     if (limit?.remaining !== undefined) return `openrouter ${formatUsd(limit.remaining)} left`;
     const total = report.metrics.find((metric) => metric.id === "usage-total");
@@ -244,6 +256,18 @@ function percentRemaining(bucket: UsageBucket): number {
 }
 
 function formatOpenRouterReport(lines: string[], report: UsageReport): void {
+  const isAccountCreditMetric = (metric: (typeof report.metrics)[number]) =>
+    OPENROUTER_ACCOUNT_CREDIT_METRIC_IDS.has(metric.id);
+  const accountMetrics = report.metrics.filter(isAccountCreditMetric);
+  const keyMetrics = report.metrics.filter((metric) => !isAccountCreditMetric(metric));
+  if (accountMetrics.length > 0) {
+    lines.push("", "Account credits:");
+    for (const metric of accountMetrics) {
+      const value = typeof metric.value === "number" ? formatSignedUsd(metric.value) : String(metric.value);
+      lines.push(`${`${metric.label}:`.padEnd(VALUE_COLUMN)}${value}`);
+    }
+  }
+
   const limit = report.buckets.find((bucket) => bucket.id === "key-limit");
   if (limit) {
     const period = limit.period ? ` (${limit.period})` : "";
@@ -253,7 +277,7 @@ function formatOpenRouterReport(lines: string[], report: UsageReport): void {
         : `${formatUsd(limit.remaining)} of ${formatUsd(limit.limit ?? 0)} left`;
     lines.push(`${`Key limit${period}:`.padEnd(VALUE_COLUMN)}${value}`);
   }
-  for (const metric of report.metrics) {
+  for (const metric of keyMetrics) {
     lines.push(`${`${metric.label}:`.padEnd(VALUE_COLUMN)}${formatMetricValue(metric.value, metric.unit)}`);
   }
 }
@@ -678,6 +702,10 @@ function formatMetricValue(value: number | string, unit: UsageBucket["unit"] | u
 
 function formatUsd(value: number): string {
   return `$${value.toFixed(2)}`;
+}
+
+function formatSignedUsd(value: number): string {
+  return value < 0 ? `-$${Math.abs(value).toFixed(2)}` : formatUsd(value);
 }
 
 function formatReset(epochSeconds: number): string {

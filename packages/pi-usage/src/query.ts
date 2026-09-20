@@ -13,7 +13,15 @@ import { normalizeKimiCodingUsagePayload } from "./providers/kimi-coding.js";
 import { type MiniMaxProviderId, miniMaxUsageKind, normalizeMiniMaxUsagePayload } from "./providers/minimax.js";
 import { normalizeMoonshotBalancePayload } from "./providers/moonshot.js";
 import { normalizeOpenCodeZenPayload } from "./providers/opencode-zen.js";
-import { normalizeOpenRouterKeyPayload } from "./providers/openrouter.js";
+import {
+  mergeOpenRouterAccountCredits,
+  normalizeOpenRouterCreditsPayload,
+  normalizeOpenRouterKeyPayload,
+} from "./providers/openrouter.js";
+import {
+  type OpenRouterManagementCredentials,
+  resolveOpenRouterManagementCredentialsSync,
+} from "./providers/openrouter-auth.js";
 import { normalizeStepFunPlanStatusPayload, normalizeStepFunRateLimitPayload } from "./providers/stepfun.js";
 import {
   refreshStepFunSession,
@@ -39,6 +47,7 @@ import type {
   MiniMaxUsagePayload,
   MoonshotBalancePayload,
   OpenCodeZenPayload,
+  OpenRouterCreditsPayload,
   OpenRouterKeyPayload,
   PiModel,
   ResolvedUsageAuth,
@@ -64,6 +73,7 @@ const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
 const GITHUB_COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
 const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
+const OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits";
 const VERCEL_AI_GATEWAY_CREDITS_URL = "https://ai-gateway.vercel.sh/v1/credits";
 const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 const KIMI_CODING_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
@@ -165,9 +175,72 @@ export const SUPPORTED_ADAPTERS: readonly UsageProviderAdapter[] = [
     id: "openrouter",
     displayName: "OpenRouter",
     semantics: { kind: "api-key", label: "API-key spend limits" },
-    async query(auth, signal, timeoutMs) {
-      const payload = await fetchProviderJson(OPENROUTER_KEY_URL, auth, signal, timeoutMs, "OpenRouter key endpoint");
-      return normalizeOpenRouterKeyPayload(payload as OpenRouterKeyPayload, Date.now());
+    async query(auth, signal, timeoutMs, guard) {
+      if (!guard) throw new Error("OpenRouter usage requires request-boundary revalidation.");
+      const startedAt = Date.now();
+      await guard();
+      const keyPayload = (await fetchProviderJson(
+        OPENROUTER_KEY_URL,
+        auth,
+        signal,
+        remainingTimeout(timeoutMs, startedAt, "fetching OpenRouter key usage"),
+        "OpenRouter key endpoint",
+        { redirect: "error" },
+      )) as OpenRouterKeyPayload;
+      await guard();
+      const keyReport = normalizeOpenRouterKeyPayload(keyPayload, Date.now());
+
+      const managementAuth = auth.managementAuth;
+      if (!managementAuth) {
+        return {
+          ...keyReport,
+          notes: [
+            ...(keyReport.notes ?? []),
+            "Account balance requires OPENROUTER_MANAGEMENT_API_KEY or an owner-private OpenRouter credentials file.",
+          ],
+        };
+      }
+
+      const { managementAuth: _managementAuth, auth: _preservedAuth, ...requestAuth } = auth;
+      const creditsAuth: ResolvedUsageAuth = {
+        ...requestAuth,
+        apiKey: managementAuth.apiKey,
+        headers: managementAuth.headers,
+        secrets: [...requestAuth.secrets, managementAuth.apiKey, managementAuth.headers.Authorization].filter(
+          (value): value is string => Boolean(value),
+        ),
+      };
+      let accountReport: UsageReport | undefined;
+      try {
+        await guard();
+        const creditsPayload = (await fetchProviderJson(
+          OPENROUTER_CREDITS_URL,
+          creditsAuth,
+          signal,
+          remainingTimeout(timeoutMs, startedAt, "fetching OpenRouter account credits"),
+          "OpenRouter account credits endpoint",
+          {
+            redirect: "error",
+            responseError: (status) =>
+              status === 401 || status === 403
+                ? new Error("OpenRouter account credits endpoint requires a valid Management API key.")
+                : undefined,
+          },
+        )) as OpenRouterCreditsPayload;
+        await guard();
+        accountReport = normalizeOpenRouterCreditsPayload(creditsPayload, Date.now());
+      } catch (error) {
+        if (isStaleExtensionContextError(error) || isAbortError(error)) throw error;
+        return {
+          ...keyReport,
+          notes: [
+            ...(keyReport.notes ?? []),
+            "Account balance unavailable; showing API-key usage.",
+            `Account balance error: ${redactUsageError(errorMessage(error), creditsAuth.secrets)}`,
+          ],
+        };
+      }
+      return mergeOpenRouterAccountCredits(keyReport, accountReport, managementAuth.source);
     },
   },
   {
@@ -358,6 +431,7 @@ export async function resolveUsageAuth(
   salt: Uint8Array = AUTH_FINGERPRINT_SALT,
   credentialReader: StoredCredentialReader = readStoredCredential,
   candidateReader?: OAuthCredentialCandidateReader,
+  openRouterCredentials?: OpenRouterManagementCredentials,
 ): Promise<ResolvedUsageAuth | undefined> {
   if (ctx.model?.provider === adapter.id && !hasOfficialOrigin(ctx.model, adapter.id)) {
     throw new Error(
@@ -406,6 +480,18 @@ export async function resolveUsageAuth(
   }
   const auth = modelAuth ?? providerResult?.auth;
   if (!auth) return undefined;
+  if (adapter.id === "openrouter" && !authorizationFrom(auth)) return undefined;
+
+  const managementCredentials =
+    adapter.id === "openrouter" ? (openRouterCredentials ?? resolveOpenRouterManagementCredentialsSync()) : undefined;
+  const managementAuth = managementCredentials?.managementApiKey
+    ? {
+        apiKey: managementCredentials.managementApiKey,
+        headers: { Authorization: `Bearer ${managementCredentials.managementApiKey}` },
+        ...(managementCredentials.source ? { source: managementCredentials.source } : {}),
+      }
+    : undefined;
+
   const finalize = (resolved: ResolvedUsageAuth): ResolvedUsageAuth => {
     const preservedAuth = { ...(providerResult?.auth ?? auth) };
     const env = providerResult?.env ?? modelAuth?.env;
@@ -417,6 +503,8 @@ export async function resolveUsageAuth(
       ...Object.values(env ?? {}),
       modelAuth?.apiKey,
       ...Object.values(modelAuth?.headers ?? {}),
+      managementAuth?.apiKey,
+      ...Object.values(managementAuth?.headers ?? {}),
     ].filter((value): value is string => typeof value === "string" && value.length > 0);
     return {
       ...resolved,
@@ -424,6 +512,7 @@ export async function resolveUsageAuth(
       ...(env ? { env: { ...env } } : {}),
       ...(source ? { source } : {}),
       effectiveBaseUrl,
+      ...(managementAuth ? { managementAuth } : {}),
       secrets: [...new Set([...resolved.secrets, ...redactionInputs])],
       fingerprint: fingerprintResolvedAuth(
         {
@@ -433,6 +522,9 @@ export async function resolveUsageAuth(
           env,
           source,
           providerAuth: preservedAuth,
+          managementApiKey: managementAuth?.apiKey,
+          managementHeaders: managementAuth?.headers,
+          managementSource: managementAuth?.source,
         },
         salt,
       ),
@@ -532,7 +624,10 @@ export async function queryProviderUsage(
     );
   } catch (error) {
     if (isStaleExtensionContextError(error) || isAbortError(error)) throw error;
-    throw new Error(redactUsageError(errorMessage(error), auth.secrets));
+    const secrets = auth.managementAuth
+      ? [...auth.secrets, auth.managementAuth.apiKey, ...Object.values(auth.managementAuth.headers)]
+      : auth.secrets;
+    throw new Error(redactUsageError(errorMessage(error), secrets));
   }
 }
 

@@ -3,8 +3,10 @@ import { test } from "vitest";
 import {
   formatUsageReport,
   formatUsageStatusline,
+  mergeOpenRouterAccountCredits,
   normalizeCodexBackendPayload,
   normalizeGitHubCopilotUsagePayload,
+  normalizeOpenRouterCreditsPayload,
   normalizeOpenRouterKeyPayload,
 } from "../src/index.js";
 
@@ -283,6 +285,58 @@ test("OpenRouter adapter distinguishes unlimited keys from incomplete capped res
 test("OpenRouter adapter rejects malformed or empty documented responses", () => {
   assert.throws(() => normalizeOpenRouterKeyPayload({}, 0), /data/);
   assert.throws(() => normalizeOpenRouterKeyPayload({ data: { label: "empty" } }, 0), /no displayable usage data/);
+});
+
+test("OpenRouter account credits reject malformed documented responses", () => {
+  assert.throws(
+    () => normalizeOpenRouterCreditsPayload({ data: { total_credits: "100", total_usage: 20 } }, 0),
+    /total_credits.*non-negative number/,
+  );
+  assert.throws(
+    () => normalizeOpenRouterCreditsPayload({ data: { total_credits: 100 } }, 0),
+    /total_usage.*non-negative number/,
+  );
+});
+
+test("OpenRouter account credits calculate and display the account-wide remaining balance", () => {
+  const report = normalizeOpenRouterCreditsPayload(
+    {
+      data: {
+        total_credits: 100,
+        total_usage: 25.25,
+      },
+    },
+    1_000,
+  );
+
+  assert.equal(report.source, "openrouter-credits");
+  assert.deepEqual(report.semantics, { kind: "api-key", label: "Account credits" });
+  assert.deepEqual(report.metrics, [
+    { id: "account-credits-purchased", label: "Credits purchased", value: 100, unit: "usd" },
+    { id: "account-credits-used", label: "Credits used", value: 25.25, unit: "usd" },
+    { id: "account-credits-remaining", label: "Credits remaining", value: 74.75, unit: "usd" },
+  ]);
+  assert.equal(formatUsageStatusline(report), "openrouter $74.75 left");
+  assert.match(formatUsageReport(report, "current"), /Account credits:/);
+  assert.match(formatUsageReport(report, "current"), /Credits remaining:\s+\$74\.75/);
+});
+
+test("OpenRouter account credits preserve overage and take statusline priority over key limits", () => {
+  const accountReport = normalizeOpenRouterCreditsPayload({ data: { total_credits: 10, total_usage: 11.5 } }, 1_000);
+  const keyReport = normalizeOpenRouterKeyPayload(
+    { data: { label: "Production key", limit: 50, limit_remaining: 49, usage: 1 } },
+    1_000,
+  );
+  const merged = mergeOpenRouterAccountCredits(keyReport, accountReport, "file");
+
+  assert.equal(accountReport.metrics[2]?.value, -1.5);
+  assert.equal(formatUsageStatusline(accountReport), "openrouter -$1.50 left");
+  assert.equal(formatUsageStatusline(merged), "openrouter -$1.50 left");
+  assert.match(formatUsageReport(merged, "current"), /Account credits:/);
+  assert.match(formatUsageReport(merged, "current"), /Key limit:/);
+  assert.match(formatUsageReport(merged, "current"), /Key: Production key/);
+  assert.doesNotMatch(formatUsageReport(merged, "current"), /Account: Production key/);
+  assert.match(formatUsageReport(merged, "current"), /Account credits are account-wide/);
 });
 
 test("Codex adapter preserves credit availability without a numeric balance", () => {

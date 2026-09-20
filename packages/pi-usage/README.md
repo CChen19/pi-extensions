@@ -9,7 +9,7 @@ xAI OAuth subscription reporting follows the reviewed Grok Build contract and ru
 ## ✨ Features
 
 - Shows active-account usage and next actions through `/usage`.
-- Reports subscription allowances, API balances, and spending for the supported providers listed below without mixing their billing semantics.
+- Reports subscription allowances, API balances, account credits, and spending for the supported providers listed below without mixing their billing semantics.
 - Toggles persistent Codex Fast routing through `/fast` or the usage menu.
 - Redeems eligible Codex resets only after fresh account matching and explicit confirmation.
 - Refreshes one or all configured providers with bounded concurrency while preserving partial results.
@@ -48,6 +48,24 @@ The package declares `dist/index.ts`, so an unbuilt local checkout must run the 
 Run `/usage` in TUI or RPC mode to inspect the active provider, refresh its usage, or choose another configured provider.
 When a provider exposes several billing targets, `/usage` asks for one target before querying usage.
 Run `/fast` to toggle Fast mode for a supported active Codex model.
+
+### OpenRouter account balance
+
+OpenRouter's `/api/v1/credits` endpoint is account-wide and requires a Management API key. Configure one explicitly:
+
+```bash
+export OPENROUTER_MANAGEMENT_API_KEY='sk-or-v1-...'
+```
+
+Alternatively, store only the key in an owner-private file:
+
+```json
+{
+  "managementApiKey": "sk-or-v1-..."
+}
+```
+
+Save it as `~/.pi/agent/pi-usage-openrouter.json` with mode `0600`, or set `OPENROUTER_CREDENTIALS_FILE` to another private JSON path. The environment value takes precedence. The Management API key is used only for the credits request; the normal inference key remains responsible for `/api/v1/key` and model traffic. On platforms where Node does not expose a no-follow open flag (including Windows), file fallback is disabled and the environment variable must be used.
 
 ## 💬 Commands
 
@@ -118,7 +136,7 @@ Currencies and billing targets remain separate.
 | Moonshot AI Global/China | Current API balance in USD/CNY |
 | MiniMax Global/China | Token Plan windows or pay-as-you-go API balance |
 | GitHub Copilot | AI credits, premium requests, or Free-plan chat allowance |
-| OpenRouter | Per-key credit limits and spending windows |
+| OpenRouter | Per-key credit limits and spending windows, plus account-wide credits when a Management API key is configured |
 | DeepSeek | Exact current CNY and USD API balances |
 | Fireworks | Rated trailing 30-day spend for one selected account |
 | Vercel AI Gateway | Team credit balance and lifetime spend |
@@ -152,6 +170,7 @@ Fireworks publishes exact per-currency rated spend totals and reports when no ra
 Moonshot AI publishes the available balance with its region-native currency.
 Vercel AI Gateway publishes the exact current USD credit balance.
 MiniMax publishes Token Plan window percentages or the regional pay-as-you-go available balance.
+OpenRouter publishes the account-wide remaining credit balance when a Management API key is configured (for example `openrouter $74.75 left`); otherwise it falls back to the inference key's remaining limit or spend.
 Baseten publishes the exact trailing 30-day Model APIs net subtotal after credits.
 xAI is always menu-only and never starts a scheduled status refresh.
 Z.AI statusline usage refreshes every five minutes while the selected model remains on Z.AI.
@@ -189,6 +208,7 @@ Moonshot balance requests send only the resolved Bearer credential to the matchi
 Vercel AI Gateway credit requests send only the resolved Bearer credential to `https://ai-gateway.vercel.sh/v1/credits` and refuse redirects.
 MiniMax usage requests send only the resolved API key to one deterministic endpoint on the matching official Global or China API root and refuse redirects.
 Baseten billing requests send only the resolved Bearer credential to `https://api.baseten.co/v1/billing/usage_summary` for an official Baseten model and refuse redirects.
+OpenRouter sends the inference key only to `/api/v1/key`. When account credits are enabled, it sends a separately configured Management API key only to `/api/v1/credits`; that key is never used for model requests and is excluded from Pi settings and logs.
 Pi extensions run with the user's process privileges, so the shared event bus is not a security boundary between installed extensions.
 Install only trusted extensions because they can read user files and process memory.
 Protocol v1 interoperability is characterized for the repository's supported Pi runtime.
@@ -208,6 +228,7 @@ An absent or incompatible peer preserves standalone fallback and fail-closed mis
 - Vercel AI Gateway reports current team credits and lifetime spend only; Custom Reporting and request-rate counters are not queried.
 - MiniMax Token Plan field semantics have changed over time; contradictory counts and percentages are reported as unavailable rather than guessed.
 - Baseten reports organization-wide Model APIs spend, not usage attributable only to Pi's current key; Dedicated and Training spend are excluded.
+- OpenRouter account credits require an explicit Management API key through `OPENROUTER_MANAGEMENT_API_KEY` or, on platforms with a safe no-follow file open, an owner-private `~/.pi/agent/pi-usage-openrouter.json` file. Without it, or when the credits request fails, `/usage` retains the per-key limit/spend fallback and notes that account balance is unavailable.
 - OpenRouter successful inference responses do not expose proactive request-rate counters; `/usage` reports the documented per-key credit/spend fields instead.
 - A provider may not return a safe human-readable account identity.
   In that case the provider and runtime credential state remain visible without exposing secrets.
@@ -233,7 +254,7 @@ The generated runtime is built from `src/index.ts` and does not import back into
 
 ## 🔎 Keywords
 
-Pi extension, Pi coding agent, usage, quota, DeepSeek API balance, DeepSeek balance, Fireworks API spend, Fireworks rated spend, Vercel AI Gateway credits, Vercel AI Gateway usage, Baseten Model APIs spend, Baseten usage, OpenAI Codex usage, ChatGPT subscription limits, Kimi For Coding, Kimi Coding Plan usage, Moonshot AI balance, Moonshot API balance, MiniMax Token Plan, MiniMax API balance, GitHub Copilot AI credits, GitHub Copilot premium requests, OpenRouter credits, xAI OAuth usage, Grok subscription allowance, API-key spend limits, TypeScript Pi package, npm Pi extension.
+Pi extension, Pi coding agent, usage, quota, DeepSeek API balance, DeepSeek balance, Fireworks API spend, Fireworks rated spend, Vercel AI Gateway credits, Vercel AI Gateway usage, Baseten Model APIs spend, Baseten usage, OpenAI Codex usage, ChatGPT subscription limits, Kimi For Coding, Kimi Coding Plan usage, Moonshot AI balance, Moonshot API balance, MiniMax Token Plan, MiniMax API balance, GitHub Copilot AI credits, GitHub Copilot premium requests, OpenRouter credits, OpenRouter account balance, OpenRouter Management API key, xAI OAuth usage, Grok subscription allowance, API-key spend limits, TypeScript Pi package, npm Pi extension.
 
 ## 📄 License
 
